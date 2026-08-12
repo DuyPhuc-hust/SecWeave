@@ -1,0 +1,36 @@
+{
+  "results": [
+    {
+      "check_id": "python.django.security.audit.sqli",
+      "path": "app/views.py",
+      "start": { "line": 42, "col": 5 },
+      "end": { "line": 42, "col": 48 },
+      "extra": {
+        "severity": "ERROR",
+        "lines": "cursor.execute(\"SELECT * FROM users WHERE id = %s\" % user_id)",
+        "message": "Potential SQL injection detected.",
+        "metadata": {
+          "cwe": [
+            "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+          ]
+        }
+      }
+    },
+    {
+      "check_id": "python.lang.security.audit.eval-detected",
+      "path": "app/utils.py",
+      "start": { "line": 10, "col": 1 },
+      "end": { "line": 10, "col": 20 },
+      "extra": {
+        "severity": "WARNING",
+        "lines": "eval(user_input)",
+        "message": "Detected use of eval().",
+        "metadata": {
+          "cwe": [
+            "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
+          ]
+        }
+      }
+    }
+  ]
+}

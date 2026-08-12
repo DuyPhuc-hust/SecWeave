@@ -1,0 +1,114 @@
+import json
+from typing import Any, Dict, List, Optional
+
+from pydantic import ValidationError
+
+from hypothesis_engine.llm_client.base import HypothesisLLMClient
+from shared.models.hypothesis import (
+    Hypothesis,
+    HypothesisProvenance,
+    HypothesisResult,
+    HypothesisStatus,
+)
+from shared.models.signal import NormalizedSignal
+
+REQUIRED_FIELDS = ("expected_behavior", "suspected_behavior", "observation_criteria")
+
+
+def _strip_markdown_json_fence(text: str) -> str:
+    """LLM thật hay bọc JSON trong ```json ... ``` dù prompt đã yêu cầu JSON thuần.
+    Chỉ xử lý đúng dạng fence phổ biến này — không cố đoán/sửa JSON hỏng kiểu khác,
+    để lỗi JSON thật sự vẫn được báo đúng là NOT_VERIFIABLE thay vì bị che giấu.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+class HypothesisEngine:
+    def __init__(self, llm_client: HypothesisLLMClient) -> None:
+        self._llm_client = llm_client
+
+    def generate_hypothesis(
+        self,
+        signal: NormalizedSignal,
+        source_snippet: Optional[str] = None,
+        verified_context: Optional[List[Dict[str, Any]]] = None,
+    ) -> HypothesisResult:
+        prompt = self._build_prompt(signal, source_snippet, verified_context)
+        raw_output = self._llm_client.generate(prompt)
+        return self._parse_response(raw_output, signal)
+
+    def _build_prompt(
+        self,
+        signal: NormalizedSignal,
+        source_snippet: Optional[str],
+        verified_context: Optional[List[Dict[str, Any]]],
+    ) -> str:
+        parts = [
+            "Bạn nhận một NormalizedSignal đã chuẩn hoá từ một scanner bảo mật.",
+            "Nhiệm vụ: đề xuất MỘT giả thuyết kiểm chứng được, KHÔNG kết luận có/không có lỗ hổng.",
+            "Trả về đúng JSON với các trường: verifiable (bool), và nếu verifiable=true thì kèm "
+            "expected_behavior, suspected_behavior, observation_criteria (đều là string). "
+            "Nếu verifiable=false, kèm reason (string) giải thích vì sao không đủ để lập giả thuyết.",
+            "BẮT BUỘC: viết toàn bộ nội dung text (expected_behavior, suspected_behavior, "
+            "observation_criteria, reason) bằng tiếng Anh — chỉ phần hướng dẫn này là tiếng Việt.",
+            f"Signal: {signal.model_dump_json()}",
+        ]
+        if source_snippet:
+            parts.append(f"Source code liên quan:\n{source_snippet}")
+        if verified_context:
+            parts.append(f"Ngữ cảnh đã verified từ lần chạy trước: {json.dumps(verified_context, ensure_ascii=False)}")
+        return "\n\n".join(parts)
+
+    def _parse_response(self, raw_output: str, signal: NormalizedSignal) -> HypothesisResult:
+        try:
+            data = json.loads(_strip_markdown_json_fence(raw_output))
+        except json.JSONDecodeError:
+            return HypothesisResult(
+                status=HypothesisStatus.NOT_VERIFIABLE,
+                reason="LLM trả về output không phải JSON hợp lệ",
+            )
+
+        if not isinstance(data, dict):
+            return HypothesisResult(
+                status=HypothesisStatus.NOT_VERIFIABLE,
+                reason="LLM trả về JSON không đúng cấu trúc object",
+            )
+
+        if data.get("verifiable") is False:
+            reason = data.get("reason") or "LLM đánh giá tín hiệu không đủ để lập giả thuyết"
+            return HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, reason=reason)
+
+        missing = [field for field in REQUIRED_FIELDS if not data.get(field)]
+        if missing:
+            return HypothesisResult(
+                status=HypothesisStatus.NOT_VERIFIABLE,
+                reason=f"LLM output thiếu field bắt buộc: {', '.join(missing)}",
+            )
+
+        try:
+            hypothesis = Hypothesis(
+                expected_behavior=data["expected_behavior"],
+                suspected_behavior=data["suspected_behavior"],
+                observation_criteria=data["observation_criteria"],
+                provenance=HypothesisProvenance(
+                    source_tool=signal.source.tool,
+                    source_signal_id=signal.signal_id,
+                    coverage=signal.source.coverage,
+                ),
+            )
+        except ValidationError as exc:
+            return HypothesisResult(
+                status=HypothesisStatus.NOT_VERIFIABLE,
+                reason=f"LLM output không khớp schema Hypothesis: {exc}",
+            )
+
+        return HypothesisResult(status=HypothesisStatus.HYPOTHESIS, hypothesis=hypothesis)

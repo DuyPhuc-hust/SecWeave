@@ -3,4 +3,11 @@
 A.html
 SecWeave.pdf
 
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.db
+.env
 .DS_Store

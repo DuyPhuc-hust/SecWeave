@@ -1,0 +1,24 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "requirements.txt",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "requirements.txt",
+      "Class": "lang-pkgs",
+      "Type": "pip",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2023-32681",
+          "PkgName": "requests",
+          "InstalledVersion": "2.25.0",
+          "FixedVersion": "2.31.0",
+          "Severity": "HIGH",
+          "Title": "requests: Proxy-Authorization header leak",
+          "Description": "Requests before 2.31.0 leaks the Proxy-Authorization header to destination servers when redirected across origins.",
+          "CweIDs": ["CWE-200"]
+        }
+      ]
+    }
+  ]
+}

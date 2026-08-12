@@ -1,0 +1,25 @@
+{
+  "@version": "2.14.0",
+  "site": [
+    {
+      "@name": "https://staging.example.com",
+      "alerts": [
+        {
+          "pluginid": "10202",
+          "alert": "Absence of Anti-CSRF Tokens",
+          "risk": "Medium",
+          "desc": "No Anti-CSRF tokens were found in a HTML submission form.",
+          "cweid": "352",
+          "instances": [
+            {
+              "uri": "https://staging.example.com/api/objects/1",
+              "method": "GET",
+              "param": "",
+              "evidence": "<form method=\"POST\">"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
