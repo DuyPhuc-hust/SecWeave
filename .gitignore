@@ -1,0 +1,6 @@
+# Tài liệu nguồn dạng export (nặng, binary-like) — giữ local, không đưa vào git history.
+# Nếu muốn version control cả hai file này, xoá 2 dòng dưới và git add -f.
+A.html
+SecWeave.pdf
+
+.DS_Store
