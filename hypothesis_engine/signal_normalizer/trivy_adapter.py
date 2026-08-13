@@ -48,9 +48,11 @@ class TrivyAdapter(SignalAdapter):
         for result_index, result in enumerate(raw_report.get("Results", [])):
             try:
                 artifact_ref = result["Target"]
-            except KeyError as exc:
+            except (KeyError, TypeError) as exc:
+                # TypeError: result không phải object (ví dụ string/list/null
+                # lọt vào "Results" do report bị hỏng hoặc gán nhầm --tool).
                 if on_skip:
-                    on_skip(f"Bỏ qua Results[{result_index}] (trivy): thiếu field — {exc}")
+                    on_skip(f"Bỏ qua Results[{result_index}] (trivy): thiếu/sai field — {exc}")
                 continue
 
             for vuln_index, vuln in enumerate(result.get("Vulnerabilities", [])):
@@ -92,7 +94,7 @@ class TrivyAdapter(SignalAdapter):
                             raw_reference=raw_reference,
                         )
                     )
-                except (KeyError, ValidationError, TypeError) as exc:
+                except (KeyError, ValidationError, TypeError, AttributeError) as exc:
                     if on_skip:
                         on_skip(
                             f"Bỏ qua Results[{result_index}].Vulnerabilities[{vuln_index}] "

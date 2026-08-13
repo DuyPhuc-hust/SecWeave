@@ -11,30 +11,15 @@ from shared.models.signal import (
     RawReference,
     RuleInfo,
     ScaLocation,
-    SastLocation,
     SeverityInfo,
     SignalCoverage,
     SignalSource,
     SignalType,
     TargetHint,
 )
+from tests.factories import semgrep_sqli_signal
 
-
-def _semgrep_signal():
-    return NormalizedSignal(
-        signal_id="sig_test1",
-        source=SignalSource(
-            tool="semgrep", tool_version="1.78.0", type=SignalType.SAST, coverage=SignalCoverage.COMPLETE
-        ),
-        rule=RuleInfo(id="python.django.security.audit.sqli", name="Potential SQL injection", cwe=["CWE-89"]),
-        severity=SeverityInfo(raw="ERROR", normalized="high"),
-        location=SastLocation(file_path="app/views.py", start_line=42, end_line=42),
-        signal_context="cursor.execute(query % user_id)",
-        target_hint=TargetHint(),
-        ingested_at="2026-08-12T00:00:00Z",
-        raw_reference=RawReference(storage_path="x", hash="sha256:0"),
-    )
-
+_semgrep_signal = semgrep_sqli_signal
 
 # Alias giữ để không phải sửa lại toàn bộ test cũ vốn không quan tâm loại signal.
 _signal = _semgrep_signal

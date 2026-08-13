@@ -118,6 +118,71 @@ def test_trivy_adapter_skips_result_missing_target_and_reports_it_via_on_skip():
     assert "trivy" in skipped[0]
 
 
+def test_trivy_adapter_skips_result_that_is_not_an_object():
+    # Results[0] không phải object (list lọt vào do report hỏng hoặc gán nhầm
+    # --tool) — result["Target"] ném TypeError chứ không phải KeyError, vẫn
+    # phải bỏ qua đúng entry đó thay vì crash cả report.
+    raw = {
+        "Results": [
+            ["not", "an", "object"],
+            {
+                "Target": "requirements.txt",
+                "Vulnerabilities": [
+                    {
+                        "VulnerabilityID": "CVE-2023-0002",
+                        "PkgName": "requests",
+                        "InstalledVersion": "2.25.0",
+                        "Severity": "HIGH",
+                    }
+                ],
+            },
+        ]
+    }
+    skipped = []
+    signals = TrivyAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="0.53.0",
+        coverage=SignalCoverage.COMPLETE,
+        on_skip=skipped.append,
+    )
+
+    assert [s.rule.id for s in signals] == ["CVE-2023-0002"]
+    assert len(skipped) == 1
+    assert "Results[0]" in skipped[0]
+
+
+def test_trivy_adapter_skips_vulnerability_that_is_not_an_object():
+    raw = {
+        "Results": [
+            {
+                "Target": "requirements.txt",
+                "Vulnerabilities": [
+                    "not an object",
+                    {
+                        "VulnerabilityID": "CVE-2023-0002",
+                        "PkgName": "requests",
+                        "InstalledVersion": "2.25.0",
+                        "Severity": "HIGH",
+                    },
+                ],
+            }
+        ]
+    }
+    skipped = []
+    signals = TrivyAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="0.53.0",
+        coverage=SignalCoverage.COMPLETE,
+        on_skip=skipped.append,
+    )
+
+    assert [s.rule.id for s in signals] == ["CVE-2023-0002"]
+    assert len(skipped) == 1
+    assert "Results[0].Vulnerabilities[0]" in skipped[0]
+
+
 def test_trivy_adapter_null_severity_treated_as_unknown():
     raw = {
         "Results": [

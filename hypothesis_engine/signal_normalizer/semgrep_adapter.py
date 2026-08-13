@@ -87,7 +87,9 @@ class SemgrepAdapter(SignalAdapter):
                         raw_reference=raw_reference,
                     )
                 )
-            except (KeyError, ValidationError, TypeError) as exc:
+            except (KeyError, ValidationError, TypeError, AttributeError) as exc:
+                # AttributeError: entry trong "results" không phải object (ví dụ
+                # string/list/null lọt vào do report bị hỏng hoặc gán nhầm --tool).
                 if on_skip:
                     on_skip(f"Bỏ qua results[{index}] (semgrep): thiếu/sai field — {exc}")
         return signals

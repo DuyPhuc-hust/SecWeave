@@ -9,33 +9,10 @@ from shared.models.hypothesis import (
     HypothesisResult,
     HypothesisStatus,
 )
-from shared.models.signal import (
-    NormalizedSignal,
-    RawReference,
-    RuleInfo,
-    SastLocation,
-    SeverityInfo,
-    SignalCoverage,
-    SignalSource,
-    SignalType,
-    TargetHint,
-)
+from shared.models.signal import SignalCoverage
+from tests.factories import semgrep_sqli_signal
 
-
-def _signal():
-    return NormalizedSignal(
-        signal_id="sig_test1",
-        source=SignalSource(
-            tool="semgrep", tool_version="1.78.0", type=SignalType.SAST, coverage=SignalCoverage.COMPLETE
-        ),
-        rule=RuleInfo(id="python.django.security.audit.sqli", name="Potential SQL injection", cwe=["CWE-89"]),
-        severity=SeverityInfo(raw="ERROR", normalized="high"),
-        location=SastLocation(file_path="app/views.py", start_line=42, end_line=42),
-        signal_context="cursor.execute(query % user_id)",
-        target_hint=TargetHint(),
-        ingested_at="2026-08-12T00:00:00Z",
-        raw_reference=RawReference(storage_path="x", hash="sha256:0"),
-    )
+_signal = semgrep_sqli_signal
 
 
 def test_get_verified_context_empty_by_default():

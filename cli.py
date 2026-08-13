@@ -11,17 +11,17 @@ from context_store.store import DEFAULT_DB_PATH, SecurityContextStore
 from hypothesis_engine.engine import HypothesisEngine
 from hypothesis_engine.signal_normalizer.orchestrator import SignalNormalizer
 from shared.models.hypothesis import HypothesisStatus
-from shared.models.signal import SignalCoverage
+from shared.models.signal import NormalizedSignal, SignalCoverage
 
 
 def _print_skip_warning(message: str) -> None:
     print(f"CẢNH BÁO: {message}", file=sys.stderr)
 
 
-def cmd_normalize(args: argparse.Namespace) -> int:
+def _load_signals(args: argparse.Namespace) -> Optional[List[NormalizedSignal]]:
     normalizer = SignalNormalizer()
     try:
-        signals = normalizer.normalize_file(
+        return normalizer.normalize_file(
             report_path=args.signal,
             tool=args.tool,
             tool_version=args.tool_version,
@@ -30,12 +30,15 @@ def cmd_normalize(args: argparse.Namespace) -> int:
         )
     except FileNotFoundError:
         print(f"error: không tìm thấy file '{args.signal}'", file=sys.stderr)
-        return 1
+        return None
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except KeyError as exc:
-        print(f"error: report thiếu field bắt buộc: {exc}", file=sys.stderr)
+        return None
+
+
+def cmd_normalize(args: argparse.Namespace) -> int:
+    signals = _load_signals(args)
+    if signals is None:
         return 1
 
     if args.format == "json":
@@ -53,20 +56,8 @@ def cmd_normalize(args: argparse.Namespace) -> int:
 
 
 def cmd_hypothesize(args: argparse.Namespace) -> int:
-    normalizer = SignalNormalizer()
-    try:
-        signals = normalizer.normalize_file(
-            report_path=args.signal,
-            tool=args.tool,
-            tool_version=args.tool_version,
-            coverage=SignalCoverage(args.coverage),
-            on_skip=_print_skip_warning,
-        )
-    except FileNotFoundError:
-        print(f"error: không tìm thấy file '{args.signal}'", file=sys.stderr)
-        return 1
-    except (ValueError, KeyError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    signals = _load_signals(args)
+    if signals is None:
         return 1
 
     source_snippet = None
@@ -236,6 +227,19 @@ def cmd_show_hypothesis(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_report_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--signal", required=True, help="Đường dẫn tới report JSON thô")
+    parser.add_argument("--tool", required=True, choices=["semgrep", "trivy", "owasp_zap"])
+    parser.add_argument("--tool-version", required=True, help="Version của tool đã sinh report")
+    parser.add_argument("--coverage", default="unknown", choices=["complete", "partial", "unknown"])
+
+
+def _add_context_db_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--context-db", default=DEFAULT_DB_PATH, help="Đường dẫn file SQLite Context Store (mặc định: %(default)s)"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="secweave", description="SecWeave controlled verification toolkit (MVP)"
@@ -246,16 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
         "normalize",
         help="Chuẩn hoá 1 report thô (Semgrep/Trivy/OWASP ZAP) thành NormalizedSignal",
     )
-    normalize_parser.add_argument("--signal", required=True, help="Đường dẫn tới report JSON thô")
-    normalize_parser.add_argument(
-        "--tool", required=True, choices=["semgrep", "trivy", "owasp_zap"]
-    )
-    normalize_parser.add_argument(
-        "--tool-version", required=True, help="Version của tool đã sinh report"
-    )
-    normalize_parser.add_argument(
-        "--coverage", default="unknown", choices=["complete", "partial", "unknown"]
-    )
+    _add_report_args(normalize_parser)
     normalize_parser.add_argument("--format", default="table", choices=["table", "json"])
     normalize_parser.set_defaults(func=cmd_normalize)
 
@@ -263,16 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
         "hypothesize",
         help="Sinh Hypothesis từ 1 report thô — dùng LLM API thật, hoặc bắc cầu qua agent (--llm-mode)",
     )
-    hypothesize_parser.add_argument("--signal", required=True, help="Đường dẫn tới report JSON thô")
-    hypothesize_parser.add_argument(
-        "--tool", required=True, choices=["semgrep", "trivy", "owasp_zap"]
-    )
-    hypothesize_parser.add_argument(
-        "--tool-version", required=True, help="Version của tool đã sinh report"
-    )
-    hypothesize_parser.add_argument(
-        "--coverage", default="unknown", choices=["complete", "partial", "unknown"]
-    )
+    _add_report_args(hypothesize_parser)
     hypothesize_parser.add_argument("--source", help="Đường dẫn file source code liên quan (tuỳ chọn)")
     hypothesize_parser.add_argument("--target-id", help="target_id để tra verified context (tuỳ chọn)")
     hypothesize_parser.add_argument(
@@ -283,9 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
         "agent (không cần API key, bắc cầu qua file để agent đang chat xử lý)",
     )
     hypothesize_parser.add_argument("--format", default="table", choices=["table", "json"])
-    hypothesize_parser.add_argument(
-        "--context-db", default=DEFAULT_DB_PATH, help="Đường dẫn file SQLite Context Store (mặc định: %(default)s)"
-    )
+    _add_context_db_arg(hypothesize_parser)
     hypothesize_parser.set_defaults(func=cmd_hypothesize)
 
     show_hypothesis_parser = subparsers.add_parser(
@@ -301,9 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Tra tất cả bản ghi (kể cả not_verifiable) sinh ra từ 1 signal_id",
     )
     show_hypothesis_parser.add_argument("--format", default="table", choices=["table", "json"])
-    show_hypothesis_parser.add_argument(
-        "--context-db", default=DEFAULT_DB_PATH, help="Đường dẫn file SQLite Context Store (mặc định: %(default)s)"
-    )
+    _add_context_db_arg(show_hypothesis_parser)
     show_hypothesis_parser.set_defaults(func=cmd_show_hypothesis)
 
     return parser

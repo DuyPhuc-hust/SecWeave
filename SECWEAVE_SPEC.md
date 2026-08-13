@@ -256,9 +256,9 @@ stateDiagram-v2
 |---|---|---|---|
 | `rule.id` | `check_id` | `VulnerabilityID` (CVE/GHSA) | `pluginid` |
 | `rule.cwe` | `metadata.cwe` | `CweIDs` | `cweid` |
-| `severity.raw` | `extra.severity` (ERROR/WARNING/INFO) | `Severity` (CRITICAL/HIGH/MEDIUM/LOW) | `risk` (High/Medium/Low/Informational) |
-| `location` | `{file_path, start_line, end_line}` từ `path` + `start`/`end` | `{package_name, installed_version, fixed_version, artifact_ref}` từ `PkgName`/`InstalledVersion`/`FixedVersion` + ảnh/lockfile đích | `{url, http_method, parameter}` từ `uri`/`method`/`param` |
-| `signal_context` | `extra.lines` (đoạn code khớp pattern) | `Title` + `Description` | đoạn request/response trong `alert` (đổi tên field khi ánh xạ — xem cảnh báo dưới) |
+| `severity.raw` | `extra.severity` (ERROR/WARNING/INFO) | `Severity` (CRITICAL/HIGH/MEDIUM/LOW/UNKNOWN) | `riskdesc` (chuỗi hiển thị, ví dụ "High (Medium)") — **không phải `risk`, ZAP JSON thật không có field này**; `severity.normalized` suy ra từ `riskcode` ("0".."3"), tất định hơn vì không phụ thuộc format chuỗi hiển thị |
+| `location` | `{file_path, start_line, end_line}` từ `path` + `start`/`end` | `{package_name, installed_version, fixed_version, artifact_ref}` từ `PkgName`/`InstalledVersion`/`FixedVersion` + ảnh/lockfile đích | `{url, http_method, parameter}` từ `instance.uri`/`instance.method`/`instance.param` |
+| `signal_context` | `extra.lines` (đoạn code khớp pattern) | `Title` + `Description` | `instance.evidence` (đoạn request/response khớp), fallback về `alert.desc` nếu instance không có evidence — xem cảnh báo dưới về tên field |
 
 > **Ranh giới thuật ngữ quan trọng:** `signal_context` (snippet code từ Semgrep, mô tả CVE từ Trivy, đoạn request/response trong alert của ZAP) là **ngữ cảnh của tín hiệu**, tuyệt đối **không được gọi là "evidence"**. Theo nguyên tắc P2 ([§1.1](#11-sáu-nguyên-tắc-thiết-kế)) và [§4.3](#43-tầng-3--evidence-harness--store), *evidence* chỉ tồn tại sau khi Evidence Harness thu được trong một active run đã cấp phép sau Gate 3. Trộn hai khái niệm này sẽ phá vỡ đúng cơ chế mà toàn hệ thống dựng ra để tránh — nếu adapter đặt tên field là `evidence` thay vì `signal_context`, người đọc package sau này rất dễ hiểu lầm một finding thô từ scanner đã là bằng chứng runtime.
 

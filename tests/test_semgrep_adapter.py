@@ -80,3 +80,28 @@ def test_semgrep_adapter_skips_malformed_entry_and_reports_it_via_on_skip():
     assert len(skipped) == 1
     assert "results[1]" in skipped[0]
     assert "semgrep" in skipped[0]
+
+
+def test_semgrep_adapter_skips_entry_that_is_not_an_object():
+    # results[1] không phải object (string lọt vào do report hỏng hoặc gán
+    # nhầm --tool) — phải bỏ qua đúng entry đó (AttributeError khi gọi .get),
+    # không được để cả report crash với traceback.
+    raw = {
+        "results": [
+            {"check_id": "good.rule.1", "path": "a.py", "start": {"line": 1}, "end": {"line": 1}},
+            "not an object",
+            {"check_id": "good.rule.2", "path": "b.py", "start": {"line": 2}, "end": {"line": 2}},
+        ]
+    }
+    skipped = []
+    signals = SemgrepAdapter().parse(
+        raw,
+        RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="1.78.0",
+        coverage=SignalCoverage.UNKNOWN,
+        on_skip=skipped.append,
+    )
+
+    assert [s.rule.id for s in signals] == ["good.rule.1", "good.rule.2"]
+    assert len(skipped) == 1
+    assert "results[1]" in skipped[0]

@@ -42,14 +42,32 @@ class ZapAdapter(SignalAdapter):
         on_skip: Optional[OnSkipCallback] = None,
     ) -> List[NormalizedSignal]:
         signals = []
-        for site in raw_report.get("site", []):
-            for alert_index, alert in enumerate(site.get("alerts", [])):
-                raw_severity = alert.get("riskdesc") or "Unknown"
-                riskcode = str(alert.get("riskcode") or "")
-                cweid = alert.get("cweid")
-                cwe = [f"CWE-{cweid}"] if cweid and str(cweid) not in ("-1", "0") else []
+        for site_index, site in enumerate(raw_report.get("site", [])):
+            try:
+                alerts = site.get("alerts", [])
+            except AttributeError as exc:
+                # site không phải object (ví dụ string/list/null lọt vào "site"
+                # do report bị hỏng hoặc gán nhầm --tool).
+                if on_skip:
+                    on_skip(f"Bỏ qua site[{site_index}] (owasp_zap): sai kiểu dữ liệu — {exc}")
+                continue
 
-                instances = alert.get("instances", [])
+            for alert_index, alert in enumerate(alerts):
+                try:
+                    raw_severity = alert.get("riskdesc") or "Unknown"
+                    riskcode = str(alert.get("riskcode") or "")
+                    cweid = alert.get("cweid")
+                    cwe = [f"CWE-{cweid}"] if cweid and str(cweid) not in ("-1", "0") else []
+                    instances = alert.get("instances", [])
+                except AttributeError as exc:
+                    # alert không phải object — cùng lý do như site ở trên.
+                    if on_skip:
+                        on_skip(
+                            f"Bỏ qua site[{site_index}].alerts[{alert_index}] (owasp_zap): "
+                            f"sai kiểu dữ liệu — {exc}"
+                        )
+                    continue
+
                 if not instances and on_skip:
                     plugin_id = alert.get("pluginid", "?")
                     on_skip(
@@ -88,7 +106,7 @@ class ZapAdapter(SignalAdapter):
                                 raw_reference=raw_reference,
                             )
                         )
-                    except (KeyError, ValidationError, TypeError) as exc:
+                    except (KeyError, ValidationError, TypeError, AttributeError) as exc:
                         if on_skip:
                             on_skip(
                                 f"Bỏ qua alert[{alert_index}].instances[{instance_index}] "

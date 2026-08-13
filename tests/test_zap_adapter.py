@@ -146,6 +146,68 @@ def test_zap_adapter_skips_instance_missing_uri_and_reports_it_via_on_skip():
     assert "owasp_zap" in skipped[0]
 
 
+def test_zap_adapter_skips_site_that_is_not_an_object():
+    # site[0] không phải object (string lọt vào do report hỏng hoặc gán nhầm
+    # --tool) — phải bỏ qua đúng site đó, không được crash cả report.
+    raw = {
+        "site": [
+            "not an object",
+            {
+                "alerts": [
+                    {
+                        "pluginid": "10202",
+                        "riskcode": "2",
+                        "riskdesc": "Medium (Medium)",
+                        "instances": [{"uri": "https://x/ok", "method": "GET"}],
+                    }
+                ]
+            },
+        ]
+    }
+    skipped = []
+    signals = ZapAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="2.14.0",
+        coverage=SignalCoverage.UNKNOWN,
+        on_skip=skipped.append,
+    )
+
+    assert len(signals) == 1
+    assert len(skipped) == 1
+    assert "site[0]" in skipped[0]
+
+
+def test_zap_adapter_skips_alert_that_is_not_an_object():
+    raw = {
+        "site": [
+            {
+                "alerts": [
+                    "not an object",
+                    {
+                        "pluginid": "10202",
+                        "riskcode": "2",
+                        "riskdesc": "Medium (Medium)",
+                        "instances": [{"uri": "https://x/ok", "method": "GET"}],
+                    },
+                ]
+            }
+        ]
+    }
+    skipped = []
+    signals = ZapAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="2.14.0",
+        coverage=SignalCoverage.UNKNOWN,
+        on_skip=skipped.append,
+    )
+
+    assert len(signals) == 1
+    assert len(skipped) == 1
+    assert "alerts[0]" in skipped[0]
+
+
 def test_zap_adapter_alert_with_no_instances_reports_via_on_skip():
     raw = {
         "site": [

@@ -72,6 +72,12 @@ class HypothesisEngine:
             "Nếu verifiable=false, kèm reason (string) giải thích vì sao không đủ để lập giả thuyết.",
             "BẮT BUỘC: viết toàn bộ nội dung text (expected_behavior, suspected_behavior, "
             "observation_criteria, reason) bằng tiếng Anh — chỉ phần hướng dẫn này là tiếng Việt.",
+            "Lưu ý khi viết observation_criteria: signal chỉ cho biết NƠI phát hiện, không đảm bảo "
+            "hành vi/luồng dữ liệu liên quan thực sự tồn tại hay đích thực thi thực sự trùng với nơi "
+            "phát hiện. Nếu observation_criteria cần một điều kiện tiên quyết như vậy mới có ý nghĩa "
+            "(ví dụ: phải xác nhận trước một hành vi có được dùng không, hoặc phải xác định đúng đích "
+            "thực thi thay vì suy luận từ vị trí phát hiện), hãy nêu rõ điều kiện đó như bước đầu tiên "
+            "trong observation_criteria.",
             f"Signal: {signal.model_dump_json()}",
         ]
         if source_snippet:
