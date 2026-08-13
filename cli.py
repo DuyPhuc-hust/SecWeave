@@ -60,6 +60,30 @@ def cmd_normalize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_llm_client(args: argparse.Namespace, agent_mode_message: str, api_mode_subject: str):
+    """Dựng LLM client theo --llm-mode, in đúng cảnh báo tương ứng. Trả None
+    (đã in lỗi ra stderr) nếu construct thất bại ở api mode (thiếu env var)."""
+    if args.llm_mode == "agent":
+        from hypothesis_engine.llm_client.agent_bridge_client import AgentBridgeLLMClient
+
+        llm_client = AgentBridgeLLMClient()
+        print(f"CẢNH BÁO: chế độ agent-bridge — không gọi API nào. {agent_mode_message}", file=sys.stderr)
+        return llm_client
+
+    from hypothesis_engine.llm_client.openai_compatible_client import OpenAICompatibleLLMClient
+
+    try:
+        llm_client = OpenAICompatibleLLMClient()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+    print(
+        f"CẢNH BÁO: sắp gửi {api_mode_subject} tới LLM thật (model={llm_client.model}).",
+        file=sys.stderr,
+    )
+    return llm_client
+
+
 def cmd_hypothesize(args: argparse.Namespace) -> int:
     signals = _load_signals(args)
     if signals is None:
@@ -86,29 +110,16 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
             context_store.get_verified_context(args.target_id) if args.target_id else []
         )
 
-        if args.llm_mode == "agent":
-            from hypothesis_engine.llm_client.agent_bridge_client import AgentBridgeLLMClient
-
-            llm_client = AgentBridgeLLMClient()
-            print(
-                "CẢNH BÁO: chế độ agent-bridge — không gọi API nào. Toàn bộ "
-                f"{len(signals)} signal sẽ gộp vào 1 file prompt, bạn chỉ cần nhờ "
-                "agent (Claude Code) xử lý và chờ Enter đúng 1 lần.",
-                file=sys.stderr,
-            )
-        else:
-            from hypothesis_engine.llm_client.openai_compatible_client import OpenAICompatibleLLMClient
-
-            try:
-                llm_client = OpenAICompatibleLLMClient()
-            except RuntimeError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 1
-            print(
-                f"CẢNH BÁO: sắp gửi NormalizedSignal (và source code nếu có) tới LLM thật "
-                f"(model={llm_client.model}).",
-                file=sys.stderr,
-            )
+        llm_client = _build_llm_client(
+            args,
+            agent_mode_message=(
+                f"Toàn bộ {len(signals)} signal sẽ gộp vào 1 file prompt, bạn chỉ cần nhờ "
+                "agent (Claude Code) xử lý và chờ Enter đúng 1 lần."
+            ),
+            api_mode_subject="NormalizedSignal (và source code nếu có)",
+        )
+        if llm_client is None:
+            return 1
 
         engine = HypothesisEngine(llm_client)
 
@@ -280,27 +291,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    if args.llm_mode == "agent":
-        from hypothesis_engine.llm_client.agent_bridge_client import AgentBridgeLLMClient
-
-        llm_client = AgentBridgeLLMClient()
-        print(
-            "CẢNH BÁO: chế độ agent-bridge — không gọi API nào. Nhờ agent (Claude Code) "
-            "đọc file prompt và trả JSON, rồi chờ Enter đúng 1 lần.",
-            file=sys.stderr,
-        )
-    else:
-        from hypothesis_engine.llm_client.openai_compatible_client import OpenAICompatibleLLMClient
-
-        try:
-            llm_client = OpenAICompatibleLLMClient()
-        except RuntimeError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        print(
-            f"CẢNH BÁO: sắp gửi Hypothesis tới LLM thật (model={llm_client.model}).",
-            file=sys.stderr,
-        )
+    llm_client = _build_llm_client(
+        args,
+        agent_mode_message="Nhờ agent (Claude Code) đọc file prompt và trả JSON, rồi chờ Enter đúng 1 lần.",
+        api_mode_subject="Hypothesis",
+    )
+    if llm_client is None:
+        return 1
 
     agent = ExploitAgent(llm_client)
 
@@ -368,6 +365,16 @@ def _add_context_db_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_llm_mode_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--llm-mode",
+        default="api",
+        choices=["api", "agent"],
+        help="api (mặc định, cần LLM_API_KEY/LLM_BASE_URL/LLM_MODEL) | "
+        "agent (không cần API key, bắc cầu qua file để agent đang chat xử lý)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="secweave", description="SecWeave controlled verification toolkit (MVP)"
@@ -389,13 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_report_args(hypothesize_parser)
     hypothesize_parser.add_argument("--source", help="Đường dẫn file source code liên quan (tuỳ chọn)")
     hypothesize_parser.add_argument("--target-id", help="target_id để tra verified context (tuỳ chọn)")
-    hypothesize_parser.add_argument(
-        "--llm-mode",
-        default="api",
-        choices=["api", "agent"],
-        help="api (mặc định, cần LLM_API_KEY/LLM_BASE_URL/LLM_MODEL) | "
-        "agent (không cần API key, bắc cầu qua file để agent đang chat xử lý)",
-    )
+    _add_llm_mode_arg(hypothesize_parser)
     hypothesize_parser.add_argument("--format", default="table", choices=["table", "json"])
     _add_context_db_arg(hypothesize_parser)
     hypothesize_parser.set_defaults(func=cmd_hypothesize)
@@ -416,13 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument(
         "--cap", type=int, default=10, help="Cap số hành động dự kiến tối đa trong plan (mặc định: %(default)s)"
     )
-    plan_parser.add_argument(
-        "--llm-mode",
-        default="api",
-        choices=["api", "agent"],
-        help="api (mặc định, cần LLM_API_KEY/LLM_BASE_URL/LLM_MODEL) | "
-        "agent (không cần API key, bắc cầu qua file để agent đang chat xử lý)",
-    )
+    _add_llm_mode_arg(plan_parser)
     plan_parser.add_argument("--format", default="table", choices=["table", "json"])
     _add_context_db_arg(plan_parser)
     plan_parser.set_defaults(func=cmd_plan)
