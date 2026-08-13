@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from hypothesis_engine.llm_client.base import HypothesisLLMClient
 from shared.id_generator import generate_id
+from shared.text_utils import is_truthy, strip_markdown_json_fence
 from shared.models.hypothesis import (
     Hypothesis,
     HypothesisProvenance,
@@ -14,34 +15,6 @@ from shared.models.hypothesis import (
 from shared.models.signal import NormalizedSignal
 
 REQUIRED_FIELDS = ("expected_behavior", "suspected_behavior", "observation_criteria")
-
-_FALSY_STRINGS = {"false", "0", "no", "null", "none", ""}
-
-
-def _is_truthy(value: Any) -> bool:
-    # LLM đôi khi trả "verifiable" dưới dạng string ("false"/"true") hoặc số
-    # (0/1) thay vì bool JSON thuần — `value is False` chỉ bắt đúng bool, bỏ
-    # sót các dạng biểu diễn khác của "sai", khiến reason thật của LLM bị mất.
-    if isinstance(value, str):
-        return value.strip().lower() not in _FALSY_STRINGS
-    return bool(value)
-
-
-def _strip_markdown_json_fence(text: str) -> str:
-    """LLM thật hay bọc JSON trong ```json ... ``` dù prompt đã yêu cầu JSON thuần.
-    Chỉ xử lý đúng dạng fence phổ biến này — không cố đoán/sửa JSON hỏng kiểu khác,
-    để lỗi JSON thật sự vẫn được báo đúng là NOT_VERIFIABLE thay vì bị che giấu.
-    """
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-
-    lines = stripped.splitlines()
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines)
 
 
 class HypothesisEngine:
@@ -95,7 +68,7 @@ class HypothesisEngine:
 
     def parse_response(self, raw_output: str, signal: NormalizedSignal) -> HypothesisResult:
         try:
-            data = json.loads(_strip_markdown_json_fence(raw_output))
+            data = json.loads(strip_markdown_json_fence(raw_output))
         except json.JSONDecodeError:
             return HypothesisResult(
                 status=HypothesisStatus.NOT_VERIFIABLE,
@@ -117,7 +90,7 @@ class HypothesisEngine:
                 reason="LLM output thiếu field bắt buộc: verifiable",
             )
 
-        if not _is_truthy(data["verifiable"]):
+        if not is_truthy(data["verifiable"]):
             reason = data.get("reason") or "LLM đánh giá tín hiệu không đủ để lập giả thuyết"
             return HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, reason=reason)
 
@@ -138,6 +111,7 @@ class HypothesisEngine:
                     source_tool=signal.source.tool,
                     source_signal_id=signal.signal_id,
                     coverage=signal.source.coverage,
+                    location=signal.location,
                 ),
             )
         except ValidationError as exc:

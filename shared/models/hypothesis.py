@@ -1,15 +1,21 @@
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 
 from pydantic import BaseModel, model_validator
 
-from shared.models.signal import SignalCoverage
+from shared.models.signal import DastLocation, SastLocation, ScaLocation, SignalCoverage
 
 
 class HypothesisProvenance(BaseModel):
     source_tool: str
     source_signal_id: str
     coverage: SignalCoverage
+    # Giữ lại location gốc của signal (URL cho DAST, file+line cho SAST, package
+    # cho SCA) — thiếu field này, Exploit Agent chỉ thấy văn bản mô tả hành vi
+    # mà không biết kiểm chứng ở đâu, dù signal gốc CÓ vị trí cụ thể (đã phát
+    # hiện qua live test: cả 4 hypothesis thật đều NOT_PLANNABLE vì thiếu đúng
+    # thông tin này, kể cả case ZAP vốn có sẵn URL trong signal gốc).
+    location: Union[SastLocation, ScaLocation, DastLocation]
 
 
 class Hypothesis(BaseModel):

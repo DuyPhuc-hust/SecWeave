@@ -88,10 +88,10 @@ def test_authorization_valid_target_authorization():
         approved_at=datetime.now(timezone.utc),
         target_id="tgt_1",
         identity="test-identity-1",
-        allowed_actions=["GET /api/objects/{id}"],
+        allowed_actions=["GET https://staging.example.com/api/objects/{id}"],
     )
     assert auth.target_id == "tgt_1"
-    assert "GET /api/objects/{id}" in auth.allowed_actions
+    assert "GET https://staging.example.com/api/objects/{id}" in auth.allowed_actions
 
 
 def test_authorization_missing_field():

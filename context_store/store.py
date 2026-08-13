@@ -40,11 +40,23 @@ class SecurityContextStore:
                 observation_criteria TEXT,
                 reason TEXT,
                 coverage TEXT NOT NULL,
+                location TEXT,
                 created_at TEXT NOT NULL
             )
             """
         )
+        self._migrate_add_missing_columns()
         self._conn.commit()
+
+    def _migrate_add_missing_columns(self) -> None:
+        # "CREATE TABLE IF NOT EXISTS" không tự thêm cột mới vào bảng đã tồn tại
+        # từ trước (ví dụ .secweave/context.db tạo ra bởi bản code cũ) — không
+        # có cột này, mọi record_hypothesis()/get_hypothesis() sau đó sẽ vỡ với
+        # "no such column" thay vì lỗi rõ ràng. MVP chưa cần khung migration đầy
+        # đủ, chỉ cần đủ để không mất dữ liệu cũ khi schema thêm cột mới.
+        existing_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(hypotheses)")}
+        if "location" not in existing_columns:
+            self._conn.execute("ALTER TABLE hypotheses ADD COLUMN location TEXT")
 
     def get_verified_context(self, target_id: str) -> List[Dict[str, Any]]:
         cursor = self._conn.execute(
@@ -64,8 +76,8 @@ class SecurityContextStore:
                 INSERT INTO hypotheses (
                     hypothesis_id, signal_id, source_tool, status,
                     expected_behavior, suspected_behavior, observation_criteria,
-                    reason, coverage, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reason, coverage, location, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.hypothesis.hypothesis_id if is_hypothesis else None,
@@ -77,6 +89,7 @@ class SecurityContextStore:
                     result.hypothesis.observation_criteria if is_hypothesis else None,
                     result.reason,
                     signal.source.coverage.value,
+                    result.hypothesis.provenance.location.model_dump_json() if is_hypothesis else None,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -86,7 +99,8 @@ class SecurityContextStore:
 
     _HYPOTHESIS_COLUMNS = (
         "hypothesis_id", "signal_id", "source_tool", "status", "expected_behavior",
-        "suspected_behavior", "observation_criteria", "reason", "coverage", "created_at",
+        "suspected_behavior", "observation_criteria", "reason", "coverage", "location",
+        "created_at",
     )
 
     def get_hypothesis(self, hypothesis_id: str) -> Optional[Dict[str, Any]]:

@@ -537,3 +537,200 @@ def test_cli_hypothesize_agent_mode_batches_all_signals_into_one_wait(
     assert len(data) == 2
     assert data[0]["result"]["status"] == "hypothesis"
     assert data[1]["result"]["status"] == "not_verifiable"
+
+
+class _StubPlanLLMClient:
+    model = "stub-plan-model"
+
+    def generate(self, prompt: str) -> str:
+        return json.dumps(
+            {
+                "plannable": True,
+                "actions": [
+                    {
+                        "type": "read_only",
+                        "method": "GET",
+                        "target": "https://staging.example.com/api/objects/42",
+                        "description": "Read object 42 as owner identity.",
+                    }
+                ],
+            }
+        )
+
+
+def _create_stored_hypothesis(capsys, monkeypatch, db_path: str) -> str:
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubOpenAICompatibleClient)
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+    return json.loads(capsys.readouterr().out)[0]["result"]["hypothesis"]["hypothesis_id"]
+
+
+def test_cli_plan_not_found_hypothesis_id_returns_error(capsys, tmp_path):
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            "hyp_does_not_exist",
+            "--context-db",
+            str(tmp_path / "test.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không tìm thấy hypothesis_id" in captured.err
+
+
+def test_cli_plan_approves_when_action_matches_allowlist(capsys, monkeypatch, tmp_path):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET https://staging.example.com/api/objects/{id}",
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert data["plan_result"]["status"] == "planned"
+    assert data["review"]["approved"] is True
+    assert data["review"]["plan_check"]["approved"] is True
+    assert data["review"]["cost_check"]["allowed"] is True
+
+
+def test_cli_plan_blocks_when_action_outside_allowlist(capsys, monkeypatch, tmp_path):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            # Không truyền --allowed-action nào -> allowlist rỗng -> mọi action bị chặn.
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert data["review"]["approved"] is False
+    assert data["review"]["plan_check"]["approved"] is False
+
+
+def test_cli_plan_table_output_shows_per_action_verdict(capsys, monkeypatch, tmp_path):
+    # Regression: đường in table (không phải json) từng crash vì
+    # `review.checks` sai — phải là `review.plan_check.checks`.
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET https://staging.example.com/api/objects/{id}",
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "[PASS]" in captured.out
+    assert "APPROVED" in captured.out
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+class _StubNotPlannableLLMClient:
+    model = "stub-not-plannable"
+
+    def generate(self, prompt: str) -> str:
+        return json.dumps({"plannable": False, "reason": "observation_criteria quá mơ hồ"})
+
+
+def test_cli_plan_reports_not_plannable(capsys, monkeypatch, tmp_path):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubNotPlannableLLMClient)
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "NOT_PLANNABLE" in captured.out
+    assert "mơ hồ" in captured.out
+
+
+def test_cli_plan_llm_call_failure_is_reported_cleanly_not_as_traceback(
+    capsys, monkeypatch, tmp_path
+):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _RaisingClient)
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "error: LLM provider unreachable" in captured.err
+    assert "Traceback" not in captured.err

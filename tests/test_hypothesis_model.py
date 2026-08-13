@@ -7,7 +7,7 @@ from shared.models.hypothesis import (
     HypothesisResult,
     HypothesisStatus,
 )
-from shared.models.signal import SignalCoverage
+from shared.models.signal import SastLocation, SignalCoverage
 
 
 def _hypothesis():
@@ -17,7 +17,10 @@ def _hypothesis():
         suspected_behavior="Object có thể đọc được bởi identity không sở hữu nó.",
         observation_criteria="Response trả về dữ liệu object khi identity khác owner gọi endpoint.",
         provenance=HypothesisProvenance(
-            source_tool="semgrep", source_signal_id="sig_1", coverage=SignalCoverage.COMPLETE
+            source_tool="semgrep",
+            source_signal_id="sig_1",
+            coverage=SignalCoverage.COMPLETE,
+            location=SastLocation(file_path="app/views.py", start_line=1, end_line=1),
         ),
     )
 
@@ -35,7 +38,10 @@ def test_hypothesis_requires_hypothesis_id():
             suspected_behavior="b",
             observation_criteria="c",
             provenance=HypothesisProvenance(
-                source_tool="semgrep", source_signal_id="sig_1", coverage=SignalCoverage.COMPLETE
+                source_tool="semgrep",
+                source_signal_id="sig_1",
+                coverage=SignalCoverage.COMPLETE,
+                location=SastLocation(file_path="app/views.py", start_line=1, end_line=1),
             ),
         )
 

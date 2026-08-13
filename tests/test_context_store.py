@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -50,7 +51,10 @@ def test_record_and_get_hypothesis_roundtrip():
         suspected_behavior="b",
         observation_criteria="c",
         provenance=HypothesisProvenance(
-            source_tool="semgrep", source_signal_id=signal.signal_id, coverage=SignalCoverage.COMPLETE
+            source_tool="semgrep",
+            source_signal_id=signal.signal_id,
+            coverage=SignalCoverage.COMPLETE,
+            location=signal.location,
         ),
     )
     result = HypothesisResult(status=HypothesisStatus.HYPOTHESIS, hypothesis=hypothesis)
@@ -65,6 +69,7 @@ def test_record_and_get_hypothesis_roundtrip():
     assert record["status"] == "hypothesis"
     assert record["expected_behavior"] == "a"
     assert record["reason"] is None
+    assert json.loads(record["location"]) == json.loads(signal.location.model_dump_json())
     store.close()
 
 
@@ -103,7 +108,10 @@ def test_get_hypotheses_by_signal_id_returns_all_attempts_in_order():
         suspected_behavior="b",
         observation_criteria="c",
         provenance=HypothesisProvenance(
-            source_tool="semgrep", source_signal_id=signal.signal_id, coverage=SignalCoverage.COMPLETE
+            source_tool="semgrep",
+            source_signal_id=signal.signal_id,
+            coverage=SignalCoverage.COMPLETE,
+            location=signal.location,
         ),
     )
     store.record_hypothesis(
@@ -137,6 +145,53 @@ def test_record_hypothesis_raises_clean_runtime_error_on_db_error():
 
     with pytest.raises(RuntimeError, match="Không ghi được hypothesis"):
         store.record_hypothesis(result, signal)
+
+
+def test_opens_pre_existing_db_missing_location_column_without_crashing(tmp_path):
+    # Mô phỏng .secweave/context.db tạo ra bởi bản code cũ (trước khi thêm cột
+    # location) — mở lại bằng code mới không được vỡ với "no such column".
+    db_path = str(tmp_path / "old_schema.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE hypotheses (
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hypothesis_id TEXT UNIQUE,
+            signal_id TEXT NOT NULL,
+            source_tool TEXT NOT NULL,
+            status TEXT NOT NULL,
+            expected_behavior TEXT,
+            suspected_behavior TEXT,
+            observation_criteria TEXT,
+            reason TEXT,
+            coverage TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = SecurityContextStore(db_path=db_path)
+    signal = _signal()
+    hypothesis = Hypothesis(
+        hypothesis_id="hyp_after_migration",
+        expected_behavior="a",
+        suspected_behavior="b",
+        observation_criteria="c",
+        provenance=HypothesisProvenance(
+            source_tool="semgrep",
+            source_signal_id=signal.signal_id,
+            coverage=SignalCoverage.COMPLETE,
+            location=signal.location,
+        ),
+    )
+    store.record_hypothesis(HypothesisResult(status=HypothesisStatus.HYPOTHESIS, hypothesis=hypothesis), signal)
+    record = store.get_hypothesis("hyp_after_migration")
+    store.close()
+
+    assert record is not None
+    assert json.loads(record["location"]) == json.loads(signal.location.model_dump_json())
 
 
 def test_default_db_path_persists_to_disk(tmp_path, monkeypatch):
