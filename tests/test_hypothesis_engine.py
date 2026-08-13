@@ -153,6 +153,45 @@ def test_engine_returns_not_verifiable_when_llm_says_so():
     assert "mơ hồ" in result.reason
 
 
+def test_engine_returns_not_verifiable_when_verifiable_key_missing_entirely():
+    # Thiếu hẳn "verifiable" khác với "verifiable": true — dù 3 field text vẫn
+    # có mặt, không được âm thầm coi là hợp lệ.
+    response = json.dumps(
+        {"expected_behavior": "a", "suspected_behavior": "b", "observation_criteria": "c"}
+    )
+    engine = HypothesisEngine(FakeLLMClient(responses=[response]))
+    result = engine.generate_hypothesis(_signal())
+
+    assert result.status == HypothesisStatus.NOT_VERIFIABLE
+    assert "verifiable" in result.reason
+
+
+@pytest.mark.parametrize("falsy_value", ["false", "False", "0", "no", "", None])
+def test_engine_recognizes_non_bool_falsy_verifiable_representations(falsy_value):
+    response = json.dumps({"verifiable": falsy_value, "reason": "lý do thật của LLM"})
+    engine = HypothesisEngine(FakeLLMClient(responses=[response]))
+    result = engine.generate_hypothesis(_signal())
+
+    assert result.status == HypothesisStatus.NOT_VERIFIABLE
+    assert result.reason == "lý do thật của LLM"
+
+
+@pytest.mark.parametrize("truthy_value", ["true", "True", 1])
+def test_engine_recognizes_non_bool_truthy_verifiable_representations(truthy_value):
+    response = json.dumps(
+        {
+            "verifiable": truthy_value,
+            "expected_behavior": "a",
+            "suspected_behavior": "b",
+            "observation_criteria": "c",
+        }
+    )
+    engine = HypothesisEngine(FakeLLMClient(responses=[response]))
+    result = engine.generate_hypothesis(_signal())
+
+    assert result.status == HypothesisStatus.HYPOTHESIS
+
+
 def test_engine_returns_not_verifiable_on_missing_required_field():
     response = json.dumps({"verifiable": True, "expected_behavior": "X"})  # thiếu 2 field
     engine = HypothesisEngine(FakeLLMClient(responses=[response]))

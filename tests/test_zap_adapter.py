@@ -111,7 +111,8 @@ def test_zap_adapter_ignores_legacy_risk_field_not_used_by_real_zap():
     assert signals[0].severity.raw == "Informational (Medium)"
 
 
-def test_zap_adapter_missing_uri_fails_loud():
+def test_zap_adapter_skips_instance_missing_uri_and_reports_it_via_on_skip():
+    # instances[0] thiếu "uri", instances[1] hợp lệ — chỉ bỏ qua instance lỗi.
     raw = {
         "site": [
             {
@@ -120,16 +121,56 @@ def test_zap_adapter_missing_uri_fails_loud():
                         "pluginid": "10202",
                         "riskcode": "1",
                         "riskdesc": "Low (Medium)",
-                        "instances": [{"method": "GET"}],
+                        "instances": [
+                            {"method": "GET"},
+                            {"uri": "https://x/ok", "method": "GET"},
+                        ],
                     }
                 ]
             }
         ]
     }
-    with pytest.raises(KeyError):
-        ZapAdapter().parse(
-            raw_report=raw,
-            raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
-            tool_version="2.14.0",
-            coverage=SignalCoverage.UNKNOWN,
-        )
+    skipped = []
+    signals = ZapAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="2.14.0",
+        coverage=SignalCoverage.UNKNOWN,
+        on_skip=skipped.append,
+    )
+
+    assert len(signals) == 1
+    assert signals[0].location.url == "https://x/ok"
+    assert len(skipped) == 1
+    assert "instances[0]" in skipped[0]
+    assert "owasp_zap" in skipped[0]
+
+
+def test_zap_adapter_alert_with_no_instances_reports_via_on_skip():
+    raw = {
+        "site": [
+            {
+                "alerts": [
+                    {
+                        "pluginid": "99",
+                        "riskcode": "0",
+                        "riskdesc": "Informational (Low)",
+                        "instances": [],
+                    }
+                ]
+            }
+        ]
+    }
+    skipped = []
+    signals = ZapAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="2.14.0",
+        coverage=SignalCoverage.UNKNOWN,
+        on_skip=skipped.append,
+    )
+
+    assert signals == []
+    assert len(skipped) == 1
+    assert "pluginid=99" in skipped[0]
+    assert "không có instance nào" in skipped[0]

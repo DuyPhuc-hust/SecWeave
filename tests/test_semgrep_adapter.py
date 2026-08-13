@@ -1,8 +1,6 @@
 import hashlib
 from pathlib import Path
 
-import pytest
-
 from hypothesis_engine.signal_normalizer.semgrep_adapter import SemgrepAdapter
 from hypothesis_engine.signal_normalizer.orchestrator import SignalNormalizer
 from shared.models.signal import NormalizedSeverity, RawReference, SignalCoverage, SignalType
@@ -59,12 +57,26 @@ def test_semgrep_adapter_does_not_invent_target_hint():
     assert all(s.target_hint.component_hint is None for s in signals)
 
 
-def test_semgrep_adapter_missing_required_field_fails_loud():
-    raw = {"results": [{"check_id": "some.rule", "start": {"line": 1}, "end": {"line": 1}}]}
-    with pytest.raises(KeyError):
-        SemgrepAdapter().parse(
-            raw,
-            RawReference(storage_path="in-memory", hash="sha256:0"),
-            tool_version="1.78.0",
-            coverage=SignalCoverage.UNKNOWN,
-        )
+def test_semgrep_adapter_skips_malformed_entry_and_reports_it_via_on_skip():
+    # 1 entry thiếu field bắt buộc ("path") giữa các entry hợp lệ khác — không
+    # được để nó làm mất toàn bộ report, chỉ bỏ qua đúng entry đó và báo lại.
+    raw = {
+        "results": [
+            {"check_id": "good.rule.1", "path": "a.py", "start": {"line": 1}, "end": {"line": 1}},
+            {"check_id": "bad.rule", "start": {"line": 1}, "end": {"line": 1}},  # thiếu "path"
+            {"check_id": "good.rule.2", "path": "b.py", "start": {"line": 2}, "end": {"line": 2}},
+        ]
+    }
+    skipped = []
+    signals = SemgrepAdapter().parse(
+        raw,
+        RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="1.78.0",
+        coverage=SignalCoverage.UNKNOWN,
+        on_skip=skipped.append,
+    )
+
+    assert [s.rule.id for s in signals] == ["good.rule.1", "good.rule.2"]
+    assert len(skipped) == 1
+    assert "results[1]" in skipped[0]
+    assert "semgrep" in skipped[0]

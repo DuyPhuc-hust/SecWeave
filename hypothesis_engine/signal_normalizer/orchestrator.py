@@ -1,9 +1,9 @@
 import hashlib
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-from hypothesis_engine.signal_normalizer.base import SignalAdapter
+from hypothesis_engine.signal_normalizer.base import OnSkipCallback, SignalAdapter
 from hypothesis_engine.signal_normalizer.semgrep_adapter import SemgrepAdapter
 from hypothesis_engine.signal_normalizer.trivy_adapter import TrivyAdapter
 from hypothesis_engine.signal_normalizer.zap_adapter import ZapAdapter
@@ -27,6 +27,7 @@ class SignalNormalizer:
         tool: str,
         tool_version: str,
         coverage: SignalCoverage = SignalCoverage.UNKNOWN,
+        on_skip: Optional[OnSkipCallback] = None,
     ) -> List[NormalizedSignal]:
         adapter = self._adapters.get(tool)
         if adapter is None:
@@ -45,4 +46,4 @@ class SignalNormalizer:
                 f"('{report_path}' có phải đúng report của tool '{tool}' không?)"
             )
 
-        return adapter.parse(raw_report, raw_reference, tool_version, coverage)
+        return adapter.parse(raw_report, raw_reference, tool_version, coverage, on_skip=on_skip)

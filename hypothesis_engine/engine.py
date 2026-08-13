@@ -15,6 +15,17 @@ from shared.models.signal import NormalizedSignal
 
 REQUIRED_FIELDS = ("expected_behavior", "suspected_behavior", "observation_criteria")
 
+_FALSY_STRINGS = {"false", "0", "no", "null", "none", ""}
+
+
+def _is_truthy(value: Any) -> bool:
+    # LLM đôi khi trả "verifiable" dưới dạng string ("false"/"true") hoặc số
+    # (0/1) thay vì bool JSON thuần — `value is False` chỉ bắt đúng bool, bỏ
+    # sót các dạng biểu diễn khác của "sai", khiến reason thật của LLM bị mất.
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSY_STRINGS
+    return bool(value)
+
 
 def _strip_markdown_json_fence(text: str) -> str:
     """LLM thật hay bọc JSON trong ```json ... ``` dù prompt đã yêu cầu JSON thuần.
@@ -84,7 +95,16 @@ class HypothesisEngine:
                 reason="LLM trả về JSON không đúng cấu trúc object",
             )
 
-        if data.get("verifiable") is False:
+        if "verifiable" not in data:
+            # Thiếu hẳn field bắt buộc "verifiable" — khác với "verifiable=true"
+            # thật sự. Không được coi đây là hợp lệ chỉ vì 3 field text kia
+            # tình cờ có mặt: LLM chưa từng khẳng định tín hiệu kiểm chứng được.
+            return HypothesisResult(
+                status=HypothesisStatus.NOT_VERIFIABLE,
+                reason="LLM output thiếu field bắt buộc: verifiable",
+            )
+
+        if not _is_truthy(data["verifiable"]):
             reason = data.get("reason") or "LLM đánh giá tín hiệu không đủ để lập giả thuyết"
             return HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, reason=reason)
 

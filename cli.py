@@ -14,6 +14,10 @@ from shared.models.hypothesis import HypothesisStatus
 from shared.models.signal import SignalCoverage
 
 
+def _print_skip_warning(message: str) -> None:
+    print(f"CẢNH BÁO: {message}", file=sys.stderr)
+
+
 def cmd_normalize(args: argparse.Namespace) -> int:
     normalizer = SignalNormalizer()
     try:
@@ -22,6 +26,7 @@ def cmd_normalize(args: argparse.Namespace) -> int:
             tool=args.tool,
             tool_version=args.tool_version,
             coverage=SignalCoverage(args.coverage),
+            on_skip=_print_skip_warning,
         )
     except FileNotFoundError:
         print(f"error: không tìm thấy file '{args.signal}'", file=sys.stderr)
@@ -55,6 +60,7 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
             tool=args.tool,
             tool_version=args.tool_version,
             coverage=SignalCoverage(args.coverage),
+            on_skip=_print_skip_warning,
         )
     except FileNotFoundError:
         print(f"error: không tìm thấy file '{args.signal}'", file=sys.stderr)

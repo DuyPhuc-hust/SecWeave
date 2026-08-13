@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import pytest
-
 from hypothesis_engine.signal_normalizer.orchestrator import SignalNormalizer
 from hypothesis_engine.signal_normalizer.trivy_adapter import TrivyAdapter
 from shared.models.signal import NormalizedSeverity, RawReference, SignalCoverage, SignalType
@@ -77,7 +75,9 @@ def test_trivy_adapter_result_with_no_vulnerabilities_key_produces_no_signals():
     assert signals == []
 
 
-def test_trivy_adapter_missing_target_fails_loud():
+def test_trivy_adapter_skips_result_missing_target_and_reports_it_via_on_skip():
+    # Result[0] thiếu "Target" (bỏ toàn bộ Vulnerabilities của nó), Result[1]
+    # hợp lệ — chỉ Result[0] bị bỏ qua, không mất luôn Result[1].
     raw = {
         "Results": [
             {
@@ -89,13 +89,56 @@ def test_trivy_adapter_missing_target_fails_loud():
                         "Severity": "CRITICAL",
                     }
                 ]
+            },
+            {
+                "Target": "requirements.txt",
+                "Vulnerabilities": [
+                    {
+                        "VulnerabilityID": "CVE-2023-0002",
+                        "PkgName": "requests",
+                        "InstalledVersion": "2.25.0",
+                        "Severity": "HIGH",
+                    }
+                ],
+            },
+        ]
+    }
+    skipped = []
+    signals = TrivyAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="0.53.0",
+        coverage=SignalCoverage.COMPLETE,
+        on_skip=skipped.append,
+    )
+
+    assert [s.rule.id for s in signals] == ["CVE-2023-0002"]
+    assert len(skipped) == 1
+    assert "Results[0]" in skipped[0]
+    assert "trivy" in skipped[0]
+
+
+def test_trivy_adapter_null_severity_treated_as_unknown():
+    raw = {
+        "Results": [
+            {
+                "Target": "requirements.txt",
+                "Vulnerabilities": [
+                    {
+                        "VulnerabilityID": "CVE-2023-9999",
+                        "PkgName": "somepkg",
+                        "InstalledVersion": "1.0.0",
+                        "Severity": None,
+                    }
+                ],
             }
         ]
     }
-    with pytest.raises(KeyError):
-        TrivyAdapter().parse(
-            raw_report=raw,
-            raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
-            tool_version="0.53.0",
-            coverage=SignalCoverage.COMPLETE,
-        )
+    signals = TrivyAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="0.53.0",
+        coverage=SignalCoverage.COMPLETE,
+    )
+    assert signals[0].severity.raw == "UNKNOWN"
+    assert signals[0].severity.normalized == NormalizedSeverity.INFO
