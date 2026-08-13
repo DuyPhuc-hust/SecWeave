@@ -12,6 +12,7 @@ from shared.models.signal import SignalCoverage
 
 def _hypothesis():
     return Hypothesis(
+        hypothesis_id="hyp_test1",
         expected_behavior="Chỉ owner của object mới đọc được object đó.",
         suspected_behavior="Object có thể đọc được bởi identity không sở hữu nó.",
         observation_criteria="Response trả về dữ liệu object khi identity khác owner gọi endpoint.",
@@ -24,6 +25,19 @@ def _hypothesis():
 def test_hypothesis_result_valid_hypothesis():
     result = HypothesisResult(status=HypothesisStatus.HYPOTHESIS, hypothesis=_hypothesis())
     assert result.hypothesis.expected_behavior.startswith("Chỉ owner")
+    assert result.hypothesis.hypothesis_id == "hyp_test1"
+
+
+def test_hypothesis_requires_hypothesis_id():
+    with pytest.raises(ValidationError):
+        Hypothesis(
+            expected_behavior="a",
+            suspected_behavior="b",
+            observation_criteria="c",
+            provenance=HypothesisProvenance(
+                source_tool="semgrep", source_signal_id="sig_1", coverage=SignalCoverage.COMPLETE
+            ),
+        )
 
 
 def test_hypothesis_result_not_verifiable_requires_reason():

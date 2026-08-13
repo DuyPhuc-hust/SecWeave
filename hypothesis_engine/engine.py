@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import ValidationError
 
 from hypothesis_engine.llm_client.base import HypothesisLLMClient
+from shared.id_generator import generate_id
 from shared.models.hypothesis import (
     Hypothesis,
     HypothesisProvenance,
@@ -96,6 +97,7 @@ class HypothesisEngine:
 
         try:
             hypothesis = Hypothesis(
+                hypothesis_id=generate_id("hyp"),
                 expected_behavior=data["expected_behavior"],
                 suspected_behavior=data["suspected_behavior"],
                 observation_criteria=data["observation_criteria"],

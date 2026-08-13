@@ -6,9 +6,11 @@ from hypothesis_engine.engine import HypothesisEngine
 from hypothesis_engine.llm_client.fake_client import FakeLLMClient
 from shared.models.hypothesis import HypothesisStatus
 from shared.models.signal import (
+    DastLocation,
     NormalizedSignal,
     RawReference,
     RuleInfo,
+    ScaLocation,
     SastLocation,
     SeverityInfo,
     SignalCoverage,
@@ -18,7 +20,7 @@ from shared.models.signal import (
 )
 
 
-def _signal():
+def _semgrep_signal():
     return NormalizedSignal(
         signal_id="sig_test1",
         source=SignalSource(
@@ -32,6 +34,96 @@ def _signal():
         ingested_at="2026-08-12T00:00:00Z",
         raw_reference=RawReference(storage_path="x", hash="sha256:0"),
     )
+
+
+# Alias giữ để không phải sửa lại toàn bộ test cũ vốn không quan tâm loại signal.
+_signal = _semgrep_signal
+
+
+def _trivy_signal():
+    return NormalizedSignal(
+        signal_id="sig_test_trivy",
+        source=SignalSource(
+            tool="trivy", tool_version="0.53.0", type=SignalType.SCA, coverage=SignalCoverage.COMPLETE
+        ),
+        rule=RuleInfo(id="CVE-2023-32681", name="requests: Proxy-Authorization header leak", cwe=["CWE-200"]),
+        severity=SeverityInfo(raw="HIGH", normalized="high"),
+        location=ScaLocation(
+            package_name="requests",
+            installed_version="2.25.0",
+            fixed_version="2.31.0",
+            artifact_ref="requirements.txt",
+        ),
+        signal_context="Proxy-Authorization header leak on cross-origin redirect",
+        target_hint=TargetHint(),
+        ingested_at="2026-08-12T00:00:00Z",
+        raw_reference=RawReference(storage_path="x", hash="sha256:0"),
+    )
+
+
+def _zap_signal():
+    return NormalizedSignal(
+        signal_id="sig_test_zap",
+        source=SignalSource(
+            tool="owasp_zap", tool_version="2.14.0", type=SignalType.DAST, coverage=SignalCoverage.PARTIAL
+        ),
+        rule=RuleInfo(id="10202", name="Absence of Anti-CSRF Tokens", cwe=["CWE-352"]),
+        severity=SeverityInfo(raw="Medium", normalized="medium"),
+        location=DastLocation(
+            url="https://staging.example.com/api/objects/1", http_method="GET", parameter=None
+        ),
+        signal_context='<form method="POST">',
+        target_hint=TargetHint(),
+        ingested_at="2026-08-12T00:00:00Z",
+        raw_reference=RawReference(storage_path="x", hash="sha256:0"),
+    )
+
+
+_VALID_LLM_RESPONSE = json.dumps(
+    {
+        "verifiable": True,
+        "expected_behavior": "a",
+        "suspected_behavior": "b",
+        "observation_criteria": "c",
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "signal_factory,expected_tool,expected_coverage,location_field_in_prompt",
+    [
+        (_semgrep_signal, "semgrep", SignalCoverage.COMPLETE, "start_line"),
+        (_trivy_signal, "trivy", SignalCoverage.COMPLETE, "package_name"),
+        (_zap_signal, "owasp_zap", SignalCoverage.PARTIAL, "http_method"),
+    ],
+)
+def test_engine_works_regardless_of_signal_source_type(
+    signal_factory, expected_tool, expected_coverage, location_field_in_prompt
+):
+    signal = signal_factory()
+    fake = FakeLLMClient(responses=[_VALID_LLM_RESPONSE])
+    engine = HypothesisEngine(fake)
+
+    result = engine.generate_hypothesis(signal)
+
+    assert result.status == HypothesisStatus.HYPOTHESIS
+    assert result.hypothesis.hypothesis_id.startswith("hyp_")
+    assert result.hypothesis.provenance.source_tool == expected_tool
+    assert result.hypothesis.provenance.source_signal_id == signal.signal_id
+    assert result.hypothesis.provenance.coverage == expected_coverage
+    # Đảm bảo prompt thực sự mang đúng field đặc trưng của loại location đó
+    # tới LLM — không phải mọi loại signal đều tình cờ hoạt động vì trùng field.
+    assert location_field_in_prompt in fake.calls[0]
+
+
+def test_engine_generates_unique_hypothesis_id_per_call():
+    fake = FakeLLMClient(responses=[_VALID_LLM_RESPONSE, _VALID_LLM_RESPONSE])
+    engine = HypothesisEngine(fake)
+
+    result_1 = engine.generate_hypothesis(_semgrep_signal())
+    result_2 = engine.generate_hypothesis(_semgrep_signal())
+
+    assert result_1.hypothesis.hypothesis_id != result_2.hypothesis.hypothesis_id
 
 
 def test_engine_produces_hypothesis_from_valid_llm_response():

@@ -13,6 +13,7 @@ class HypothesisProvenance(BaseModel):
 
 
 class Hypothesis(BaseModel):
+    hypothesis_id: str
     expected_behavior: str
     suspected_behavior: str
     observation_criteria: str

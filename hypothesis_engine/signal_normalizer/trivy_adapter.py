@@ -1,8 +1,8 @@
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from hypothesis_engine.signal_normalizer.base import SignalAdapter
+from shared.id_generator import generate_id
 from shared.models.signal import (
     NormalizedSeverity,
     NormalizedSignal,
@@ -51,7 +51,7 @@ class TrivyAdapter(SignalAdapter):
 
                 signals.append(
                     NormalizedSignal(
-                        signal_id=f"sig_{uuid.uuid4().hex[:12]}",
+                        signal_id=generate_id("sig"),
                         source=SignalSource(
                             tool=self.tool_name,
                             tool_version=tool_version,

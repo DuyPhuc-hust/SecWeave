@@ -9,7 +9,7 @@ class FakeLLMClient(HypothesisLLMClient):
     Đây KHÔNG phải "fake LLM" theo nghĩa sản phẩm (không có đường CLI nào dùng
     class này) — đây là test double chuẩn để test logic parse/validate của
     HypothesisEngine một cách tất định, không phụ thuộc mạng/API key khi chạy
-    `pytest`. Xem AnthropicLLMClient cho đường dùng LLM thật.
+    `pytest`. Xem OpenAICompatibleLLMClient cho đường dùng LLM thật.
     """
 
     def __init__(

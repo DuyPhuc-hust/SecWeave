@@ -110,7 +110,7 @@ class _StubOpenAICompatibleClient:
         )
 
 
-def test_cli_hypothesize_json_output_with_stubbed_real_client(capsys, monkeypatch):
+def test_cli_hypothesize_json_output_with_stubbed_real_client(capsys, monkeypatch, tmp_path):
     import hypothesis_engine.llm_client.openai_compatible_client as llm_module
 
     monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubOpenAICompatibleClient)
@@ -126,6 +126,8 @@ def test_cli_hypothesize_json_output_with_stubbed_real_client(capsys, monkeypatc
             "1.78.0",
             "--format",
             "json",
+            "--context-db",
+            str(tmp_path / "test.db"),
         ]
     )
     captured = capsys.readouterr()
@@ -138,7 +140,7 @@ def test_cli_hypothesize_json_output_with_stubbed_real_client(capsys, monkeypatc
     assert "CẢNH BÁO" in captured.err
 
 
-def test_cli_hypothesize_table_output_includes_provenance(capsys, monkeypatch):
+def test_cli_hypothesize_table_output_includes_provenance(capsys, monkeypatch, tmp_path):
     import hypothesis_engine.llm_client.openai_compatible_client as llm_module
 
     monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubOpenAICompatibleClient)
@@ -152,6 +154,8 @@ def test_cli_hypothesize_table_output_includes_provenance(capsys, monkeypatch):
             "semgrep",
             "--tool-version",
             "1.78.0",
+            "--context-db",
+            str(tmp_path / "test.db"),
         ]
     )
     captured = capsys.readouterr()
@@ -162,6 +166,66 @@ def test_cli_hypothesize_table_output_includes_provenance(capsys, monkeypatch):
     assert "source_signal_id=" in captured.out
 
 
+def test_cli_hypothesize_records_hypothesis_to_context_store(capsys, monkeypatch, tmp_path):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubOpenAICompatibleClient)
+    db_path = str(tmp_path / "test.db")
+
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+    hypothesis_id = data[0]["result"]["hypothesis"]["hypothesis_id"]
+
+    assert exit_code == 0
+
+    show_exit_code = cli.main(
+        [
+            "show-hypothesis",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    record = json.loads(capsys.readouterr().out)
+
+    assert show_exit_code == 0
+    assert record["hypothesis_id"] == hypothesis_id
+    assert record["status"] == "hypothesis"
+
+
+def test_cli_show_hypothesis_not_found_returns_error(capsys, tmp_path):
+    exit_code = cli.main(
+        [
+            "show-hypothesis",
+            "--hypothesis-id",
+            "hyp_does_not_exist",
+            "--context-db",
+            str(tmp_path / "test.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không tìm thấy hypothesis_id" in captured.err
+
+
 class _RaisingClient:
     model = "raising-model"
 
@@ -170,7 +234,7 @@ class _RaisingClient:
 
 
 def test_cli_hypothesize_llm_call_failure_is_reported_cleanly_not_as_traceback(
-    capsys, monkeypatch
+    capsys, monkeypatch, tmp_path
 ):
     import hypothesis_engine.llm_client.openai_compatible_client as llm_module
 
@@ -185,6 +249,8 @@ def test_cli_hypothesize_llm_call_failure_is_reported_cleanly_not_as_traceback(
             "semgrep",
             "--tool-version",
             "1.78.0",
+            "--context-db",
+            str(tmp_path / "test.db"),
         ]
     )
     captured = capsys.readouterr()
@@ -194,7 +260,106 @@ def test_cli_hypothesize_llm_call_failure_is_reported_cleanly_not_as_traceback(
     assert "Traceback" not in captured.err
 
 
-def test_cli_hypothesize_without_llm_env_vars_fails_cleanly(capsys, monkeypatch):
+class _FlakyClient:
+    """Thành công lần gọi đầu, lỗi từ lần thứ 2 trở đi — mô phỏng 1 signal giữa
+    chừng bị lỗi mạng sau khi (các) signal trước đã sinh hypothesis thành công.
+    """
+
+    model = "flaky-model"
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def generate(self, prompt: str) -> str:
+        self.call_count += 1
+        if self.call_count == 1:
+            return json.dumps(
+                {
+                    "verifiable": True,
+                    "expected_behavior": "a",
+                    "suspected_behavior": "b",
+                    "observation_criteria": "c",
+                }
+            )
+        raise RuntimeError("simulated failure on later signal")
+
+
+def test_cli_hypothesize_persists_partial_success_before_later_failure(
+    capsys, monkeypatch, tmp_path
+):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _FlakyClient)
+    db_path = str(tmp_path / "test.db")
+
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+
+    # Lượt chạy vẫn báo lỗi (không giả vờ thành công)...
+    assert exit_code == 1
+    assert "error: simulated failure on later signal" in captured.err
+    # ...nhưng signal đầu đã thành công thì vẫn phải xuất hiện trong output...
+    assert len(data) == 1
+    hypothesis_id = data[0]["result"]["hypothesis"]["hypothesis_id"]
+    # ...và thực sự được ghi vào Context Store, không bị vứt bỏ.
+    from context_store.store import SecurityContextStore
+
+    store = SecurityContextStore(db_path=db_path)
+    record = store.get_hypothesis(hypothesis_id)
+    store.close()
+    assert record is not None
+    assert record["status"] == "hypothesis"
+
+
+def test_cli_hypothesize_closes_context_store_even_on_early_failure(monkeypatch, tmp_path):
+    for var in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+
+    import context_store.store as store_module
+
+    close_calls = []
+    original_close = store_module.SecurityContextStore.close
+
+    def _tracking_close(self):
+        close_calls.append(True)
+        original_close(self)
+
+    monkeypatch.setattr(store_module.SecurityContextStore, "close", _tracking_close)
+
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--context-db",
+            str(tmp_path / "test.db"),
+        ]
+    )
+
+    assert exit_code == 1
+    assert close_calls == [True]
+
+
+def test_cli_hypothesize_without_llm_env_vars_fails_cleanly(capsys, monkeypatch, tmp_path):
     for var in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"):
         monkeypatch.delenv(var, raising=False)
     exit_code = cli.main(
@@ -206,6 +371,8 @@ def test_cli_hypothesize_without_llm_env_vars_fails_cleanly(capsys, monkeypatch)
             "semgrep",
             "--tool-version",
             "1.78.0",
+            "--context-db",
+            str(tmp_path / "test.db"),
         ]
     )
     captured = capsys.readouterr()

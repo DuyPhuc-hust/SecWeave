@@ -6,7 +6,7 @@ from typing import List, Optional
 
 import httpx
 
-from context_store.store import SecurityContextStore
+from context_store.store import DEFAULT_DB_PATH, SecurityContextStore
 from hypothesis_engine.engine import HypothesisEngine
 from hypothesis_engine.signal_normalizer.orchestrator import SignalNormalizer
 from shared.models.hypothesis import HypothesisStatus
@@ -70,49 +70,54 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
             print(f"error: không tìm thấy source file '{args.source}'", file=sys.stderr)
             return 1
 
-    context_store = SecurityContextStore()
-    verified_context = (
-        context_store.get_verified_context(args.target_id) if args.target_id else []
-    )
-    context_store.close()
-
-    if args.llm_mode == "agent":
-        from hypothesis_engine.llm_client.agent_bridge_client import AgentBridgeLLMClient
-
-        llm_client = AgentBridgeLLMClient()
-        print(
-            "CẢNH BÁO: chế độ agent-bridge — không gọi API nào, prompt sẽ được ghi ra "
-            "file để bạn nhờ agent (Claude Code) xử lý thủ công từng signal.",
-            file=sys.stderr,
-        )
-    else:
-        from hypothesis_engine.llm_client.openai_compatible_client import OpenAICompatibleLLMClient
-
-        try:
-            llm_client = OpenAICompatibleLLMClient()
-        except RuntimeError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        print(
-            f"CẢNH BÁO: sắp gửi NormalizedSignal (và source code nếu có) tới LLM thật "
-            f"(model={llm_client.model}).",
-            file=sys.stderr,
-        )
-
-    engine = HypothesisEngine(llm_client)
+    context_store = SecurityContextStore(db_path=args.context_db)
+    results: List[tuple] = []
+    failure: Optional[str] = None
     try:
-        results = [
-            (
-                signal,
-                engine.generate_hypothesis(
-                    signal, source_snippet=source_snippet, verified_context=verified_context
-                ),
+        verified_context = (
+            context_store.get_verified_context(args.target_id) if args.target_id else []
+        )
+
+        if args.llm_mode == "agent":
+            from hypothesis_engine.llm_client.agent_bridge_client import AgentBridgeLLMClient
+
+            llm_client = AgentBridgeLLMClient()
+            print(
+                "CẢNH BÁO: chế độ agent-bridge — không gọi API nào, prompt sẽ được ghi ra "
+                "file để bạn nhờ agent (Claude Code) xử lý thủ công từng signal.",
+                file=sys.stderr,
             )
-            for signal in signals
-        ]
-    except (RuntimeError, httpx.HTTPError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        else:
+            from hypothesis_engine.llm_client.openai_compatible_client import OpenAICompatibleLLMClient
+
+            try:
+                llm_client = OpenAICompatibleLLMClient()
+            except RuntimeError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            print(
+                f"CẢNH BÁO: sắp gửi NormalizedSignal (và source code nếu có) tới LLM thật "
+                f"(model={llm_client.model}).",
+                file=sys.stderr,
+            )
+
+        # Ghi lại NGAY từng hypothesis vừa sinh thành công (không gom hết vào 1
+        # list rồi mới ghi) — nếu 1 signal giữa chừng lỗi (mất mạng, hết quota),
+        # các hypothesis đã trả tiền/thời gian để sinh trước đó vẫn được giữ lại,
+        # không bị vứt bỏ theo kiểu tất-cả-hoặc-không-gì.
+        engine = HypothesisEngine(llm_client)
+        for signal in signals:
+            try:
+                result = engine.generate_hypothesis(
+                    signal, source_snippet=source_snippet, verified_context=verified_context
+                )
+            except (RuntimeError, httpx.HTTPError) as exc:
+                failure = str(exc)
+                break
+            context_store.record_hypothesis(result, signal)
+            results.append((signal, result))
+    finally:
+        context_store.close()
 
     if args.format == "json":
         payload = [
@@ -128,7 +133,7 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
         print(f"-> {len(results)} hypothesis result(s) từ '{args.signal}'")
         for signal, result in results:
             if result.status == HypothesisStatus.HYPOTHESIS:
-                print(f"  [{signal.rule.id}] HYPOTHESIS")
+                print(f"  [{signal.rule.id}] HYPOTHESIS ({result.hypothesis.hypothesis_id})")
                 provenance = result.hypothesis.provenance
                 print(f"    Expected behavior   : {result.hypothesis.expected_behavior}")
                 print(f"    Suspected behavior  : {result.hypothesis.suspected_behavior}")
@@ -139,6 +144,35 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
                 )
             else:
                 print(f"  [{signal.rule.id}] NOT_VERIFIABLE — {result.reason}")
+
+    if failure:
+        print(f"error: {failure}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def cmd_show_hypothesis(args: argparse.Namespace) -> int:
+    context_store = SecurityContextStore(db_path=args.context_db)
+    record = context_store.get_hypothesis(args.hypothesis_id)
+    context_store.close()
+
+    if record is None:
+        print(f"error: không tìm thấy hypothesis_id '{args.hypothesis_id}'", file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        print(json.dumps(record, indent=2, ensure_ascii=False))
+    else:
+        print(f"hypothesis_id       : {record['hypothesis_id']}")
+        print(f"signal_id           : {record['signal_id']}")
+        print(f"source_tool         : {record['source_tool']}")
+        print(f"status              : {record['status']}")
+        print(f"coverage            : {record['coverage']}")
+        print(f"created_at          : {record['created_at']}")
+        print(f"expected_behavior   : {record['expected_behavior']}")
+        print(f"suspected_behavior  : {record['suspected_behavior']}")
+        print(f"observation_criteria: {record['observation_criteria']}")
 
     return 0
 
@@ -190,7 +224,21 @@ def build_parser() -> argparse.ArgumentParser:
         "agent (không cần API key, bắc cầu qua file để agent đang chat xử lý)",
     )
     hypothesize_parser.add_argument("--format", default="table", choices=["table", "json"])
+    hypothesize_parser.add_argument(
+        "--context-db", default=DEFAULT_DB_PATH, help="Đường dẫn file SQLite Context Store (mặc định: %(default)s)"
+    )
     hypothesize_parser.set_defaults(func=cmd_hypothesize)
+
+    show_hypothesis_parser = subparsers.add_parser(
+        "show-hypothesis",
+        help="Tra cứu lại 1 hypothesis đã sinh trước đó, theo hypothesis_id",
+    )
+    show_hypothesis_parser.add_argument("--hypothesis-id", required=True)
+    show_hypothesis_parser.add_argument("--format", default="table", choices=["table", "json"])
+    show_hypothesis_parser.add_argument(
+        "--context-db", default=DEFAULT_DB_PATH, help="Đường dẫn file SQLite Context Store (mặc định: %(default)s)"
+    )
+    show_hypothesis_parser.set_defaults(func=cmd_show_hypothesis)
 
     return parser
 
