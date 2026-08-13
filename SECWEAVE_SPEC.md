@@ -275,7 +275,7 @@ stateDiagram-v2
 | Hành vi kỳ vọng | Hệ thống lẽ ra phải làm gì |
 | Hành vi nghi ngờ | Điều bị nghi ngờ xảy ra sai |
 | Tiêu chí quan sát | Điều gì phân biệt được hai khả năng trên bằng bằng chứng máy đọc |
-| Provenance | Tín hiệu gốc đến từ đâu (nguồn, coverage: `complete`/`partial`/`unknown` nếu từ Codex Security) |
+| Provenance | Tín hiệu gốc đến từ đâu: nguồn (`source_tool`, `source_signal_id`), coverage (`complete`/`partial`/`unknown` nếu từ Codex Security), và `location` gốc của signal (URL cho DAST, file+line cho SAST, package cho SCA) — giữ lại location là bắt buộc, thiếu nó Exploit Agent không có đích cụ thể để lập action plan dù signal gốc có vị trí rõ ràng |
 
 **Quy tắc bắt buộc:** một tín hiệu **không** diễn đạt được thành giả thuyết kiểm chứng được thì bị đánh dấu *"không kiểm chứng được ở phạm vi hiện tại"* và dừng — đây là **kết quả hợp lệ**, không phải lỗi.
 
