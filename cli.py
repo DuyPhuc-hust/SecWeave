@@ -234,6 +234,12 @@ def cmd_show_hypothesis(args: argparse.Namespace) -> int:
 
 
 def _load_stored_hypothesis(record: dict) -> Hypothesis:
+    if record["location"] is None:
+        raise ValueError(
+            f"hypothesis_id '{record['hypothesis_id']}' được lưu trước khi Context Store có field "
+            "'location' (bản ghi cũ) — chạy lại 'hypothesize' cho signal gốc để sinh hypothesis mới "
+            "đủ thông tin cho 'plan'."
+        )
     return Hypothesis(
         hypothesis_id=record["hypothesis_id"],
         expected_behavior=record["expected_behavior"],
@@ -268,7 +274,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         )
         return 1
 
-    hypothesis = _load_stored_hypothesis(record)
+    try:
+        hypothesis = _load_stored_hypothesis(record)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     if args.llm_mode == "agent":
         from hypothesis_engine.llm_client.agent_bridge_client import AgentBridgeLLMClient

@@ -34,7 +34,7 @@ def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
     # khớp, tương đương lỗ hổng scope-escape/SSRF ngay trong chính Policy
     # Service (đã phát hiện và vá — xem tests/test_policy.py).
     try:
-        method, template = allowed_action.split(" ", 1)
+        method, template = allowed_action.split(maxsplit=1)
     except ValueError:
         return False
     if action.method.upper() != method.upper():

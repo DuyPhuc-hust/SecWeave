@@ -511,6 +511,10 @@ def test_cli_hypothesize_agent_mode_batches_all_signals_into_one_wait(
         )
 
     monkeypatch.setattr(agent_module.AgentBridgeLLMClient, "_wait_for_agent", _fake_wait)
+    # AgentBridgeLLMClient() dùng work_dir mặc định (".secweave_agent_bridge",
+    # đường dẫn tương đối) — không chdir vào tmp_path sẽ ghi file thật vào
+    # .secweave_agent_bridge/ của chính project mỗi lần chạy test.
+    monkeypatch.chdir(tmp_path)
     db_path = str(tmp_path / "test.db")
 
     exit_code = cli.main(
@@ -595,6 +599,31 @@ def test_cli_plan_not_found_hypothesis_id_returns_error(capsys, tmp_path):
 
     assert exit_code == 1
     assert "không tìm thấy hypothesis_id" in captured.err
+
+
+def test_cli_plan_stored_hypothesis_missing_location_reports_clean_error(capsys, tmp_path):
+    # Regression thật: bản ghi hypothesis lưu từ trước khi Context Store có
+    # field "location" (location=NULL) từng khiến `plan` crash traceback
+    # (json.loads(None)) thay vì báo lỗi sạch.
+    from context_store.store import SecurityContextStore
+
+    db_path = str(tmp_path / "test.db")
+    store = SecurityContextStore(db_path=db_path)
+    store._conn.execute(
+        "INSERT INTO hypotheses (hypothesis_id, signal_id, source_tool, status, "
+        "expected_behavior, suspected_behavior, observation_criteria, coverage, location, created_at) "
+        "VALUES (?, ?, ?, 'hypothesis', ?, ?, ?, ?, NULL, ?)",
+        ("hyp_old", "sig_old", "semgrep", "a", "b", "c", "unknown", "2026-01-01T00:00:00Z"),
+    )
+    store._conn.commit()
+    store.close()
+
+    exit_code = cli.main(["plan", "--hypothesis-id", "hyp_old", "--context-db", db_path])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "được lưu trước khi Context Store có field 'location'" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_cli_plan_approves_when_action_matches_allowlist(capsys, monkeypatch, tmp_path):
@@ -709,6 +738,60 @@ def test_cli_plan_reports_not_plannable(capsys, monkeypatch, tmp_path):
     assert exit_code == 0
     assert "NOT_PLANNABLE" in captured.out
     assert "mơ hồ" in captured.out
+
+
+def test_cli_plan_agent_mode_uses_agent_bridge_client(capsys, monkeypatch, tmp_path):
+    import hypothesis_engine.llm_client.agent_bridge_client as agent_module
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    wait_calls = []
+
+    def _fake_wait(self, prompt_path, response_path):
+        wait_calls.append(prompt_path)
+        response_path.write_text(
+            json.dumps(
+                {
+                    "plannable": True,
+                    "actions": [
+                        {
+                            "type": "read_only",
+                            "method": "GET",
+                            "target": "https://staging.example.com/api/objects/42",
+                            "description": "Read object 42.",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(agent_module.AgentBridgeLLMClient, "_wait_for_agent", _fake_wait)
+    # Đảm bảo test không vô tình gọi API thật nếu nhánh --llm-mode chọn sai.
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _RaisingClient)
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET https://staging.example.com/api/objects/{id}",
+            "--llm-mode",
+            "agent",
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert len(wait_calls) == 1
+    assert "APPROVED" in captured.out
+    assert "Traceback" not in captured.out
 
 
 def test_cli_plan_llm_call_failure_is_reported_cleanly_not_as_traceback(

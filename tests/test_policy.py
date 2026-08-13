@@ -69,6 +69,15 @@ def test_allowlist_entry_missing_host_never_matches():
     assert decision.allowed is False
 
 
+def test_allowlist_entry_tolerates_extra_whitespace_between_method_and_url():
+    # Gõ nhầm 2 dấu cách vẫn phải khớp đúng — trước đây urlsplit() coi cả
+    # khoảng trắng thừa là 1 phần path, khiến netloc rỗng và luôn bị từ chối
+    # dù allowlist "trông đúng" bằng mắt thường.
+    authorization = sample_authorization(allowed_actions=["GET  https://staging.example.com/api/objects/{id}"])
+    decision = is_allowed(_action(), authorization, now=NOW)
+    assert decision.allowed is True
+
+
 @pytest.mark.parametrize("method", ["DELETE", "PUT", "PATCH", "delete", "put"])
 def test_destructive_methods_are_always_denied_regardless_of_allowlist(method):
     # Allowlist "cho phép" endpoint này bằng mọi method — nhưng method phá hoại
