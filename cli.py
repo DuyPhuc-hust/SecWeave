@@ -316,4 +316,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    # Chỉ tự nạp .env khi chạy CLI thật (python cli.py ...), KHÔNG nạp khi
+    # cli.main() được gọi trực tiếp từ test — nếu không, 1 file .env thật nằm
+    # sẵn trên máy dev sẽ âm thầm phá test đang cố mô phỏng "thiếu env var".
+    from dotenv import load_dotenv
+
+    load_dotenv()
     raise SystemExit(main())
