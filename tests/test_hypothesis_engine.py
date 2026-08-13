@@ -254,3 +254,20 @@ def test_engine_prompt_never_contains_blind_marker_concept():
     engine.generate_hypothesis(_signal())
     assert "blind marker" not in fake.calls[0].lower()
     assert "marker" not in fake.calls[0].lower()
+
+
+def test_engine_prompt_separates_instructions_from_untrusted_data():
+    # signal_context (đặc biệt của ZAP) có thể chứa văn bản trích từ response
+    # thật của target đang bị quét — không được để lẫn với phần chỉ dẫn mà
+    # không có cảnh báo/dấu phân cách, tránh prompt injection từ dữ liệu target.
+    engine = HypothesisEngine(FakeLLMClient(responses=["{}"]))
+    prompt = engine.build_prompt(_semgrep_signal(), source_snippet=None, verified_context=None)
+
+    marker = "===== DỮ LIỆU ====="
+    assert marker in prompt
+    instructions, data = prompt.split(marker, 1)
+    assert "là dữ liệu để phân tích" in instructions
+    assert "Signal:" in data
+    # Toàn bộ nội dung signal (dữ liệu) phải nằm SAU dấu phân cách, không lẫn
+    # vào phần chỉ dẫn phía trên.
+    assert "Signal:" not in instructions
