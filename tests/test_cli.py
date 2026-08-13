@@ -482,3 +482,58 @@ def test_cli_hypothesize_missing_source_file_returns_error(capsys):
 
     assert exit_code == 1
     assert "không tìm thấy source file" in captured.err
+
+
+def test_cli_hypothesize_agent_mode_batches_all_signals_into_one_wait(
+    capsys, monkeypatch, tmp_path
+):
+    # SEMGREP_FIXTURE có 2 finding — xác nhận cả 2 được xử lý qua ĐÚNG 1 lần
+    # chờ agent (không phải 2 lần), và cả 2 vẫn được lưu đúng vào Context Store.
+    import hypothesis_engine.llm_client.agent_bridge_client as agent_module
+
+    wait_calls = []
+
+    def _fake_wait(self, prompt_path, response_path):
+        wait_calls.append(prompt_path)
+        response_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "verifiable": True,
+                        "expected_behavior": "a",
+                        "suspected_behavior": "b",
+                        "observation_criteria": "c",
+                    },
+                    {"verifiable": False, "reason": "not enough context"},
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(agent_module.AgentBridgeLLMClient, "_wait_for_agent", _fake_wait)
+    db_path = str(tmp_path / "test.db")
+
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--llm-mode",
+            "agent",
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert len(wait_calls) == 1
+    assert len(data) == 2
+    assert data[0]["result"]["status"] == "hypothesis"
+    assert data[1]["result"]["status"] == "not_verifiable"

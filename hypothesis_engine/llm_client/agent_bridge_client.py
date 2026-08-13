@@ -1,5 +1,7 @@
+import json
 import sys
 from pathlib import Path
+from typing import List
 
 from hypothesis_engine.llm_client.base import HypothesisLLMClient
 from shared.id_generator import generate_id
@@ -43,6 +45,50 @@ class AgentBridgeLLMClient(HypothesisLLMClient):
         if not response_path.exists():
             raise RuntimeError(f"Không tìm thấy file response tại '{response_path}'")
         return response_path.read_text(encoding="utf-8")
+
+    def generate_many(self, prompts: List[str]) -> List[str]:
+        """Gộp nhiều prompt vào 1 file, chờ agent trả lời đúng 1 lần — thay vì
+        lặp lại 'ghi prompt -> chờ Enter' cho từng signal riêng lẻ. Nhờ vậy
+        report có N finding chỉ cần 1 vòng tương tác thay vì N vòng.
+        """
+        self._counter += 1
+        prompt_path = self._work_dir / f"prompt_{self._run_id}_batch{self._counter}.txt"
+        response_path = self._work_dir / f"response_{self._run_id}_batch{self._counter}.txt"
+        if response_path.exists():
+            response_path.unlink()
+
+        sections = [
+            f"Có {len(prompts)} signal cần lập giả thuyết bên dưới, đánh số 1..{len(prompts)}.",
+            f"BẮT BUỘC: trả lời bằng ĐÚNG 1 JSON array gồm {len(prompts)} phần tử, đúng thứ tự "
+            "1..N — mỗi phần tử là 1 object JSON (không phải string JSON lồng nhau) theo đúng "
+            "format đã mô tả trong phần hướng dẫn riêng của từng signal bên dưới.",
+        ]
+        for i, prompt in enumerate(prompts, start=1):
+            sections.append(f"===== SIGNAL {i}/{len(prompts)} =====\n{prompt}")
+        prompt_path.write_text("\n\n".join(sections), encoding="utf-8")
+
+        self._wait_for_agent(prompt_path, response_path)
+
+        if not response_path.exists():
+            raise RuntimeError(f"Không tìm thấy file response tại '{response_path}'")
+
+        raw = response_path.read_text(encoding="utf-8")
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"File response phải là JSON array hợp lệ: {exc}") from exc
+
+        if not isinstance(parsed, list) or len(parsed) != len(prompts):
+            actual = len(parsed) if isinstance(parsed, list) else type(parsed).__name__
+            raise RuntimeError(
+                f"File response phải là JSON array đúng {len(prompts)} phần tử theo thứ tự "
+                f"1..{len(prompts)}, nhận được {actual}"
+            )
+
+        # Trả về List[str] — mỗi phần tử encode lại thành JSON string, giữ đúng
+        # kiểu trả về như generate() để HypothesisEngine.parse_response() dùng
+        # lại được nguyên logic, không cần biết gì về việc đã gộp batch.
+        return [json.dumps(item, ensure_ascii=False) for item in parsed]
 
     def _wait_for_agent(self, prompt_path: Path, response_path: Path) -> None:
         print(f"\n>>> Đã ghi prompt ra: {prompt_path}", file=sys.stderr)

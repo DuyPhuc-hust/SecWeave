@@ -95,8 +95,9 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
 
             llm_client = AgentBridgeLLMClient()
             print(
-                "CẢNH BÁO: chế độ agent-bridge — không gọi API nào, prompt sẽ được ghi ra "
-                "file để bạn nhờ agent (Claude Code) xử lý thủ công từng signal.",
+                "CẢNH BÁO: chế độ agent-bridge — không gọi API nào. Toàn bộ "
+                f"{len(signals)} signal sẽ gộp vào 1 file prompt, bạn chỉ cần nhờ "
+                "agent (Claude Code) xử lý và chờ Enter đúng 1 lần.",
                 file=sys.stderr,
             )
         else:
@@ -113,21 +114,44 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
-        # Ghi lại NGAY từng hypothesis vừa sinh thành công (không gom hết vào 1
-        # list rồi mới ghi) — nếu 1 signal giữa chừng lỗi (mất mạng, hết quota),
-        # các hypothesis đã trả tiền/thời gian để sinh trước đó vẫn được giữ lại,
-        # không bị vứt bỏ theo kiểu tất-cả-hoặc-không-gì.
         engine = HypothesisEngine(llm_client)
-        for signal in signals:
+
+        if args.llm_mode == "agent":
+            # Gộp tất cả signal vào đúng 1 vòng hỏi-đáp thay vì lặp lại "ghi
+            # prompt -> chờ Enter" cho từng signal riêng lẻ — xây hết prompt
+            # trước, gọi generate_many() một lần, rồi parse lại từng response.
+            prompts = [
+                engine.build_prompt(signal, source_snippet, verified_context)
+                for signal in signals
+            ]
             try:
-                result = engine.generate_hypothesis(
-                    signal, source_snippet=source_snippet, verified_context=verified_context
-                )
-                context_store.record_hypothesis(result, signal)
-            except (RuntimeError, httpx.HTTPError) as exc:
+                raw_responses = llm_client.generate_many(prompts)
+            except RuntimeError as exc:
                 failure = str(exc)
-                break
-            results.append((signal, result))
+                raw_responses = []
+            for signal, raw in zip(signals, raw_responses):
+                try:
+                    result = engine.parse_response(raw, signal)
+                    context_store.record_hypothesis(result, signal)
+                except RuntimeError as exc:
+                    failure = str(exc)
+                    break
+                results.append((signal, result))
+        else:
+            # Ghi lại NGAY từng hypothesis vừa sinh thành công (không gom hết
+            # vào 1 list rồi mới ghi) — nếu 1 signal giữa chừng lỗi (mất mạng,
+            # hết quota), các hypothesis đã trả tiền/thời gian để sinh trước đó
+            # vẫn được giữ lại, không bị vứt bỏ theo kiểu tất-cả-hoặc-không-gì.
+            for signal in signals:
+                try:
+                    result = engine.generate_hypothesis(
+                        signal, source_snippet=source_snippet, verified_context=verified_context
+                    )
+                    context_store.record_hypothesis(result, signal)
+                except (RuntimeError, httpx.HTTPError) as exc:
+                    failure = str(exc)
+                    break
+                results.append((signal, result))
     finally:
         context_store.close()
 

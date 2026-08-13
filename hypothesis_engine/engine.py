@@ -54,11 +54,11 @@ class HypothesisEngine:
         source_snippet: Optional[str] = None,
         verified_context: Optional[List[Dict[str, Any]]] = None,
     ) -> HypothesisResult:
-        prompt = self._build_prompt(signal, source_snippet, verified_context)
+        prompt = self.build_prompt(signal, source_snippet, verified_context)
         raw_output = self._llm_client.generate(prompt)
-        return self._parse_response(raw_output, signal)
+        return self.parse_response(raw_output, signal)
 
-    def _build_prompt(
+    def build_prompt(
         self,
         signal: NormalizedSignal,
         source_snippet: Optional[str],
@@ -80,7 +80,7 @@ class HypothesisEngine:
             parts.append(f"Ngữ cảnh đã verified từ lần chạy trước: {json.dumps(verified_context, ensure_ascii=False)}")
         return "\n\n".join(parts)
 
-    def _parse_response(self, raw_output: str, signal: NormalizedSignal) -> HypothesisResult:
+    def parse_response(self, raw_output: str, signal: NormalizedSignal) -> HypothesisResult:
         try:
             data = json.loads(_strip_markdown_json_fence(raw_output))
         except json.JSONDecodeError:
