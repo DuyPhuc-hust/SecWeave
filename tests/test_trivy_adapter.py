@@ -60,8 +60,9 @@ def test_trivy_adapter_container_artifact_type():
 
 
 def test_trivy_adapter_result_with_no_vulnerabilities_key_produces_no_signals():
-    # Trivy thường trả về một Result entry cho mỗi package type đã quét, kể cả
-    # khi không tìm thấy lỗ hổng nào — khi đó key "Vulnerabilities" có thể vắng mặt.
+    # Trivy typically returns one Result entry per package type scanned,
+    # even when no vulnerabilities were found — in that case the
+    # "Vulnerabilities" key can be absent.
     raw = {
         "ArtifactType": "filesystem",
         "Results": [{"Target": "requirements.txt", "Class": "lang-pkgs", "Type": "pip"}],
@@ -76,8 +77,8 @@ def test_trivy_adapter_result_with_no_vulnerabilities_key_produces_no_signals():
 
 
 def test_trivy_adapter_skips_result_missing_target_and_reports_it_via_on_skip():
-    # Result[0] thiếu "Target" (bỏ toàn bộ Vulnerabilities của nó), Result[1]
-    # hợp lệ — chỉ Result[0] bị bỏ qua, không mất luôn Result[1].
+    # Result[0] is missing "Target" (dropping all of its Vulnerabilities),
+    # Result[1] is valid — only Result[0] should be skipped, not Result[1] too.
     raw = {
         "Results": [
             {
@@ -119,9 +120,10 @@ def test_trivy_adapter_skips_result_missing_target_and_reports_it_via_on_skip():
 
 
 def test_trivy_adapter_skips_result_that_is_not_an_object():
-    # Results[0] không phải object (list lọt vào do report hỏng hoặc gán nhầm
-    # --tool) — result["Target"] ném TypeError chứ không phải KeyError, vẫn
-    # phải bỏ qua đúng entry đó thay vì crash cả report.
+    # Results[0] is not an object (a list slipping in from a corrupted
+    # report or a mismatched --tool) — result["Target"] raises TypeError, not
+    # KeyError, but must still skip exactly that entry instead of crashing
+    # the whole report.
     raw = {
         "Results": [
             ["not", "an", "object"],

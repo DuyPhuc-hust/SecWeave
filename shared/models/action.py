@@ -5,11 +5,12 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class ActionType(str, Enum):
-    """SPEC §4.2 — chỉ 2 loại hành động được xem xét cho phép trong pilot.
+    """SPEC §4.2 — only 2 action types are considered allowable in the pilot.
 
-    Hành động xóa/sửa dữ liệu hiện hữu, đổi cấu hình, ảnh hưởng khả dụng, hay
-    quét diện rộng KHÔNG có giá trị enum tương ứng — không thể construct được
-    một ActionType thuộc các loại đó, dù chỉ để thử nghiệm.
+    Actions that delete/modify existing data, change configuration, impact
+    availability, or perform broad-scope scanning have NO corresponding enum
+    value — an ActionType of those kinds cannot be constructed, even for
+    testing purposes.
     """
 
     READ_ONLY = "read_only"
@@ -17,13 +18,14 @@ class ActionType(str, Enum):
 
 
 class ActionSpec(BaseModel):
-    """Một hành động dự kiến trong ActionPlan. Tên field khớp weekly plan W5:
-    `is_allowed(action: ActionSpec) -> PolicyDecision`.
+    """A planned action within an ActionPlan. Field name matches weekly plan
+    W5: `is_allowed(action: ActionSpec) -> PolicyDecision`.
 
-    Model này CHỈ giữ dữ liệu — không tự chặn method nguy hiểm (ví dụ DELETE).
-    Việc chặn thuộc về Policy Service (shared/policy.py), để adversarial test
-    có thể construct đúng loại ActionSpec vi phạm rồi xác nhận bị is_allowed()
-    từ chối, thay vì bị Pydantic chặn trước khi tới được Policy Service.
+    This model ONLY holds data — it does not itself block a dangerous method
+    (e.g. DELETE). That's Policy Service's job (shared/policy.py), so an
+    adversarial test can construct exactly the kind of violating ActionSpec
+    it wants and confirm is_allowed() rejects it, instead of Pydantic
+    blocking it before it ever reaches Policy Service.
     """
 
     type: ActionType
@@ -44,9 +46,10 @@ class ActionPlanStatus(str, Enum):
 
 
 class ActionPlanResult(BaseModel):
-    """Kết quả build_plan — mirror HypothesisResult: engine có thể trả về kế
-    hoạch thật, hoặc từ chối kèm lý do (khi Hypothesis không đủ cụ thể để lập
-    kế hoạch hành động) — không có trạng thái lấp lửng ở giữa.
+    """Result of build_plan — mirrors HypothesisResult: the engine can return
+    either a real plan, or a refusal with a reason (when the Hypothesis isn't
+    concrete enough to build an action plan from) — no ambiguous state in
+    between.
     """
 
     status: ActionPlanStatus
@@ -73,9 +76,10 @@ class ActionCheckResult(BaseModel):
 
 
 class PlanCheckResult(BaseModel):
-    """Kết quả đối chiếu toàn bộ ActionPlan với allowlist — deny-by-default:
-    approved chỉ True khi TẤT CẢ action đều pass, không tự lược bỏ action fail
-    rồi coi phần còn lại là approved (đúng nguyên tắc weekly plan W5).
+    """Result of checking an entire ActionPlan against the allowlist — deny-
+    by-default: approved is True only when ALL actions pass; failing actions
+    are never silently dropped in order to treat the rest as approved (per
+    weekly plan W5's required principle).
     """
 
     approved: bool
@@ -83,9 +87,10 @@ class PlanCheckResult(BaseModel):
 
 
 class CostDecision(BaseModel):
-    """Kết quả Cost Service (khung) — weekly plan W5: chỉ đếm số hành động DỰ
-    KIẾN trong plan so với cap, chưa đếm hành động thật (cần Evidence Harness
-    thật thực thi, tuần sau mới có)."""
+    """Result of Cost Service (skeleton) — weekly plan W5: only counts the
+    PLANNED actions in a plan against a cap; doesn't yet count actually
+    executed actions (needs a real Evidence Harness to execute them, coming
+    the following week)."""
 
     allowed: bool
     reason: str
@@ -94,10 +99,10 @@ class CostDecision(BaseModel):
 
 
 class PlanReviewResult(BaseModel):
-    """Cổng duy nhất trước khi 1 ActionPlan được coi là an toàn để đi tiếp —
-    gộp cả allowlist check (PlanCheckResult) lẫn cost-cap check (CostDecision)
-    thành 1 boolean, để không ai vô tình chỉ gọi 1 trong 2 rồi coi plan là đã
-    được duyệt đầy đủ.
+    """The single gate to use before treating an ActionPlan as safe to
+    proceed with — combines both the allowlist check (PlanCheckResult) and
+    the cost-cap check (CostDecision) into one boolean, so nobody accidentally
+    calls just one of the two and treats the plan as fully approved.
     """
 
     approved: bool

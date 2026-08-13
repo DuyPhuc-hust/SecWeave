@@ -1,8 +1,8 @@
-"""Factory dựng NormalizedSignal mẫu dùng chung giữa nhiều test file.
+"""Factories that build sample data shared across multiple test files.
 
-Không phải pytest fixture (không dùng @pytest.fixture) vì test_hypothesis_engine.py
-cần truyền trực tiếp làm callable vào @pytest.mark.parametrize — fixture không
-dùng được ở đó.
+Not pytest fixtures (no @pytest.fixture) because test_hypothesis_engine.py
+needs to pass these directly as callables into @pytest.mark.parametrize —
+fixtures can't be used there.
 """
 
 from datetime import datetime, timezone

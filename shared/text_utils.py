@@ -3,18 +3,20 @@ from typing import Any
 
 _FALSY_STRINGS = {"false", "0", "no", "null", "none", ""}
 
-# Tìm fence ĐẦU TIÊN xuất hiện ở BẤT KỲ đâu trong text — một số model (ví dụ
-# Llama qua Groq) không chỉ bọc JSON trong ```json ... ``` mà còn thêm cả đoạn
-# văn giải thích trước/sau fence, dù prompt đã yêu cầu JSON thuần. Yêu cầu toàn
-# bộ response phải BẮT ĐẦU bằng fence (như trước) bỏ sót đúng trường hợp này.
+# Find the FIRST fence anywhere in the text — some models (e.g. Llama via
+# Groq) don't just wrap JSON in ```json ... ``` but also add explanatory
+# prose before/after the fence, even though the prompt asked for plain JSON.
+# Requiring the whole response to START with the fence (as before) missed
+# exactly this case.
 _FENCE_PATTERN = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
 
 
 def is_truthy(value: Any) -> bool:
-    """LLM đôi khi trả field bool ("verifiable"/"plannable") dưới dạng string
-    ("false"/"true") hoặc số (0/1) thay vì bool JSON thuần — `value is False`
-    chỉ bắt đúng bool, bỏ sót các dạng biểu diễn khác của "sai", khiến reason
-    thật của LLM bị mất. Dùng chung cho mọi engine parse JSON output từ LLM.
+    """LLMs sometimes return a bool field ("verifiable"/"plannable") as a
+    string ("false"/"true") or a number (0/1) instead of a plain JSON bool —
+    `value is False` only catches the real bool and misses these other
+    representations of "false", losing the LLM's actual reason. Shared by
+    every engine that parses JSON output from an LLM.
     """
     if isinstance(value, str):
         return value.strip().lower() not in _FALSY_STRINGS
@@ -22,14 +24,15 @@ def is_truthy(value: Any) -> bool:
 
 
 def strip_markdown_json_fence(text: str) -> str:
-    """LLM thật hay bọc JSON trong ```json ... ``` dù prompt đã yêu cầu JSON thuần
-    — có model còn thêm cả đoạn văn giải thích trước/sau fence chứ không chỉ bọc
-    gọn JSON. Tìm fence đầu tiên xuất hiện ở bất kỳ đâu trong response; nếu không
-    có fence nào thì trả nguyên text — không cố đoán/sửa JSON hỏng kiểu khác, để
-    lỗi JSON thật sự vẫn được báo đúng thay vì bị che giấu.
+    """LLMs often wrap JSON in ```json ... ``` even when the prompt asked for
+    plain JSON — some models also add explanatory prose before/after the
+    fence instead of just the fenced JSON. Finds the first fence anywhere in
+    the response; if there is no fence at all, returns the text unchanged —
+    doesn't try to guess/fix other kinds of malformed JSON, so a genuine JSON
+    error is still reported correctly instead of being masked.
 
-    Dùng chung cho mọi engine parse JSON output từ LLM (Hypothesis Engine, Exploit
-    Agent, ...) — không đặc thù cho riêng engine nào.
+    Shared by every engine that parses JSON output from an LLM (Hypothesis
+    Engine, Exploit Agent, ...) — not specific to any one engine.
     """
     match = _FENCE_PATTERN.search(text)
     if match:

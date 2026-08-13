@@ -21,7 +21,7 @@ from tests.factories import semgrep_sqli_signal
 
 _semgrep_signal = semgrep_sqli_signal
 
-# Alias giữ để không phải sửa lại toàn bộ test cũ vốn không quan tâm loại signal.
+# Alias kept so older tests that don't care about signal type don't need rewriting.
 _signal = _semgrep_signal
 
 
@@ -96,8 +96,9 @@ def test_engine_works_regardless_of_signal_source_type(
     assert result.hypothesis.provenance.source_tool == expected_tool
     assert result.hypothesis.provenance.source_signal_id == signal.signal_id
     assert result.hypothesis.provenance.coverage == expected_coverage
-    # Đảm bảo prompt thực sự mang đúng field đặc trưng của loại location đó
-    # tới LLM — không phải mọi loại signal đều tình cờ hoạt động vì trùng field.
+    # Ensures the prompt actually carries that location type's distinctive
+    # field to the LLM — not every signal type happens to work just because
+    # of overlapping field names.
     assert location_field_in_prompt in fake.calls[0]
 
 
@@ -139,8 +140,9 @@ def test_engine_returns_not_verifiable_when_llm_says_so():
 
 
 def test_engine_returns_not_verifiable_when_verifiable_key_missing_entirely():
-    # Thiếu hẳn "verifiable" khác với "verifiable": true — dù 3 field text vẫn
-    # có mặt, không được âm thầm coi là hợp lệ.
+    # Entirely missing "verifiable" is different from "verifiable": true —
+    # even though the 3 text fields are still present, must not silently
+    # treat this as valid.
     response = json.dumps(
         {"expected_behavior": "a", "suspected_behavior": "b", "observation_criteria": "c"}
     )
@@ -178,7 +180,7 @@ def test_engine_recognizes_non_bool_truthy_verifiable_representations(truthy_val
 
 
 def test_engine_returns_not_verifiable_on_missing_required_field():
-    response = json.dumps({"verifiable": True, "expected_behavior": "X"})  # thiếu 2 field
+    response = json.dumps({"verifiable": True, "expected_behavior": "X"})  # missing 2 fields
     engine = HypothesisEngine(FakeLLMClient(responses=[response]))
     result = engine.generate_hypothesis(_signal())
 
@@ -203,7 +205,8 @@ def test_engine_returns_not_verifiable_when_llm_returns_json_array_not_object():
 
 
 def test_engine_extracts_json_wrapped_in_markdown_fence():
-    # LLM thật hay trả JSON kèm ```json ... ``` dù prompt đã yêu cầu JSON thuần.
+    # Real LLMs often return JSON wrapped in ```json ... ``` even though the
+    # prompt asked for plain JSON.
     fenced_response = (
         "```json\n"
         + json.dumps(
@@ -224,9 +227,10 @@ def test_engine_extracts_json_wrapped_in_markdown_fence():
 
 
 def test_engine_propagates_llm_call_failures_instead_of_swallowing_them():
-    # Lỗi hạ tầng (mất mạng, hết quota...) khác bản chất với "signal không đủ để
-    # lập giả thuyết" — không được để hai loại lỗi này lẫn vào nhau thành cùng
-    # một NOT_VERIFIABLE, vì sẽ che mất sự cố vận hành thật.
+    # Infrastructure errors (network loss, quota exhausted...) are a
+    # different kind of thing from "signal isn't enough to build a
+    # hypothesis" — these two error types must not be conflated into the
+    # same NOT_VERIFIABLE, as that would hide a real operational incident.
     def _raise(_prompt: str) -> str:
         raise ConnectionError("LLM provider unreachable")
 
@@ -236,8 +240,9 @@ def test_engine_propagates_llm_call_failures_instead_of_swallowing_them():
 
 
 def test_engine_prompt_never_contains_blind_marker_concept():
-    # Ràng buộc cứng SPEC §4.1: Hypothesis Engine không được biết blind marker.
-    # Test này khoá lại việc build_prompt không vô tình đưa khái niệm đó vào.
+    # Hard constraint from SPEC §4.1: Hypothesis Engine must not know the
+    # blind marker. This test locks down that build_prompt never
+    # accidentally introduces that concept.
     fake = FakeLLMClient(
         responses=[
             json.dumps(
@@ -257,9 +262,10 @@ def test_engine_prompt_never_contains_blind_marker_concept():
 
 
 def test_engine_prompt_separates_instructions_from_untrusted_data():
-    # signal_context (đặc biệt của ZAP) có thể chứa văn bản trích từ response
-    # thật của target đang bị quét — không được để lẫn với phần chỉ dẫn mà
-    # không có cảnh báo/dấu phân cách, tránh prompt injection từ dữ liệu target.
+    # signal_context (especially ZAP's) can contain text extracted from a
+    # real response of the target being scanned — must not be mixed in with
+    # the instructions without a warning/delimiter, to avoid prompt
+    # injection from target data.
     engine = HypothesisEngine(FakeLLMClient(responses=["{}"]))
     prompt = engine.build_prompt(_semgrep_signal(), source_snippet=None, verified_context=None)
 
@@ -268,6 +274,6 @@ def test_engine_prompt_separates_instructions_from_untrusted_data():
     instructions, data = prompt.split(marker, 1)
     assert "là dữ liệu để phân tích" in instructions
     assert "Signal:" in data
-    # Toàn bộ nội dung signal (dữ liệu) phải nằm SAU dấu phân cách, không lẫn
-    # vào phần chỉ dẫn phía trên.
+    # The entire signal content (data) must come AFTER the delimiter, not
+    # mixed into the instructions above it.
     assert "Signal:" not in instructions

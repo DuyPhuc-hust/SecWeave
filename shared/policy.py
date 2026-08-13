@@ -6,19 +6,21 @@ from urllib.parse import urlsplit
 from shared.models.action import ActionSpec, PolicyDecision
 from shared.models.entities import Authorization
 
-# SPEC §4.2: "hành động xóa, sửa dữ liệu hiện hữu, đổi cấu hình, tác động khả
-# dụng dịch vụ, hoặc quét mạng diện rộng ... không được đưa vào allowlist dưới
-# bất kỳ hình thức nào" — chặn cứng ở đây, không phụ thuộc nội dung allowlist
-# (allowlist cấu hình sai cũng không thể mở khóa các method này).
+# SPEC §4.2: "actions that delete/modify existing data, change configuration,
+# impact service availability, or perform broad-scope scanning ... must never
+# be added to the allowlist under any circumstances" — hard-blocked here,
+# independent of allowlist content (a misconfigured allowlist can't unlock
+# these methods either).
 FORBIDDEN_METHODS = {"DELETE", "PUT", "PATCH", "TRACE", "CONNECT"}
 
 
 def _path_template_to_regex(template: str) -> re.Pattern:
-    # "/api/objects/{id}" -> mỗi {..} khớp đúng 1 path segment (không khớp "/").
-    # Không tự thêm ^/$ — dùng fullmatch() ở nơi gọi thay vì match() với "$",
-    # để không phụ thuộc ngữ nghĩa tinh vi của "$" (khớp cả trước 1 newline
-    # cuối chuỗi) — urlsplit() đã tự lọc control character nên chưa thấy khai
-    # thác được qua đường này, nhưng fullmatch() vẫn đơn giản và chắc chắn hơn.
+    # "/api/objects/{id}" -> each {..} matches exactly 1 path segment (never
+    # matches "/"). Doesn't add its own ^/$ — the caller uses fullmatch()
+    # instead of match() with "$", to avoid depending on the subtle semantics
+    # of "$" (which also matches right before a trailing newline) — urlsplit()
+    # already strips control characters so this hasn't been exploitable
+    # through that path, but fullmatch() is simpler and more certain anyway.
     segments = re.split(r"(\{[^/{}]+\})", template)
     regex_parts = [
         r"[^/]+" if seg.startswith("{") and seg.endswith("}") else re.escape(seg)
@@ -28,11 +30,12 @@ def _path_template_to_regex(template: str) -> re.Pattern:
 
 
 def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
-    # allowed_action BẮT BUỘC là URL đầy đủ có scheme+host, dạng
-    # "METHOD https://host/path/template/{param}" — KHÔNG chỉ có path. Chỉ so
-    # path (bỏ qua host) sẽ cho phép action nhắm bất kỳ host nào miễn path
-    # khớp, tương đương lỗ hổng scope-escape/SSRF ngay trong chính Policy
-    # Service (đã phát hiện và vá — xem tests/test_policy.py).
+    # allowed_action MUST be a full URL with scheme+host, in the form
+    # "METHOD https://host/path/template/{param}" — NOT just a path. Matching
+    # only the path (ignoring host) would let an action target any host as
+    # long as the path matches — equivalent to a scope-escape/SSRF
+    # vulnerability inside Policy Service itself (found and fixed — see
+    # tests/test_policy.py).
     try:
         method, template = allowed_action.split(maxsplit=1)
     except ValueError:
@@ -44,8 +47,9 @@ def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
     template_url = urlsplit(template)
 
     if not template_url.netloc:
-        # Allowlist entry thiếu host — coi là cấu hình sai, từ chối thẳng
-        # thay vì âm thầm chỉ so path (đó chính là lỗ hổng đã vá).
+        # Allowlist entry missing a host — treat as misconfiguration and deny
+        # outright, instead of silently falling back to matching path only
+        # (that's exactly the vulnerability that was fixed).
         return False
     if action_url.scheme != template_url.scheme:
         return False
@@ -60,9 +64,10 @@ def is_allowed(
 ) -> PolicyDecision:
     """Policy Service — weekly plan W5: `is_allowed(action) -> PolicyDecision`.
 
-    Không kiểm tra cap số lượng hành động (thuộc Cost Service, chưa xây trong
-    lượt này) hay việc Execution Release đã cấp chưa (thuộc bước Execute, chưa
-    tới trong W5) — chỉ kiểm những gì thuộc phạm vi allowlist/thời hạn.
+    Does not check the action-count cap (that's Cost Service, not built in
+    this pass) or whether Execution Release has been granted (that's the
+    Execute step, not reached in W5) — only checks what's within scope of
+    the allowlist/time window.
     """
     now = now or datetime.now(timezone.utc)
     method = action.method.upper()

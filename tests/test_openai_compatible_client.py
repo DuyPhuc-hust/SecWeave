@@ -81,9 +81,10 @@ def test_generate_raises_on_http_error(monkeypatch):
     ],
 )
 def test_generate_raises_clean_runtime_error_on_malformed_200_response(monkeypatch, body):
-    # HTTP 200 nhưng body không đúng chuẩn OpenAI chat completions (content
-    # filtering, proxy lỗi, endpoint không tương thích thật...) — raise_for_status()
-    # không bắt được vì status vẫn là 200, phải tự kiểm tra shape.
+    # HTTP 200 but the body doesn't match the OpenAI chat completions shape
+    # (content filtering, a proxy error, a not-truly-compatible endpoint...)
+    # — raise_for_status() doesn't catch this since the status is still 200,
+    # so the shape must be checked explicitly.
     monkeypatch.setenv("LLM_API_KEY", "test-key")
     monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1")
     monkeypatch.setenv("LLM_MODEL", "test-model")

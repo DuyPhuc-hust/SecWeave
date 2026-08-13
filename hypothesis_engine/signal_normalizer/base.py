@@ -18,10 +18,11 @@ class SignalAdapter(ABC):
         coverage: SignalCoverage,
         on_skip: Optional[OnSkipCallback] = None,
     ) -> List[NormalizedSignal]:
-        """Chuyển raw_report thành danh sách NormalizedSignal.
+        """Converts raw_report into a list of NormalizedSignal.
 
-        Một entry lỗi (thiếu field bắt buộc, sai kiểu) không được làm mất các
-        entry hợp lệ khác trong cùng report — adapter phải bỏ qua đúng entry
-        đó, gọi on_skip(mô tả lý do) nếu có, và tiếp tục xử lý phần còn lại.
+        One bad entry (missing required field, wrong type) must not lose the
+        other valid entries in the same report — the adapter must skip
+        exactly that entry, call on_skip(reason description) if provided,
+        and keep processing the rest.
         """
         ...

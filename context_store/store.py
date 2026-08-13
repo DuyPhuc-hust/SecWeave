@@ -49,11 +49,13 @@ class SecurityContextStore:
         self._conn.commit()
 
     def _migrate_add_missing_columns(self) -> None:
-        # "CREATE TABLE IF NOT EXISTS" không tự thêm cột mới vào bảng đã tồn tại
-        # từ trước (ví dụ .secweave/context.db tạo ra bởi bản code cũ) — không
-        # có cột này, mọi record_hypothesis()/get_hypothesis() sau đó sẽ vỡ với
-        # "no such column" thay vì lỗi rõ ràng. MVP chưa cần khung migration đầy
-        # đủ, chỉ cần đủ để không mất dữ liệu cũ khi schema thêm cột mới.
+        # "CREATE TABLE IF NOT EXISTS" doesn't add new columns to a table
+        # that already existed before (e.g. a .secweave/context.db created by
+        # an older version of the code) — without this column, every
+        # subsequent record_hypothesis()/get_hypothesis() would break with
+        # "no such column" instead of a clear error. The MVP doesn't need a
+        # full migration framework yet, just enough to not lose old data
+        # when the schema adds a new column.
         existing_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(hypotheses)")}
         if "location" not in existing_columns:
             self._conn.execute("ALTER TABLE hypotheses ADD COLUMN location TEXT")
@@ -114,9 +116,10 @@ class SecurityContextStore:
         return dict(zip(self._HYPOTHESIS_COLUMNS, row))
 
     def get_hypotheses_by_signal_id(self, signal_id: str) -> List[Dict[str, Any]]:
-        # Bản ghi NOT_VERIFIABLE không có hypothesis_id (không có Hypothesis nào
-        # được tạo) nên get_hypothesis() không tra được — tra theo signal_id là
-        # cách duy nhất để lấy lại "giả thuyết đã bị bác bỏ kèm lý do" (SPEC §4.6).
+        # A NOT_VERIFIABLE record has no hypothesis_id (no Hypothesis was ever
+        # created), so get_hypothesis() can't look it up — querying by
+        # signal_id is the only way to retrieve "a hypothesis that was
+        # rejected along with its reason" (SPEC §4.6).
         cursor = self._conn.execute(
             f"SELECT {', '.join(self._HYPOTHESIS_COLUMNS)} FROM hypotheses "
             "WHERE signal_id = ? ORDER BY row_id",

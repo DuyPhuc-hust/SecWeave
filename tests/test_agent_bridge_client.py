@@ -45,9 +45,10 @@ def test_generate_uses_incrementing_file_names_per_call(tmp_path, monkeypatch):
 
 
 def test_two_clients_in_same_work_dir_do_not_collide(tmp_path, monkeypatch):
-    # Mô phỏng 2 process CLI riêng biệt cùng chạy --llm-mode agent trong cùng
-    # work_dir — mỗi client có run_id riêng nên không đè lên prompt/response
-    # của nhau, dù bộ đếm nội bộ của mỗi client đều bắt đầu từ 1.
+    # Simulates 2 separate CLI processes both running --llm-mode agent in the
+    # same work_dir — each client has its own run_id so they don't overwrite
+    # each other's prompt/response files, even though each client's internal
+    # counter starts from 1.
     client_a = AgentBridgeLLMClient(work_dir=str(tmp_path))
     client_b = AgentBridgeLLMClient(work_dir=str(tmp_path))
     assert client_a._run_id != client_b._run_id
@@ -108,7 +109,7 @@ def test_generate_many_writes_one_combined_prompt_and_waits_once(tmp_path, monke
 
     results = client.generate_many(["prompt A", "prompt B"])
 
-    assert len(wait_calls) == 1  # đúng 1 lần chờ cho cả 2 prompt, không phải 2
+    assert len(wait_calls) == 1  # exactly 1 wait for both prompts, not 2
     combined_prompt = wait_calls[0].read_text(encoding="utf-8")
     assert "prompt A" in combined_prompt
     assert "prompt B" in combined_prompt

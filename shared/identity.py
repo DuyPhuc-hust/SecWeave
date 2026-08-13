@@ -2,14 +2,14 @@ from shared.models.entities import Authorization
 
 
 def get_execution_identity(authorization: Authorization) -> str:
-    """Identity Service (khung) — weekly plan W5: identity dùng để thực thi
-    hành động CHỈ được lấy từ Authorization đã nạp qua Gate 2 — không có
-    đường nào trong code này đọc biến môi trường hay config cá nhân của
-    người vận hành để dùng thay thế.
+    """Identity Service (skeleton) — weekly plan W5: the identity used to
+    execute an action MUST come only from an Authorization loaded via Gate 2
+    — nothing in this code reads an environment variable or an operator's
+    personal config as a substitute.
 
-    Đây là điểm truy cập DUY NHẤT cho identity thực thi trong toàn bộ
-    codebase — mọi nơi cần identity để thực thi hành động phải gọi qua đây,
-    không tự đọc os.environ hay config cá nhân ở nơi khác.
+    This is the ONLY access point for execution identity in the whole
+    codebase — anywhere that needs an identity to execute an action must go
+    through here, not read os.environ or personal config directly elsewhere.
     """
     if not authorization.identity:
         raise ValueError(

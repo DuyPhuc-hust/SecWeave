@@ -8,27 +8,31 @@ from shared.id_generator import generate_id
 
 
 class AgentBridgeLLMClient(HypothesisLLMClient):
-    """Không gọi API nào từ chính process này. Ghi prompt ra file để agent (ví dụ
-    Claude Code đang chat cùng bạn) đọc và tự viết câu trả lời JSON vào file
-    response, thay vì gọi HTTP tới một provider mới.
+    """Makes no API calls from this process itself. Writes the prompt to a
+    file for an agent (e.g. the Claude Code session you're chatting with) to
+    read and write a JSON reply into a response file, instead of making an
+    HTTP call to a new provider.
 
-    Lưu ý quan trọng: đây chỉ là tiện ích dev/test cục bộ, KHÔNG phải kiến trúc
-    được SPEC/A.html công nhận (§10.1 chỉ định "Kiro hoặc provider đã được
-    duyệt"), và KHÔNG né được câu hỏi chính sách gửi dữ liệu ra AI provider
-    (SPEC §9.7) — agent trả lời qua chat cũng chạy trên hạ tầng của một bên
-    thứ ba (Anthropic), về bản chất không khác gì gọi API trực tiếp. Dùng cho
-    dữ liệu thật của target vẫn cần qua đúng quy trình ISMS/Gate 2 như mọi
-    provider khác. Đổi lại là mỗi signal cần 1 bước thủ công (nhờ agent xử lý
-    rồi Enter tiếp tục), và không pin được version model để tái hiện lại.
+    Important note: this is only a local dev/test convenience, NOT an
+    architecture recognized by SPEC/A.html (§10.1 specifies "Kiro or an
+    approved provider"), and it does NOT sidestep the AI-provider data-policy
+    question (SPEC §9.7) — an agent replying through chat also runs on a
+    third party's infrastructure (Anthropic), which is fundamentally no
+    different from calling an API directly. Real target data still needs to
+    go through the same ISMS/Gate 2 process as any other provider. The
+    tradeoff is that each signal needs one manual step (asking the agent to
+    process it, then pressing Enter), and the model version can't be pinned
+    for reproducibility.
     """
 
     def __init__(self, work_dir: str = ".secweave_agent_bridge") -> None:
         self._work_dir = Path(work_dir)
         self._work_dir.mkdir(parents=True, exist_ok=True)
-        # run_id riêng cho mỗi lần khởi tạo client (mỗi lần chạy CLI) — để 2
-        # process `hypothesize --llm-mode agent` chạy trong cùng work_dir (ví
-        # dụ 1 cái còn đang treo chờ Enter) không ghi đè file prompt/response
-        # của nhau, dù counter trong mỗi process đều bắt đầu từ 1.
+        # Separate run_id per client instantiation (each CLI run) — so 2
+        # `hypothesize --llm-mode agent` processes running in the same
+        # work_dir (e.g. one still hanging waiting for Enter) don't overwrite
+        # each other's prompt/response files, even though each process's
+        # counter starts from 1.
         self._run_id = generate_id("run")
         self._counter = 0
 
@@ -47,9 +51,10 @@ class AgentBridgeLLMClient(HypothesisLLMClient):
         return response_path.read_text(encoding="utf-8")
 
     def generate_many(self, prompts: List[str]) -> List[str]:
-        """Gộp nhiều prompt vào 1 file, chờ agent trả lời đúng 1 lần — thay vì
-        lặp lại 'ghi prompt -> chờ Enter' cho từng signal riêng lẻ. Nhờ vậy
-        report có N finding chỉ cần 1 vòng tương tác thay vì N vòng.
+        """Merges multiple prompts into 1 file, waiting for the agent to
+        reply exactly once — instead of repeating 'write prompt -> wait for
+        Enter' for each signal individually. This way a report with N
+        findings only needs 1 interaction round instead of N.
         """
         self._counter += 1
         prompt_path = self._work_dir / f"prompt_{self._run_id}_batch{self._counter}.txt"
@@ -85,9 +90,10 @@ class AgentBridgeLLMClient(HypothesisLLMClient):
                 f"1..{len(prompts)}, nhận được {actual}"
             )
 
-        # Trả về List[str] — mỗi phần tử encode lại thành JSON string, giữ đúng
-        # kiểu trả về như generate() để HypothesisEngine.parse_response() dùng
-        # lại được nguyên logic, không cần biết gì về việc đã gộp batch.
+        # Returns List[str] — each element re-encoded as a JSON string,
+        # keeping the same return type as generate() so
+        # HypothesisEngine.parse_response() can reuse its logic unchanged,
+        # with no need to know anything about the batching.
         return [json.dumps(item, ensure_ascii=False) for item in parsed]
 
     def _wait_for_agent(self, prompt_path: Path, response_path: Path) -> None:

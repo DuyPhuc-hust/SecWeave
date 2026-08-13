@@ -58,12 +58,12 @@ def test_semgrep_adapter_does_not_invent_target_hint():
 
 
 def test_semgrep_adapter_skips_malformed_entry_and_reports_it_via_on_skip():
-    # 1 entry thiếu field bắt buộc ("path") giữa các entry hợp lệ khác — không
-    # được để nó làm mất toàn bộ report, chỉ bỏ qua đúng entry đó và báo lại.
+    # 1 entry missing a required field ("path") among other valid entries —
+    # must not let it lose the whole report, just skip that entry and report it.
     raw = {
         "results": [
             {"check_id": "good.rule.1", "path": "a.py", "start": {"line": 1}, "end": {"line": 1}},
-            {"check_id": "bad.rule", "start": {"line": 1}, "end": {"line": 1}},  # thiếu "path"
+            {"check_id": "bad.rule", "start": {"line": 1}, "end": {"line": 1}},  # missing "path"
             {"check_id": "good.rule.2", "path": "b.py", "start": {"line": 2}, "end": {"line": 2}},
         ]
     }
@@ -83,9 +83,10 @@ def test_semgrep_adapter_skips_malformed_entry_and_reports_it_via_on_skip():
 
 
 def test_semgrep_adapter_skips_entry_that_is_not_an_object():
-    # results[1] không phải object (string lọt vào do report hỏng hoặc gán
-    # nhầm --tool) — phải bỏ qua đúng entry đó (AttributeError khi gọi .get),
-    # không được để cả report crash với traceback.
+    # results[1] is not an object (a string slipping in from a corrupted
+    # report or a mismatched --tool) — must skip exactly that entry
+    # (AttributeError when calling .get), not crash the whole report with a
+    # traceback.
     raw = {
         "results": [
             {"check_id": "good.rule.1", "path": "a.py", "start": {"line": 1}, "end": {"line": 1}},

@@ -90,11 +90,13 @@ def test_cli_no_subcommand_exits_nonzero():
 
 
 class _StubOpenAICompatibleClient:
-    """Đứng thay OpenAICompatibleLLMClient trong test CLI — không gọi API thật.
+    """Stands in for OpenAICompatibleLLMClient in CLI tests — makes no real
+    API calls.
 
-    Test CLI phải xác nhận đúng luồng nối dây (normalize -> engine -> in kết
-    quả), không phải xác nhận provider thật trả lời đúng — nên monkeypatch
-    class thật bằng stub này, không cần LLM_API_KEY/LLM_BASE_URL/LLM_MODEL.
+    CLI tests need to confirm the wiring (normalize -> engine -> print
+    result) is correct, not that a real provider replies correctly — so the
+    real class is monkeypatched with this stub, no LLM_API_KEY/LLM_BASE_URL/
+    LLM_MODEL needed.
     """
 
     model = "stub-model"
@@ -262,8 +264,8 @@ def test_cli_show_hypothesis_by_signal_id_finds_not_verifiable_record(
     assert exit_code == 0
     assert data[0]["result"]["status"] == "not_verifiable"
 
-    # hypothesis_id không tồn tại cho bản ghi not_verifiable — phải tra được
-    # qua --signal-id, đúng phần vừa fix.
+    # hypothesis_id doesn't exist for a not_verifiable record — must be
+    # queryable via --signal-id, exactly the part that was just fixed.
     show_exit_code = cli.main(
         [
             "show-hypothesis",
@@ -285,7 +287,7 @@ def test_cli_show_hypothesis_by_signal_id_finds_not_verifiable_record(
 
 
 def test_cli_hypothesize_bad_context_db_path_fails_cleanly(capsys, tmp_path):
-    # Trỏ --context-db vào 1 thư mục (không phải file) khiến sqlite3.connect lỗi.
+    # Pointing --context-db at a directory (not a file) makes sqlite3.connect fail.
     bad_path = tmp_path / "not_a_file"
     bad_path.mkdir()
 
@@ -344,8 +346,9 @@ def test_cli_hypothesize_llm_call_failure_is_reported_cleanly_not_as_traceback(
 
 
 class _FlakyClient:
-    """Thành công lần gọi đầu, lỗi từ lần thứ 2 trở đi — mô phỏng 1 signal giữa
-    chừng bị lỗi mạng sau khi (các) signal trước đã sinh hypothesis thành công.
+    """Succeeds on the first call, fails from the second call onward —
+    simulates a signal in the middle hitting a network error after (an)
+    earlier signal(s) already generated a hypothesis successfully.
     """
 
     model = "flaky-model"
@@ -393,13 +396,13 @@ def test_cli_hypothesize_persists_partial_success_before_later_failure(
     captured = capsys.readouterr()
     data = json.loads(captured.out)
 
-    # Lượt chạy vẫn báo lỗi (không giả vờ thành công)...
+    # The run still reports an error (doesn't pretend to succeed)...
     assert exit_code == 1
     assert "error: simulated failure on later signal" in captured.err
-    # ...nhưng signal đầu đã thành công thì vẫn phải xuất hiện trong output...
+    # ...but the first signal that already succeeded must still show up in the output...
     assert len(data) == 1
     hypothesis_id = data[0]["result"]["hypothesis"]["hypothesis_id"]
-    # ...và thực sự được ghi vào Context Store, không bị vứt bỏ.
+    # ...and was actually written to the Context Store, not thrown away.
     from context_store.store import SecurityContextStore
 
     store = SecurityContextStore(db_path=db_path)
@@ -487,8 +490,9 @@ def test_cli_hypothesize_missing_source_file_returns_error(capsys):
 def test_cli_hypothesize_agent_mode_batches_all_signals_into_one_wait(
     capsys, monkeypatch, tmp_path
 ):
-    # SEMGREP_FIXTURE có 2 finding — xác nhận cả 2 được xử lý qua ĐÚNG 1 lần
-    # chờ agent (không phải 2 lần), và cả 2 vẫn được lưu đúng vào Context Store.
+    # SEMGREP_FIXTURE has 2 findings — confirms both are processed through
+    # EXACTLY 1 wait for the agent (not 2), and both still get recorded
+    # correctly into the Context Store.
     import hypothesis_engine.llm_client.agent_bridge_client as agent_module
 
     wait_calls = []
@@ -511,9 +515,9 @@ def test_cli_hypothesize_agent_mode_batches_all_signals_into_one_wait(
         )
 
     monkeypatch.setattr(agent_module.AgentBridgeLLMClient, "_wait_for_agent", _fake_wait)
-    # AgentBridgeLLMClient() dùng work_dir mặc định (".secweave_agent_bridge",
-    # đường dẫn tương đối) — không chdir vào tmp_path sẽ ghi file thật vào
-    # .secweave_agent_bridge/ của chính project mỗi lần chạy test.
+    # AgentBridgeLLMClient() uses the default work_dir (".secweave_agent_bridge",
+    # a relative path) — without chdir-ing into tmp_path, this would write real
+    # files into the project's own .secweave_agent_bridge/ on every test run.
     monkeypatch.chdir(tmp_path)
     db_path = str(tmp_path / "test.db")
 
@@ -602,9 +606,9 @@ def test_cli_plan_not_found_hypothesis_id_returns_error(capsys, tmp_path):
 
 
 def test_cli_plan_stored_hypothesis_missing_location_reports_clean_error(capsys, tmp_path):
-    # Regression thật: bản ghi hypothesis lưu từ trước khi Context Store có
-    # field "location" (location=NULL) từng khiến `plan` crash traceback
-    # (json.loads(None)) thay vì báo lỗi sạch.
+    # Real regression: a hypothesis record saved before Context Store had the
+    # "location" field (location=NULL) used to make `plan` crash with a raw
+    # traceback (json.loads(None)) instead of a clean error.
     from context_store.store import SecurityContextStore
 
     db_path = str(tmp_path / "test.db")
@@ -667,7 +671,7 @@ def test_cli_plan_blocks_when_action_outside_allowlist(capsys, monkeypatch, tmp_
             "plan",
             "--hypothesis-id",
             hypothesis_id,
-            # Không truyền --allowed-action nào -> allowlist rỗng -> mọi action bị chặn.
+            # No --allowed-action passed -> empty allowlist -> every action is blocked.
             "--format",
             "json",
             "--context-db",
@@ -682,8 +686,8 @@ def test_cli_plan_blocks_when_action_outside_allowlist(capsys, monkeypatch, tmp_
 
 
 def test_cli_plan_table_output_shows_per_action_verdict(capsys, monkeypatch, tmp_path):
-    # Regression: đường in table (không phải json) từng crash vì
-    # `review.checks` sai — phải là `review.plan_check.checks`.
+    # Regression: the table-print path (not json) used to crash because of
+    # `review.checks` being wrong — it should be `review.plan_check.checks`.
     import hypothesis_engine.llm_client.openai_compatible_client as llm_module
 
     db_path = str(tmp_path / "test.db")
@@ -769,7 +773,8 @@ def test_cli_plan_agent_mode_uses_agent_bridge_client(capsys, monkeypatch, tmp_p
         )
 
     monkeypatch.setattr(agent_module.AgentBridgeLLMClient, "_wait_for_agent", _fake_wait)
-    # Đảm bảo test không vô tình gọi API thật nếu nhánh --llm-mode chọn sai.
+    # Ensures the test doesn't accidentally call a real API if the
+    # --llm-mode branch is picked wrong.
     monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _RaisingClient)
     monkeypatch.chdir(tmp_path)
 

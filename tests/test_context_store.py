@@ -83,10 +83,11 @@ def test_record_not_verifiable_result_retrievable_by_signal_id():
 
     store.record_hypothesis(result, signal)
 
-    # Không có hypothesis_id (vì không có Hypothesis nào được tạo) nên
-    # get_hypothesis() không tra được — nhưng phải tra được qua signal_id, đúng
-    # yêu cầu SPEC §4.6 "giả thuyết đã bị bác bỏ kèm lý do" phải lưu lại VÀ
-    # lấy lại được, không chỉ nằm im trong DB không ai đọc tới.
+    # No hypothesis_id (since no Hypothesis was ever created), so
+    # get_hypothesis() can't look it up — but it must be queryable via
+    # signal_id, per SPEC §4.6's requirement that "a hypothesis that was
+    # rejected along with its reason" must be both stored AND retrievable,
+    # not just sit unread in the DB.
     records = store.get_hypotheses_by_signal_id(signal.signal_id)
     assert len(records) == 1
     assert records[0]["hypothesis_id"] is None
@@ -148,8 +149,9 @@ def test_record_hypothesis_raises_clean_runtime_error_on_db_error():
 
 
 def test_opens_pre_existing_db_missing_location_column_without_crashing(tmp_path):
-    # Mô phỏng .secweave/context.db tạo ra bởi bản code cũ (trước khi thêm cột
-    # location) — mở lại bằng code mới không được vỡ với "no such column".
+    # Simulates a .secweave/context.db created by an older version of the
+    # code (before the location column was added) — reopening it with the
+    # new code must not break with "no such column".
     db_path = str(tmp_path / "old_schema.db")
     conn = sqlite3.connect(db_path)
     conn.execute(

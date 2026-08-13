@@ -49,17 +49,18 @@ class TrivyAdapter(SignalAdapter):
             try:
                 artifact_ref = result["Target"]
             except (KeyError, TypeError) as exc:
-                # TypeError: result không phải object (ví dụ string/list/null
-                # lọt vào "Results" do report bị hỏng hoặc gán nhầm --tool).
+                # TypeError: result is not an object (e.g. a string/list/null
+                # slipping into "Results" from a corrupted report or a
+                # mismatched --tool).
                 if on_skip:
                     on_skip(f"Bỏ qua Results[{result_index}] (trivy): thiếu/sai field — {exc}")
                 continue
 
             for vuln_index, vuln in enumerate(result.get("Vulnerabilities", [])):
                 try:
-                    # "Severity" có thể vắng mặt HOẶC có mặt nhưng là null — cả
-                    # 2 trường hợp đều phải rơi về "UNKNOWN" (giá trị Trivy
-                    # thật sự dùng), .get(key, default) chỉ bắt được vắng mặt.
+                    # "Severity" can be either absent OR present but null —
+                    # both cases must fall back to "UNKNOWN" (the value Trivy
+                    # actually uses); .get(key, default) only catches absence.
                     raw_severity = vuln.get("Severity") or "UNKNOWN"
                     title = vuln.get("Title", "")
                     description = vuln.get("Description", "")

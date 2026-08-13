@@ -18,10 +18,11 @@ from shared.models.signal import (
     TargetHint,
 )
 
-# ZAP Traditional JSON Report (site[].alerts[]) không có field "risk" thuần —
-# nó dùng "riskcode" (số, "0".."3") và "riskdesc" (chuỗi hiển thị, ví dụ
-# "High (Medium)" = risk (confidence)). Map theo riskcode vì đây là giá trị
-# tất định của ZAP, không phụ thuộc format chuỗi hiển thị.
+# ZAP's Traditional JSON Report (site[].alerts[]) has no plain "risk"
+# field — it uses "riskcode" (a number, "0".."3") and "riskdesc" (a display
+# string, e.g. "High (Medium)" = risk (confidence)). Mapping by riskcode
+# because it's ZAP's deterministic value, independent of the display
+# string's format.
 RISKCODE_MAP = {
     "0": NormalizedSeverity.INFO,
     "1": NormalizedSeverity.LOW,
@@ -46,8 +47,8 @@ class ZapAdapter(SignalAdapter):
             try:
                 alerts = site.get("alerts", [])
             except AttributeError as exc:
-                # site không phải object (ví dụ string/list/null lọt vào "site"
-                # do report bị hỏng hoặc gán nhầm --tool).
+                # site is not an object (e.g. a string/list/null slipping
+                # into "site" from a corrupted report or a mismatched --tool).
                 if on_skip:
                     on_skip(f"Bỏ qua site[{site_index}] (owasp_zap): sai kiểu dữ liệu — {exc}")
                 continue
@@ -60,7 +61,7 @@ class ZapAdapter(SignalAdapter):
                     cwe = [f"CWE-{cweid}"] if cweid and str(cweid) not in ("-1", "0") else []
                     instances = alert.get("instances", [])
                 except AttributeError as exc:
-                    # alert không phải object — cùng lý do như site ở trên.
+                    # alert is not an object — same reason as site above.
                     if on_skip:
                         on_skip(
                             f"Bỏ qua site[{site_index}].alerts[{alert_index}] (owasp_zap): "

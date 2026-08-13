@@ -18,9 +18,10 @@ def test_strip_removes_fence_with_no_language_tag():
 
 
 def test_strip_extracts_json_from_fence_surrounded_by_prose():
-    # Regression thật: Llama (qua Groq) trả về đoạn văn giải thích trước VÀ
-    # sau fence, không chỉ gọn JSON trong fence như Gemini — bản cũ chỉ xử lý
-    # được khi response BẮT ĐẦU bằng fence, bỏ sót đúng trường hợp này.
+    # Real regression: Llama (via Groq) returns explanatory prose both
+    # before AND after the fence, not just clean JSON in a fence like
+    # Gemini — the old version only handled the case where the response
+    # STARTS with the fence, missing exactly this case.
     text = (
         "Đây là kế hoạch hành động:\n\n"
         '```json\n{"plannable": true, "actions": []}\n```\n\n'

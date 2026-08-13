@@ -22,17 +22,19 @@ SEVERITY_MAP = {
     "ERROR": NormalizedSeverity.HIGH,
     "WARNING": NormalizedSeverity.MEDIUM,
     "INFO": NormalizedSeverity.INFO,
-    # Semgrep Pro/Supply Chain có thể phát ra CRITICAL cho reachability
-    # analysis — nếu không map, giá trị lạ sẽ rơi vào default INFO, tức hạ
-    # 1 finding nghiêm trọng xuống mức thấp nhất một cách âm thầm.
+    # Semgrep Pro/Supply Chain can emit CRITICAL for reachability analysis —
+    # without this mapping, the unrecognized value would fall through to the
+    # default INFO, silently downgrading a serious finding to the lowest
+    # severity.
     "CRITICAL": NormalizedSeverity.CRITICAL,
 }
 
 
 def _as_cwe_list(value: Any) -> List[str]:
-    # metadata.cwe thường là list, nhưng một số rule author của Semgrep phát ra
-    # bare string thay vì list 1 phần tử — chuẩn hoá cho cả 2 dạng thay vì để
-    # pydantic ném ValidationError (List[str] không tự nhận string trần).
+    # metadata.cwe is usually a list, but some Semgrep rule authors emit a
+    # bare string instead of a single-element list — normalize both shapes
+    # instead of letting pydantic raise a ValidationError (List[str] doesn't
+    # auto-accept a bare string).
     if value is None:
         return []
     if isinstance(value, str):
@@ -88,8 +90,9 @@ class SemgrepAdapter(SignalAdapter):
                     )
                 )
             except (KeyError, ValidationError, TypeError, AttributeError) as exc:
-                # AttributeError: entry trong "results" không phải object (ví dụ
-                # string/list/null lọt vào do report bị hỏng hoặc gán nhầm --tool).
+                # AttributeError: entry in "results" is not an object (e.g. a
+                # string/list/null slipping in from a corrupted report or a
+                # mismatched --tool).
                 if on_skip:
                     on_skip(f"Bỏ qua results[{index}] (semgrep): thiếu/sai field — {exc}")
         return signals

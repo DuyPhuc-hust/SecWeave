@@ -10,11 +10,13 @@ class HypothesisProvenance(BaseModel):
     source_tool: str
     source_signal_id: str
     coverage: SignalCoverage
-    # Giữ lại location gốc của signal (URL cho DAST, file+line cho SAST, package
-    # cho SCA) — thiếu field này, Exploit Agent chỉ thấy văn bản mô tả hành vi
-    # mà không biết kiểm chứng ở đâu, dù signal gốc CÓ vị trí cụ thể (đã phát
-    # hiện qua live test: cả 4 hypothesis thật đều NOT_PLANNABLE vì thiếu đúng
-    # thông tin này, kể cả case ZAP vốn có sẵn URL trong signal gốc).
+    # Keeps the original signal's location (URL for DAST, file+line for SAST,
+    # package for SCA) — without this field, Exploit Agent only sees text
+    # describing the behavior with no idea where to verify it, even though
+    # the original signal DID have a concrete location (found via live
+    # testing: all 4 real hypotheses were NOT_PLANNABLE for lack of exactly
+    # this information, including the ZAP case which already had a URL in
+    # its original signal).
     location: Union[SastLocation, ScaLocation, DastLocation]
 
 

@@ -82,9 +82,10 @@ class HypothesisEngine:
             )
 
         if "verifiable" not in data:
-            # Thiếu hẳn field bắt buộc "verifiable" — khác với "verifiable=true"
-            # thật sự. Không được coi đây là hợp lệ chỉ vì 3 field text kia
-            # tình cờ có mặt: LLM chưa từng khẳng định tín hiệu kiểm chứng được.
+            # The required "verifiable" field is entirely missing — different
+            # from an actual "verifiable=true". Must not treat this as valid
+            # just because the other 3 text fields happen to be present: the
+            # LLM never actually asserted the signal is verifiable.
             return HypothesisResult(
                 status=HypothesisStatus.NOT_VERIFIABLE,
                 reason="LLM output thiếu field bắt buộc: verifiable",

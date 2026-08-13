@@ -8,13 +8,14 @@ REQUIRED_ENV_VARS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")
 
 
 class OpenAICompatibleLLMClient(HypothesisLLMClient):
-    """Gọi bất kỳ provider nào có endpoint tương thích chuẩn OpenAI Chat
-    Completions — OpenAI, Google Gemini, Groq, Together AI, v.v. Đổi provider
-    chỉ cần đổi 3 biến môi trường, không đổi dòng code nào.
+    """Calls any provider with an endpoint compatible with the standard
+    OpenAI Chat Completions format — OpenAI, Google Gemini, Groq, Together
+    AI, etc. Switching providers only requires changing 3 environment
+    variables, not a single line of code.
 
-    Dùng httpx (đã là dependency có sẵn của project) thay vì cài thêm SDK
-    riêng cho từng provider — đúng nguyên tắc SPEC §10.1 "thay thế được,
-    không ràng buộc dài hạn với một nhà cung cấp".
+    Uses httpx (already a dependency of the project) instead of installing a
+    separate SDK per provider — in line with SPEC §10.1's principle of
+    "replaceable, no long-term lock-in with one provider".
     """
 
     def __init__(self, timeout: float = 30.0) -> None:

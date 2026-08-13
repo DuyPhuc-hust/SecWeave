@@ -79,11 +79,12 @@ def test_zap_adapter_maps_riskcode_to_severity(riskcode, expected):
 
 
 def test_zap_adapter_ignores_legacy_risk_field_not_used_by_real_zap():
-    # Regression: ZAP thật không có field "risk" thuần (chỉ có riskcode/riskdesc,
-    # xem SPEC §4.1.1 — bảng ánh xạ của SPEC ghi "risk" nhưng đó là nhầm lẫn với
-    # ZAP REST API /core/view/alerts, khác cấu trúc site[].alerts[].instances[]
-    # mà adapter này dùng). Nếu ai đó vô tình thêm lại field "risk" giả, test này
-    # phải khẳng định nó KHÔNG được dùng để suy ra severity.
+    # Regression: real ZAP has no plain "risk" field (only riskcode/riskdesc
+    # — see SPEC §4.1.1: the SPEC's mapping table says "risk", but that's a
+    # mix-up with the ZAP REST API /core/view/alerts, a different structure
+    # from the site[].alerts[].instances[] this adapter uses). If someone
+    # accidentally reintroduces a fake "risk" field, this test must confirm
+    # it is NOT used to infer severity.
     from hypothesis_engine.signal_normalizer.zap_adapter import ZapAdapter
 
     raw = {
@@ -92,7 +93,7 @@ def test_zap_adapter_ignores_legacy_risk_field_not_used_by_real_zap():
                 "alerts": [
                     {
                         "pluginid": "1",
-                        "risk": "High",  # field giả, không có thật trong ZAP
+                        "risk": "High",  # fake field, doesn't really exist in ZAP
                         "riskcode": "0",
                         "riskdesc": "Informational (Medium)",
                         "instances": [{"uri": "https://x/", "method": "GET"}],
@@ -112,7 +113,8 @@ def test_zap_adapter_ignores_legacy_risk_field_not_used_by_real_zap():
 
 
 def test_zap_adapter_skips_instance_missing_uri_and_reports_it_via_on_skip():
-    # instances[0] thiếu "uri", instances[1] hợp lệ — chỉ bỏ qua instance lỗi.
+    # instances[0] is missing "uri", instances[1] is valid — only skip the
+    # bad instance.
     raw = {
         "site": [
             {
@@ -147,8 +149,9 @@ def test_zap_adapter_skips_instance_missing_uri_and_reports_it_via_on_skip():
 
 
 def test_zap_adapter_skips_site_that_is_not_an_object():
-    # site[0] không phải object (string lọt vào do report hỏng hoặc gán nhầm
-    # --tool) — phải bỏ qua đúng site đó, không được crash cả report.
+    # site[0] is not an object (a string slipping in from a corrupted
+    # report or a mismatched --tool) — must skip exactly that site, not
+    # crash the whole report.
     raw = {
         "site": [
             "not an object",

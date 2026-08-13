@@ -45,9 +45,10 @@ def test_endpoint_outside_allowlist_is_denied():
 
 
 def test_same_path_on_different_host_is_denied():
-    # Regression cho lỗ hổng đã vá: Policy Service trước đây chỉ so path, bỏ
-    # qua host — 1 action nhắm vào host bất kỳ (kể cả kẻ tấn công kiểm soát)
-    # vẫn "khớp" allowlist miễn path đúng dạng. Path đúng, host sai PHẢI bị từ chối.
+    # Regression for a fixed vulnerability: Policy Service used to compare
+    # path only, ignoring host — an action targeting any host (including one
+    # controlled by an attacker) would still "match" the allowlist as long
+    # as the path had the right shape. Right path, wrong host MUST be denied.
     authorization = sample_authorization(allowed_actions=[ALLOWED_ENTRY])
     action = _action(target="https://evil-attacker-controlled.com/api/objects/42")
     decision = is_allowed(action, authorization, now=NOW)
@@ -62,17 +63,19 @@ def test_same_path_different_scheme_is_denied():
 
 
 def test_allowlist_entry_missing_host_never_matches():
-    # Entry cấu hình sai (thiếu host, dạng cũ chỉ có path) phải bị từ chối
-    # thẳng, không được âm thầm rơi về so path — đó chính là lỗ hổng đã vá.
+    # A misconfigured entry (missing host, the old path-only shape) must be
+    # denied outright, not silently fall back to matching path only — that's
+    # exactly the vulnerability that was fixed.
     authorization = sample_authorization(allowed_actions=["GET /api/objects/{id}"])
     decision = is_allowed(_action(), authorization, now=NOW)
     assert decision.allowed is False
 
 
 def test_allowlist_entry_tolerates_extra_whitespace_between_method_and_url():
-    # Gõ nhầm 2 dấu cách vẫn phải khớp đúng — trước đây urlsplit() coi cả
-    # khoảng trắng thừa là 1 phần path, khiến netloc rỗng và luôn bị từ chối
-    # dù allowlist "trông đúng" bằng mắt thường.
+    # A typo'd double space must still match correctly — urlsplit() used to
+    # treat the extra whitespace as part of the path, leaving netloc empty
+    # and always denying the match even though the allowlist "looks right"
+    # to the eye.
     authorization = sample_authorization(allowed_actions=["GET  https://staging.example.com/api/objects/{id}"])
     decision = is_allowed(_action(), authorization, now=NOW)
     assert decision.allowed is True
@@ -80,8 +83,9 @@ def test_allowlist_entry_tolerates_extra_whitespace_between_method_and_url():
 
 @pytest.mark.parametrize("method", ["DELETE", "PUT", "PATCH", "delete", "put"])
 def test_destructive_methods_are_always_denied_regardless_of_allowlist(method):
-    # Allowlist "cho phép" endpoint này bằng mọi method — nhưng method phá hoại
-    # vẫn phải bị chặn cứng, allowlist cấu hình sai cũng không mở khóa được.
+    # The allowlist "allows" this endpoint for any method — but a
+    # destructive method must still be hard-blocked; a misconfigured
+    # allowlist can't unlock it either.
     authorization = sample_authorization(
         allowed_actions=[f"{method.upper()} https://staging.example.com/api/objects/{{id}}"]
     )
@@ -136,8 +140,8 @@ def test_action_within_window_is_allowed():
 
 
 def test_path_template_does_not_match_across_extra_segments():
-    # "/api/objects/{id}" chỉ khớp đúng 1 segment — không được khớp
-    # "/api/objects/42/secret" (path traversal ngoài ý định allowlist).
+    # "/api/objects/{id}" must match exactly 1 segment — must not match
+    # "/api/objects/42/secret" (path traversal beyond the allowlist's intent).
     authorization = sample_authorization(allowed_actions=[ALLOWED_ENTRY])
     action = _action(target="https://staging.example.com/api/objects/42/secret")
     decision = is_allowed(action, authorization, now=NOW)

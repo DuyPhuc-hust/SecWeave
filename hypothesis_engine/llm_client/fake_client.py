@@ -4,12 +4,13 @@ from hypothesis_engine.llm_client.base import HypothesisLLMClient
 
 
 class FakeLLMClient(HypothesisLLMClient):
-    """Stub có thể cấu hình, dùng cho unit test — không gọi API thật.
+    """Configurable stub used for unit tests — makes no real API calls.
 
-    Đây KHÔNG phải "fake LLM" theo nghĩa sản phẩm (không có đường CLI nào dùng
-    class này) — đây là test double chuẩn để test logic parse/validate của
-    HypothesisEngine một cách tất định, không phụ thuộc mạng/API key khi chạy
-    `pytest`. Xem OpenAICompatibleLLMClient cho đường dùng LLM thật.
+    This is NOT a "fake LLM" in the product sense (no CLI path uses this
+    class) — it's a standard test double for testing HypothesisEngine's
+    parse/validate logic deterministically, without depending on the
+    network/an API key when running `pytest`. See OpenAICompatibleLLMClient
+    for the real-LLM path.
     """
 
     def __init__(

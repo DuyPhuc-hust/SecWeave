@@ -61,8 +61,9 @@ def cmd_normalize(args: argparse.Namespace) -> int:
 
 
 def _build_llm_client(args: argparse.Namespace, agent_mode_message: str, api_mode_subject: str):
-    """Dựng LLM client theo --llm-mode, in đúng cảnh báo tương ứng. Trả None
-    (đã in lỗi ra stderr) nếu construct thất bại ở api mode (thiếu env var)."""
+    """Builds an LLM client according to --llm-mode, printing the matching
+    warning. Returns None (error already printed to stderr) if construction
+    fails in api mode (missing env var)."""
     if args.llm_mode == "agent":
         from hypothesis_engine.llm_client.agent_bridge_client import AgentBridgeLLMClient
 
@@ -124,9 +125,10 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
         engine = HypothesisEngine(llm_client)
 
         if args.llm_mode == "agent":
-            # Gộp tất cả signal vào đúng 1 vòng hỏi-đáp thay vì lặp lại "ghi
-            # prompt -> chờ Enter" cho từng signal riêng lẻ — xây hết prompt
-            # trước, gọi generate_many() một lần, rồi parse lại từng response.
+            # Merge all signals into exactly 1 question-answer round instead
+            # of repeating "write prompt -> wait for Enter" for each signal
+            # individually — build all the prompts first, call
+            # generate_many() once, then parse each response.
             prompts = [
                 engine.build_prompt(signal, source_snippet, verified_context)
                 for signal in signals
@@ -145,10 +147,11 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
                     break
                 results.append((signal, result))
         else:
-            # Ghi lại NGAY từng hypothesis vừa sinh thành công (không gom hết
-            # vào 1 list rồi mới ghi) — nếu 1 signal giữa chừng lỗi (mất mạng,
-            # hết quota), các hypothesis đã trả tiền/thời gian để sinh trước đó
-            # vẫn được giữ lại, không bị vứt bỏ theo kiểu tất-cả-hoặc-không-gì.
+            # Record each hypothesis IMMEDIATELY after it's generated (not
+            # collected into a list and written at the end) — if a signal in
+            # the middle fails (network loss, quota exhausted), the
+            # hypotheses already paid for/generated before it are still kept,
+            # not thrown away in an all-or-nothing fashion.
             for signal in signals:
                 try:
                     result = engine.generate_hypothesis(
@@ -221,9 +224,9 @@ def cmd_show_hypothesis(args: argparse.Namespace) -> int:
             record = context_store.get_hypothesis(args.hypothesis_id)
             records = [record] if record is not None else []
         else:
-            # hypothesis_id chỉ tồn tại khi status=hypothesis — bản ghi
-            # NOT_VERIFIABLE (không có Hypothesis nào được tạo) chỉ tra được
-            # qua signal_id, không có hypothesis_id để tra.
+            # hypothesis_id only exists when status=hypothesis — a
+            # NOT_VERIFIABLE record (no Hypothesis was ever created) can only
+            # be looked up by signal_id, it has no hypothesis_id to query by.
             records = context_store.get_hypotheses_by_signal_id(args.signal_id)
     finally:
         context_store.close()
@@ -448,9 +451,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    # Chỉ tự nạp .env khi chạy CLI thật (python cli.py ...), KHÔNG nạp khi
-    # cli.main() được gọi trực tiếp từ test — nếu không, 1 file .env thật nằm
-    # sẵn trên máy dev sẽ âm thầm phá test đang cố mô phỏng "thiếu env var".
+    # Only auto-load .env when running the CLI for real (python cli.py ...),
+    # NOT when cli.main() is called directly from a test — otherwise a real
+    # .env file sitting on the dev machine would silently break a test that's
+    # trying to simulate "missing env var".
     from dotenv import load_dotenv
 
     load_dotenv()
