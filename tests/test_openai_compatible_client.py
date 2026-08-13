@@ -69,3 +69,47 @@ def test_generate_raises_on_http_error(monkeypatch):
     client = OpenAICompatibleLLMClient()
     with pytest.raises(httpx.HTTPStatusError):
         client.generate("hello prompt")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"choices": []},
+        {},
+        {"choices": [{"message": {}}]},
+        {"choices": [{}]},
+    ],
+)
+def test_generate_raises_clean_runtime_error_on_malformed_200_response(monkeypatch, body):
+    # HTTP 200 nhưng body không đúng chuẩn OpenAI chat completions (content
+    # filtering, proxy lỗi, endpoint không tương thích thật...) — raise_for_status()
+    # không bắt được vì status vẫn là 200, phải tự kiểm tra shape.
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    client = OpenAICompatibleLLMClient()
+    with pytest.raises(RuntimeError, match="không đúng format OpenAI chat completions"):
+        client.generate("hello prompt")
+
+
+def test_generate_raises_clean_runtime_error_on_non_json_200_response(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        return httpx.Response(
+            200, content=b"not json at all", request=httpx.Request("POST", url)
+        )
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    client = OpenAICompatibleLLMClient()
+    with pytest.raises(RuntimeError, match="không đúng format OpenAI chat completions"):
+        client.generate("hello prompt")

@@ -223,7 +223,90 @@ def test_cli_show_hypothesis_not_found_returns_error(capsys, tmp_path):
     captured = capsys.readouterr()
 
     assert exit_code == 1
-    assert "không tìm thấy hypothesis_id" in captured.err
+    assert "không tìm thấy bản ghi nào" in captured.err
+
+
+class _NotVerifiableStubClient:
+    model = "stub-not-verifiable"
+
+    def generate(self, prompt: str) -> str:
+        return json.dumps({"verifiable": False, "reason": "không đủ ngữ cảnh"})
+
+
+def test_cli_show_hypothesis_by_signal_id_finds_not_verifiable_record(
+    capsys, monkeypatch, tmp_path
+):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _NotVerifiableStubClient)
+    db_path = str(tmp_path / "test.db")
+
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+    signal_id = data[0]["signal_id"]
+
+    assert exit_code == 0
+    assert data[0]["result"]["status"] == "not_verifiable"
+
+    # hypothesis_id không tồn tại cho bản ghi not_verifiable — phải tra được
+    # qua --signal-id, đúng phần vừa fix.
+    show_exit_code = cli.main(
+        [
+            "show-hypothesis",
+            "--signal-id",
+            signal_id,
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    records = json.loads(capsys.readouterr().out)
+
+    assert show_exit_code == 0
+    assert len(records) == 1
+    assert records[0]["status"] == "not_verifiable"
+    assert records[0]["hypothesis_id"] is None
+    assert records[0]["reason"] == "không đủ ngữ cảnh"
+
+
+def test_cli_hypothesize_bad_context_db_path_fails_cleanly(capsys, tmp_path):
+    # Trỏ --context-db vào 1 thư mục (không phải file) khiến sqlite3.connect lỗi.
+    bad_path = tmp_path / "not_a_file"
+    bad_path.mkdir()
+
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--context-db",
+            str(bad_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không mở được Context Store" in captured.err
+    assert "Traceback" not in captured.err
 
 
 class _RaisingClient:

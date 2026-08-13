@@ -58,46 +58,57 @@ class SecurityContextStore:
 
     def record_hypothesis(self, result: HypothesisResult, signal: NormalizedSignal) -> None:
         is_hypothesis = result.status == HypothesisStatus.HYPOTHESIS
-        self._conn.execute(
-            """
-            INSERT INTO hypotheses (
-                hypothesis_id, signal_id, source_tool, status,
-                expected_behavior, suspected_behavior, observation_criteria,
-                reason, coverage, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                result.hypothesis.hypothesis_id if is_hypothesis else None,
-                signal.signal_id,
-                signal.source.tool,
-                result.status.value,
-                result.hypothesis.expected_behavior if is_hypothesis else None,
-                result.hypothesis.suspected_behavior if is_hypothesis else None,
-                result.hypothesis.observation_criteria if is_hypothesis else None,
-                result.reason,
-                signal.source.coverage.value,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        self._conn.commit()
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO hypotheses (
+                    hypothesis_id, signal_id, source_tool, status,
+                    expected_behavior, suspected_behavior, observation_criteria,
+                    reason, coverage, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result.hypothesis.hypothesis_id if is_hypothesis else None,
+                    signal.signal_id,
+                    signal.source.tool,
+                    result.status.value,
+                    result.hypothesis.expected_behavior if is_hypothesis else None,
+                    result.hypothesis.suspected_behavior if is_hypothesis else None,
+                    result.hypothesis.observation_criteria if is_hypothesis else None,
+                    result.reason,
+                    signal.source.coverage.value,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            raise RuntimeError(f"Không ghi được hypothesis vào Context Store: {exc}") from exc
+
+    _HYPOTHESIS_COLUMNS = (
+        "hypothesis_id", "signal_id", "source_tool", "status", "expected_behavior",
+        "suspected_behavior", "observation_criteria", "reason", "coverage", "created_at",
+    )
 
     def get_hypothesis(self, hypothesis_id: str) -> Optional[Dict[str, Any]]:
         cursor = self._conn.execute(
-            """
-            SELECT hypothesis_id, signal_id, source_tool, status, expected_behavior,
-                   suspected_behavior, observation_criteria, reason, coverage, created_at
-            FROM hypotheses WHERE hypothesis_id = ?
-            """,
+            f"SELECT {', '.join(self._HYPOTHESIS_COLUMNS)} FROM hypotheses WHERE hypothesis_id = ?",
             (hypothesis_id,),
         )
         row = cursor.fetchone()
         if row is None:
             return None
-        columns = (
-            "hypothesis_id", "signal_id", "source_tool", "status", "expected_behavior",
-            "suspected_behavior", "observation_criteria", "reason", "coverage", "created_at",
+        return dict(zip(self._HYPOTHESIS_COLUMNS, row))
+
+    def get_hypotheses_by_signal_id(self, signal_id: str) -> List[Dict[str, Any]]:
+        # Bản ghi NOT_VERIFIABLE không có hypothesis_id (không có Hypothesis nào
+        # được tạo) nên get_hypothesis() không tra được — tra theo signal_id là
+        # cách duy nhất để lấy lại "giả thuyết đã bị bác bỏ kèm lý do" (SPEC §4.6).
+        cursor = self._conn.execute(
+            f"SELECT {', '.join(self._HYPOTHESIS_COLUMNS)} FROM hypotheses "
+            "WHERE signal_id = ? ORDER BY row_id",
+            (signal_id,),
         )
-        return dict(zip(columns, row))
+        return [dict(zip(self._HYPOTHESIS_COLUMNS, row)) for row in cursor.fetchall()]
 
     def close(self) -> None:
         self._conn.close()

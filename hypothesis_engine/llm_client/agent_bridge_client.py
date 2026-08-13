@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 from hypothesis_engine.llm_client.base import HypothesisLLMClient
+from shared.id_generator import generate_id
 
 
 class AgentBridgeLLMClient(HypothesisLLMClient):
@@ -22,12 +23,17 @@ class AgentBridgeLLMClient(HypothesisLLMClient):
     def __init__(self, work_dir: str = ".secweave_agent_bridge") -> None:
         self._work_dir = Path(work_dir)
         self._work_dir.mkdir(parents=True, exist_ok=True)
+        # run_id riêng cho mỗi lần khởi tạo client (mỗi lần chạy CLI) — để 2
+        # process `hypothesize --llm-mode agent` chạy trong cùng work_dir (ví
+        # dụ 1 cái còn đang treo chờ Enter) không ghi đè file prompt/response
+        # của nhau, dù counter trong mỗi process đều bắt đầu từ 1.
+        self._run_id = generate_id("run")
         self._counter = 0
 
     def generate(self, prompt: str) -> str:
         self._counter += 1
-        prompt_path = self._work_dir / f"prompt_{self._counter}.txt"
-        response_path = self._work_dir / f"response_{self._counter}.txt"
+        prompt_path = self._work_dir / f"prompt_{self._run_id}_{self._counter}.txt"
+        response_path = self._work_dir / f"response_{self._run_id}_{self._counter}.txt"
         if response_path.exists():
             response_path.unlink()
         prompt_path.write_text(prompt, encoding="utf-8")

@@ -41,4 +41,11 @@ class OpenAICompatibleLLMClient(HypothesisLLMClient):
             timeout=self._timeout,
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        try:
+            body = response.json()
+            return body["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(
+                f"Response từ LLM provider không đúng format OpenAI chat completions "
+                f"(thiếu choices[0].message.content): {exc}"
+            ) from exc

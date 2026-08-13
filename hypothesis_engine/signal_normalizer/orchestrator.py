@@ -39,5 +39,10 @@ class SignalNormalizer:
             hash=f"sha256:{hashlib.sha256(raw_bytes).hexdigest()}",
         )
         raw_report = json.loads(raw_bytes)
+        if not isinstance(raw_report, dict):
+            raise ValueError(
+                f"Report JSON gốc phải là object, nhận được {type(raw_report).__name__} "
+                f"('{report_path}' có phải đúng report của tool '{tool}' không?)"
+            )
 
         return adapter.parse(raw_report, raw_reference, tool_version, coverage)

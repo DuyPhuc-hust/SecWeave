@@ -7,7 +7,8 @@
         {
           "pluginid": "10202",
           "alert": "Absence of Anti-CSRF Tokens",
-          "risk": "Medium",
+          "riskcode": "2",
+          "riskdesc": "Medium (Medium)",
           "desc": "No Anti-CSRF tokens were found in a HTML submission form.",
           "cweid": "352",
           "instances": [

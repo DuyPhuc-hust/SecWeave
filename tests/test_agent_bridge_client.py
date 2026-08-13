@@ -15,7 +15,8 @@ def test_generate_writes_prompt_and_returns_response(tmp_path, monkeypatch):
     result = client.generate("some prompt")
 
     assert result == '{"verifiable": true}'
-    assert (tmp_path / "prompt_1.txt").read_text(encoding="utf-8") == "some prompt"
+    prompt_path = tmp_path / f"prompt_{client._run_id}_1.txt"
+    assert prompt_path.read_text(encoding="utf-8") == "some prompt"
 
 
 def test_generate_raises_if_agent_never_writes_response(tmp_path, monkeypatch):
@@ -37,8 +38,27 @@ def test_generate_uses_incrementing_file_names_per_call(tmp_path, monkeypatch):
     client.generate("first")
     client.generate("second")
 
-    assert (tmp_path / "prompt_1.txt").read_text(encoding="utf-8") == "first"
-    assert (tmp_path / "prompt_2.txt").read_text(encoding="utf-8") == "second"
+    assert (tmp_path / f"prompt_{client._run_id}_1.txt").read_text(encoding="utf-8") == "first"
+    assert (tmp_path / f"prompt_{client._run_id}_2.txt").read_text(encoding="utf-8") == "second"
+
+
+def test_two_clients_in_same_work_dir_do_not_collide(tmp_path, monkeypatch):
+    # Mô phỏng 2 process CLI riêng biệt cùng chạy --llm-mode agent trong cùng
+    # work_dir — mỗi client có run_id riêng nên không đè lên prompt/response
+    # của nhau, dù bộ đếm nội bộ của mỗi client đều bắt đầu từ 1.
+    client_a = AgentBridgeLLMClient(work_dir=str(tmp_path))
+    client_b = AgentBridgeLLMClient(work_dir=str(tmp_path))
+    assert client_a._run_id != client_b._run_id
+
+    monkeypatch.setattr(
+        client_a, "_wait_for_agent", lambda p, r: r.write_text("from A", encoding="utf-8")
+    )
+    client_a.generate("prompt from A")
+
+    prompt_path_a = tmp_path / f"prompt_{client_a._run_id}_1.txt"
+    prompt_path_b_would_be = tmp_path / f"prompt_{client_b._run_id}_1.txt"
+    assert prompt_path_a.read_text(encoding="utf-8") == "prompt from A"
+    assert not prompt_path_b_would_be.exists()
 
 
 def test_wait_for_agent_raises_clear_error_on_eof(tmp_path, monkeypatch):
@@ -55,7 +75,7 @@ def test_wait_for_agent_raises_clear_error_on_eof(tmp_path, monkeypatch):
 
 def test_generate_removes_stale_response_before_waiting(tmp_path, monkeypatch):
     client = AgentBridgeLLMClient(work_dir=str(tmp_path))
-    stale_response = tmp_path / "response_1.txt"
+    stale_response = tmp_path / f"response_{client._run_id}_1.txt"
     stale_response.write_text("dữ liệu cũ từ lần chạy trước", encoding="utf-8")
 
     seen_exists_before_wait = {}

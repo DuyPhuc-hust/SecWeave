@@ -1,3 +1,7 @@
+import sqlite3
+
+import pytest
+
 from context_store.store import SecurityContextStore
 from shared.models.hypothesis import (
     Hypothesis,
@@ -87,7 +91,7 @@ def test_record_and_get_hypothesis_roundtrip():
     store.close()
 
 
-def test_record_not_verifiable_result_without_hypothesis_id():
+def test_record_not_verifiable_result_retrievable_by_signal_id():
     store = SecurityContextStore(db_path=":memory:")
     signal = _signal()
     result = HypothesisResult(
@@ -97,15 +101,43 @@ def test_record_not_verifiable_result_without_hypothesis_id():
 
     store.record_hypothesis(result, signal)
 
-    # Không có hypothesis_id (vì không có Hypothesis nào được tạo) nên không tra
-    # cứu được qua get_hypothesis — nhưng bản ghi vẫn tồn tại trong bảng, đúng
-    # yêu cầu SPEC §4.6 "giả thuyết đã bị bác bỏ kèm lý do" phải được lưu lại.
-    cursor = store._conn.execute(
-        "SELECT signal_id, status, reason FROM hypotheses WHERE signal_id = ?",
-        (signal.signal_id,),
+    # Không có hypothesis_id (vì không có Hypothesis nào được tạo) nên
+    # get_hypothesis() không tra được — nhưng phải tra được qua signal_id, đúng
+    # yêu cầu SPEC §4.6 "giả thuyết đã bị bác bỏ kèm lý do" phải lưu lại VÀ
+    # lấy lại được, không chỉ nằm im trong DB không ai đọc tới.
+    records = store.get_hypotheses_by_signal_id(signal.signal_id)
+    assert len(records) == 1
+    assert records[0]["hypothesis_id"] is None
+    assert records[0]["status"] == "not_verifiable"
+    assert records[0]["reason"] == "Signal quá mơ hồ, không tách được hành vi đúng/sai."
+    store.close()
+
+
+def test_get_hypotheses_by_signal_id_returns_all_attempts_in_order():
+    store = SecurityContextStore(db_path=":memory:")
+    signal = _signal()
+    store.record_hypothesis(
+        HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, reason="lần 1: chưa đủ ngữ cảnh"),
+        signal,
     )
-    row = cursor.fetchone()
-    assert row == ("sig_test1", "not_verifiable", "Signal quá mơ hồ, không tách được hành vi đúng/sai.")
+    hypothesis = Hypothesis(
+        hypothesis_id="hyp_retry",
+        expected_behavior="a",
+        suspected_behavior="b",
+        observation_criteria="c",
+        provenance=HypothesisProvenance(
+            source_tool="semgrep", source_signal_id=signal.signal_id, coverage=SignalCoverage.COMPLETE
+        ),
+    )
+    store.record_hypothesis(
+        HypothesisResult(status=HypothesisStatus.HYPOTHESIS, hypothesis=hypothesis), signal
+    )
+
+    records = store.get_hypotheses_by_signal_id(signal.signal_id)
+    assert len(records) == 2
+    assert records[0]["status"] == "not_verifiable"
+    assert records[1]["status"] == "hypothesis"
+    assert records[1]["hypothesis_id"] == "hyp_retry"
     store.close()
 
 
@@ -113,6 +145,21 @@ def test_get_hypothesis_returns_none_when_not_found():
     store = SecurityContextStore(db_path=":memory:")
     assert store.get_hypothesis("hyp_does_not_exist") is None
     store.close()
+
+
+def test_record_hypothesis_raises_clean_runtime_error_on_db_error():
+    store = SecurityContextStore(db_path=":memory:")
+    signal = _signal()
+    result = HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, reason="x")
+
+    class _FailingConnection:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("simulated disk I/O error")
+
+    store._conn = _FailingConnection()
+
+    with pytest.raises(RuntimeError, match="Không ghi được hypothesis"):
+        store.record_hypothesis(result, signal)
 
 
 def test_default_db_path_persists_to_disk(tmp_path, monkeypatch):

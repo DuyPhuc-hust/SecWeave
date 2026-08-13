@@ -1,5 +1,6 @@
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -70,7 +71,12 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
             print(f"error: không tìm thấy source file '{args.source}'", file=sys.stderr)
             return 1
 
-    context_store = SecurityContextStore(db_path=args.context_db)
+    try:
+        context_store = SecurityContextStore(db_path=args.context_db)
+    except sqlite3.Error as exc:
+        print(f"error: không mở được Context Store tại '{args.context_db}': {exc}", file=sys.stderr)
+        return 1
+
     results: List[tuple] = []
     failure: Optional[str] = None
     try:
@@ -111,10 +117,10 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
                 result = engine.generate_hypothesis(
                     signal, source_snippet=source_snippet, verified_context=verified_context
                 )
+                context_store.record_hypothesis(result, signal)
             except (RuntimeError, httpx.HTTPError) as exc:
                 failure = str(exc)
                 break
-            context_store.record_hypothesis(result, signal)
             results.append((signal, result))
     finally:
         context_store.close()
@@ -152,27 +158,50 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_show_hypothesis(args: argparse.Namespace) -> int:
-    context_store = SecurityContextStore(db_path=args.context_db)
-    record = context_store.get_hypothesis(args.hypothesis_id)
-    context_store.close()
+def _print_hypothesis_record(record: dict) -> None:
+    print(f"hypothesis_id       : {record['hypothesis_id']}")
+    print(f"signal_id           : {record['signal_id']}")
+    print(f"source_tool         : {record['source_tool']}")
+    print(f"status              : {record['status']}")
+    print(f"coverage            : {record['coverage']}")
+    print(f"created_at          : {record['created_at']}")
+    print(f"expected_behavior   : {record['expected_behavior']}")
+    print(f"suspected_behavior  : {record['suspected_behavior']}")
+    print(f"observation_criteria: {record['observation_criteria']}")
+    print(f"reason              : {record['reason']}")
 
-    if record is None:
-        print(f"error: không tìm thấy hypothesis_id '{args.hypothesis_id}'", file=sys.stderr)
+
+def cmd_show_hypothesis(args: argparse.Namespace) -> int:
+    try:
+        context_store = SecurityContextStore(db_path=args.context_db)
+    except sqlite3.Error as exc:
+        print(f"error: không mở được Context Store tại '{args.context_db}': {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        if args.hypothesis_id:
+            record = context_store.get_hypothesis(args.hypothesis_id)
+            records = [record] if record is not None else []
+        else:
+            # hypothesis_id chỉ tồn tại khi status=hypothesis — bản ghi
+            # NOT_VERIFIABLE (không có Hypothesis nào được tạo) chỉ tra được
+            # qua signal_id, không có hypothesis_id để tra.
+            records = context_store.get_hypotheses_by_signal_id(args.signal_id)
+    finally:
+        context_store.close()
+
+    if not records:
+        key = f"hypothesis_id '{args.hypothesis_id}'" if args.hypothesis_id else f"signal_id '{args.signal_id}'"
+        print(f"error: không tìm thấy bản ghi nào cho {key}", file=sys.stderr)
         return 1
 
     if args.format == "json":
-        print(json.dumps(record, indent=2, ensure_ascii=False))
+        print(json.dumps(records if args.signal_id else records[0], indent=2, ensure_ascii=False))
     else:
-        print(f"hypothesis_id       : {record['hypothesis_id']}")
-        print(f"signal_id           : {record['signal_id']}")
-        print(f"source_tool         : {record['source_tool']}")
-        print(f"status              : {record['status']}")
-        print(f"coverage            : {record['coverage']}")
-        print(f"created_at          : {record['created_at']}")
-        print(f"expected_behavior   : {record['expected_behavior']}")
-        print(f"suspected_behavior  : {record['suspected_behavior']}")
-        print(f"observation_criteria: {record['observation_criteria']}")
+        for i, record in enumerate(records):
+            if i > 0:
+                print()
+            _print_hypothesis_record(record)
 
     return 0
 
@@ -231,9 +260,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     show_hypothesis_parser = subparsers.add_parser(
         "show-hypothesis",
-        help="Tra cứu lại 1 hypothesis đã sinh trước đó, theo hypothesis_id",
+        help="Tra cứu lại (các) hypothesis đã sinh trước đó, theo hypothesis_id hoặc signal_id",
     )
-    show_hypothesis_parser.add_argument("--hypothesis-id", required=True)
+    show_hypothesis_group = show_hypothesis_parser.add_mutually_exclusive_group(required=True)
+    show_hypothesis_group.add_argument(
+        "--hypothesis-id", help="Tra đúng 1 hypothesis (chỉ có ở bản ghi status=hypothesis)"
+    )
+    show_hypothesis_group.add_argument(
+        "--signal-id",
+        help="Tra tất cả bản ghi (kể cả not_verifiable) sinh ra từ 1 signal_id",
+    )
     show_hypothesis_parser.add_argument("--format", default="table", choices=["table", "json"])
     show_hypothesis_parser.add_argument(
         "--context-db", default=DEFAULT_DB_PATH, help="Đường dẫn file SQLite Context Store (mặc định: %(default)s)"

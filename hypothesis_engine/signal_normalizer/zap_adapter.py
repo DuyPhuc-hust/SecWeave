@@ -16,11 +16,15 @@ from shared.models.signal import (
     TargetHint,
 )
 
-SEVERITY_MAP = {
-    "High": NormalizedSeverity.HIGH,
-    "Medium": NormalizedSeverity.MEDIUM,
-    "Low": NormalizedSeverity.LOW,
-    "Informational": NormalizedSeverity.INFO,
+# ZAP Traditional JSON Report (site[].alerts[]) không có field "risk" thuần —
+# nó dùng "riskcode" (số, "0".."3") và "riskdesc" (chuỗi hiển thị, ví dụ
+# "High (Medium)" = risk (confidence)). Map theo riskcode vì đây là giá trị
+# tất định của ZAP, không phụ thuộc format chuỗi hiển thị.
+RISKCODE_MAP = {
+    "0": NormalizedSeverity.INFO,
+    "1": NormalizedSeverity.LOW,
+    "2": NormalizedSeverity.MEDIUM,
+    "3": NormalizedSeverity.HIGH,
 }
 
 
@@ -37,7 +41,8 @@ class ZapAdapter(SignalAdapter):
         signals = []
         for site in raw_report.get("site", []):
             for alert in site.get("alerts", []):
-                raw_severity = alert.get("risk", "Informational")
+                raw_severity = alert.get("riskdesc", "Unknown")
+                riskcode = str(alert.get("riskcode", ""))
                 cweid = alert.get("cweid")
                 cwe = [f"CWE-{cweid}"] if cweid and str(cweid) not in ("-1", "0") else []
 
@@ -58,7 +63,7 @@ class ZapAdapter(SignalAdapter):
                             ),
                             severity=SeverityInfo(
                                 raw=raw_severity,
-                                normalized=SEVERITY_MAP.get(raw_severity, NormalizedSeverity.INFO),
+                                normalized=RISKCODE_MAP.get(riskcode, NormalizedSeverity.INFO),
                             ),
                             location=DastLocation(
                                 url=instance["uri"],
