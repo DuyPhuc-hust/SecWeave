@@ -24,8 +24,8 @@ def check_main_predicate(observation: NormalizedObservation) -> PredicateResult:
     outgoing request — otherwise it could just be the agent's own input
     reflected back, not real evidence the system's data store leaked it.
     """
-    group = ObservationRole.MAIN.value
-    if observation.role != ObservationRole.MAIN:
+    group = ObservationRole.MAIN
+    if observation.role != group:
         return PredicateResult(
             group=group,
             status=PredicateStatus.INSUFFICIENT_DATA,
@@ -57,8 +57,8 @@ def check_positive_control(observation: NormalizedObservation) -> PredicateResul
     CONFIRMED" — this predicate failing to satisfy blocks CONFIRMED
     regardless of what the main predicate says.
     """
-    group = ObservationRole.POSITIVE_CONTROL.value
-    if observation.role != ObservationRole.POSITIVE_CONTROL:
+    group = ObservationRole.POSITIVE_CONTROL
+    if observation.role != group:
         return PredicateResult(
             group=group,
             status=PredicateStatus.INSUFFICIENT_DATA,
@@ -91,8 +91,8 @@ def check_denied_control(observation: NormalizedObservation) -> PredicateResult:
     data to everyone for an unrelated reason (e.g. an unexpectedly public
     endpoint), which would otherwise look identical to a real leak.
     """
-    group = ObservationRole.DENIED_CONTROL.value
-    if observation.role != ObservationRole.DENIED_CONTROL:
+    group = ObservationRole.DENIED_CONTROL
+    if observation.role != group:
         return PredicateResult(
             group=group,
             status=PredicateStatus.INSUFFICIENT_DATA,
@@ -143,7 +143,7 @@ def evaluate_predicates(observations: List[NormalizedObservation]) -> List[Predi
         if not matches:
             results.append(
                 PredicateResult(
-                    group=role.value,
+                    group=role,
                     status=PredicateStatus.INSUFFICIENT_DATA,
                     reason=f"No observation was captured for role={role.value}.",
                 )
@@ -157,7 +157,7 @@ def evaluate_predicates(observations: List[NormalizedObservation]) -> List[Predi
             # that's an anomaly to surface, not resolve silently.
             results.append(
                 PredicateResult(
-                    group=role.value,
+                    group=role,
                     status=PredicateStatus.INSUFFICIENT_DATA,
                     reason=f"{len(matches)} observations found for role={role.value}, expected exactly 1 — "
                     "ambiguous, cannot pick one automatically without discarding evidence.",

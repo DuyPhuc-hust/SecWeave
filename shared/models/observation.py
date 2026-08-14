@@ -166,6 +166,9 @@ class PredicateStatus(str, Enum):
 
 
 class PredicateResult(BaseModel):
-    group: str  # "main" | "positive_control" | "denied_control" (SPEC §4.4.1)
+    # Typed as ObservationRole (not a bare str) so nothing can assign an
+    # arbitrary/mistyped string here — every result must name one of the 3
+    # groups SPEC §4.4.1 actually defines.
+    group: ObservationRole
     status: PredicateStatus
     reason: str
