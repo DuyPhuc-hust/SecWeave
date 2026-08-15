@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from shared.id_generator import generate_id
+
 
 class ActionType(str, Enum):
     """SPEC §4.2 — only 2 action types are considered allowable in the pilot.
@@ -28,6 +30,11 @@ class ActionSpec(BaseModel):
     blocking it before it ever reaches Policy Service.
     """
 
+    # Stable identifier for this one action within a plan. Added when Evidence
+    # Harness needed something to put in NormalizedObservation.action_ref
+    # (shared/models/observation.py) — auto-generated so existing call sites
+    # that don't pass it keep working unchanged.
+    action_id: str = Field(default_factory=lambda: generate_id("act"))
     type: ActionType
     method: str
     target: str
