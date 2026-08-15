@@ -7,10 +7,22 @@ for "normalized observation" the way NormalizedSignal has one in SPEC
 được"). Per the weekly plan, that concrete schema was supposed to come from
 a dedicated design step (W3) done WITH a real target owner — that step has
 not happened yet in this project (still Chặng 1 — Discovery/preparation, no
-real target/owner engaged). So this file is this assistant's own design to
-unblock drafting predicate logic, not a documented contract. Expect it to be
-rewritten once a real target/owner defines what an actual observation looks
-like for their system — do not treat any field here as settled.
+real target/owner engaged). So this file is this assistant's own design,
+not a documented contract or an owner-approved schema — do not treat any
+field here as settled.
+
+Update once Evidence Harness got built (evidence_harness/harness.py): the
+HTTP_TRANSACTION path of this schema has now been exercised against a real
+target (OWASP Juice Shop, local Docker) — a real 200 response classified as
+GRANTED and a real 401 (both a read endpoint and a login attempt) classified
+as DENIED, matching curl'd ground truth. That's real validation for
+access_result/status_code/channel/hash/metadata on this one channel and
+these two status buckets. Still NOT validated: the blind-marker fields
+(response_contains_marker/request_contains_marker — no seeding mechanism
+exists yet to actually test this end-to-end), AMBIGUOUS's boundary cases
+(3xx/5xx/timeouts — only exercised with a mocked transport, not a real
+target), and every non-HTTP channel. This remains a draft, just a less
+purely-theoretical one on the HTTP path.
 
 What IS grounded in the docs (used directly below, not guessed):
 - SPEC §4.3.2: "Mỗi artifact lưu kèm: thời điểm, danh tính thực thi,
@@ -48,18 +60,23 @@ redesign knows what to scrutinize hardest):
   Naming the other 4 here is cheap and keeps the schema from silently
   assuming HTTP is the only channel that will ever exist, but constructing
   an observation for one of them would need real Harness work first.
-- A REAL GAP this schema surfaces but does not fix: ActionSpec has no field
-  today saying "this action is meant to serve as the positive control" (or
-  denied control) — Exploit Agent's prompt doesn't ask the LLM to design a
-  3-role action set either. Without that, nothing can actually produce a
-  correctly-tagged `role` for these observations yet. This schema assumes
-  that gap gets closed later (either in ActionSpec or in how a human/Oracle
-  assembles a run's observations); it isn't closed here.
+- A REAL GAP this schema surfaces but does not fully fix: ActionSpec has no
+  field today saying "this action is meant to serve as the positive control"
+  (or denied control) — Exploit Agent's prompt doesn't ask the LLM to design
+  a 3-role action set either. Without that, nothing can actually produce a
+  correctly-tagged `role` for these observations yet; evidence_harness/
+  harness.py's capture() still takes `role` as a caller-supplied argument,
+  not something it derives on its own. This schema assumes that part of the
+  gap gets closed later (either in ActionSpec or in how a human/Oracle
+  assembles a run's observations). The adjacent, narrower gap — ActionSpec
+  having no stable ID at all for action_ref to point to — IS closed now:
+  ActionSpec.action_id (shared/models/action.py) is what Evidence Harness
+  writes into action_ref.
 """
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel
 
@@ -75,6 +92,16 @@ class ObservationRole(str, Enum):
     MAIN = "main"
     POSITIVE_CONTROL = "positive_control"
     DENIED_CONTROL = "denied_control"
+
+    # Not one of the 3 predicate groups above — used for bait-data seeding
+    # actions (SPEC §4.3.4's blind marker: "cơ chế inject vào dữ liệu mồi qua
+    # đường setup riêng"). Kept as an observation (not skipped entirely) so
+    # the action record stays reproducible (Verification Package field #9:
+    # "Action record: đủ để lặp lại"), but evaluate_predicates()
+    # (verdict_oracle/predicates.py) ignores this role entirely — it only
+    # iterates the 3 groups above, so a SETUP observation can never be
+    # mistaken for predicate evidence.
+    SETUP = "setup"
 
 
 class EvidenceChannel(str, Enum):
@@ -120,7 +147,7 @@ class NormalizedObservation(BaseModel):
 
     # --- Identity of this observation and what produced it ---
     observation_id: str
-    action_ref: str  # points back to the ActionSpec that produced this
+    action_ref: str  # ActionSpec.action_id of the action that produced this
     role: ObservationRole
 
     # --- SPEC §4.3.2's 8 required artifact metadata fields, verbatim ---
@@ -172,3 +199,27 @@ class PredicateResult(BaseModel):
     group: ObservationRole
     status: PredicateStatus
     reason: str
+
+
+class Verdict(str, Enum):
+    """SPEC §4.4.2 — exactly 3 possible verdicts. "Không có verdict thứ tư
+    ... Nếu một tình huống không xếp được vào ba giá trị trên, đó là dấu
+    hiệu kịch bản chưa định nghĩa đủ chặt — sửa kịch bản, không thêm
+    verdict." No "maybe"/"likely" value exists here on purpose."""
+
+    CONFIRMED = "confirmed"
+    NOT_REPRODUCED = "not_reproduced"
+    INCONCLUSIVE = "inconclusive"
+
+
+class VerdictResult(BaseModel):
+    """Output of verdict_oracle/oracle.py::assemble_verdict() — the final
+    combination of all 3 predicate-group results into one verdict.
+    predicate_results is kept alongside so a human reviewer or the
+    Verification Package never has to re-derive why this verdict was
+    reached from a separate lookup (same traceability principle as
+    NormalizedObservation.raw_evidence_ref)."""
+
+    verdict: Verdict
+    reason: str
+    predicate_results: List[PredicateResult]
