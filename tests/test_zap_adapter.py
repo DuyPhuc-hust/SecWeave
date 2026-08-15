@@ -10,11 +10,15 @@ FIXTURE = Path(__file__).parent / "fixtures" / "zap_sample_report.json"
 
 
 def test_zap_adapter_maps_fields_correctly():
+    # FIXTURE is a real `zap-baseline.py` run (see .secweave/manual_test/ for
+    # the session that captured it) against the live OWASP Juice Shop
+    # container — 1 real alert (Cross-Domain Misconfiguration), trimmed to
+    # its first real instance — not hand-written.
     normalizer = SignalNormalizer()
     signals = normalizer.normalize_file(
         report_path=str(FIXTURE),
         tool="owasp_zap",
-        tool_version="2.14.0",
+        tool_version="2.17.0",
         coverage=SignalCoverage.PARTIAL,
     )
 
@@ -24,14 +28,14 @@ def test_zap_adapter_maps_fields_correctly():
     assert signal.source.tool == "owasp_zap"
     assert signal.source.type == SignalType.DAST
     assert signal.source.coverage == SignalCoverage.PARTIAL
-    assert signal.rule.id == "10202"
-    assert signal.rule.cwe == ["CWE-352"]
+    assert signal.rule.id == "10098"
+    assert signal.rule.cwe == ["CWE-264"]
     assert signal.severity.raw == "Medium (Medium)"
     assert signal.severity.normalized == NormalizedSeverity.MEDIUM
-    assert signal.location.url == "https://staging.example.com/api/objects/1"
+    assert signal.location.url == "http://host.docker.internal:3000"
     assert signal.location.http_method == "GET"
     assert signal.location.parameter is None
-    assert signal.signal_context == '<form method="POST">'
+    assert signal.signal_context == "Access-Control-Allow-Origin: *"
 
 
 def test_zap_adapter_evidence_field_is_never_named_evidence_in_output():

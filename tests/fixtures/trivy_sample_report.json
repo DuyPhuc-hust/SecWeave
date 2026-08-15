@@ -1,22 +1,144 @@
 {
   "SchemaVersion": 2,
-  "ArtifactName": "requirements.txt",
-  "ArtifactType": "filesystem",
+  "ArtifactName": "bkimminich/juice-shop",
+  "ArtifactType": "container_image",
   "Results": [
     {
-      "Target": "requirements.txt",
-      "Class": "lang-pkgs",
-      "Type": "pip",
+      "Target": "bkimminich/juice-shop (debian 13.6)",
+      "Class": "os-pkgs",
+      "Type": "debian",
       "Vulnerabilities": [
         {
-          "VulnerabilityID": "CVE-2023-32681",
-          "PkgName": "requests",
-          "InstalledVersion": "2.25.0",
-          "FixedVersion": "2.31.0",
+          "VulnerabilityID": "CVE-2026-5435",
+          "PkgID": "libc6@2.41-12+deb13u3",
+          "PkgName": "libc6",
+          "PkgIdentifier": {
+            "PURL": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u3?arch=arm64&distro=debian-13.6",
+            "UID": "73c82943c070a393"
+          },
+          "InstalledVersion": "2.41-12+deb13u3",
+          "Status": "affected",
+          "Layer": {
+            "Digest": "sha256:97c08299c7625b0d2269970fdd56cd5a0b9557b02f2b999294737864c0d82b8b",
+            "DiffID": "sha256:5c729492ffc6d588d59ee068eaa7910f2c76fd99a7fc21ccb6d408351f48d428"
+          },
+          "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-5435",
+          "DataSource": {
+            "ID": "debian",
+            "Name": "Debian Security Tracker",
+            "URL": "https://salsa.debian.org/security-tracker-team/security-tracker"
+          },
+          "Fingerprint": "sha256:09c440f2928cd01a4020d1ea8ed0b27284f5fe2e39a2e55ddd4edee4c00fcb25",
+          "Title": "glibc: glibc: Out-of-bounds write via TSIG record processing",
+          "Description": "The deprecated functions ns_printrrf, ns_printrr and fp_nquery in the GNU C Library version 2.2 and newer fail to enforce the caller-supplied buffer length, and can result in an out-of-bounds write when printing TSIG records.",
+          "Severity": "MEDIUM",
+          "CweIDs": [
+            "CWE-787"
+          ],
+          "VendorSeverity": {
+            "alma": 2,
+            "oracle-oval": 2,
+            "redhat": 2,
+            "rocky": 2,
+            "ubuntu": 2
+          },
+          "CVSS": {
+            "redhat": {
+              "V3Vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:H",
+              "V3Score": 5.9
+            }
+          },
+          "References": [
+            "https://access.redhat.com/errata/RHSA-2026:42952",
+            "https://access.redhat.com/security/cve/CVE-2026-5435",
+            "https://bugzilla.redhat.com/2459854",
+            "https://bugzilla.redhat.com/2463465",
+            "https://bugzilla.redhat.com/2463539",
+            "https://bugzilla.redhat.com/show_bug.cgi?id=2459854",
+            "https://bugzilla.redhat.com/show_bug.cgi?id=2463465",
+            "https://bugzilla.redhat.com/show_bug.cgi?id=2463539",
+            "https://cert-portal.siemens.com/productcert/html/ssa-082556.html",
+            "https://creativecommons.org/licenses/by/4.0/",
+            "https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-5435",
+            "https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-5928",
+            "https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-6238",
+            "https://errata.almalinux.org/9/ALSA-2026-42952.html",
+            "https://errata.rockylinux.org/RLSA-2026:42952",
+            "https://inbox.sourceware.org/libc-alpha/cover.1777546194.git.fweimer@redhat.com/",
+            "https://inbox.sourceware.org/libc-announce/7a655d55-276f-41fe-b550-feb3ebb2ce91@redhat.com/T/#u",
+            "https://linux.oracle.com/cve/CVE-2026-5435.html",
+            "https://linux.oracle.com/errata/ELSA-2026-500140.html",
+            "https://nvd.nist.gov/vuln/detail/CVE-2026-5435",
+            "https://sourceware.org/bugzilla/show_bug.cgi?id=34033",
+            "https://sourceware.org/git/?p=glibc.git;a=blob_plain;f=advisories/GLIBC-SA-2026-0011",
+            "https://ubuntu.com/security/notices/USN-8611-1",
+            "https://www.cve.org/CVERecord?id=CVE-2026-5435"
+          ],
+          "PublishedDate": "2026-04-28T13:19:22.29Z",
+          "LastModifiedDate": "2026-07-14T13:19:01.36Z"
+        }
+      ]
+    },
+    {
+      "Target": "/juice-shop/lib/insecurity.ts",
+      "Class": "secret",
+      "Secrets": [
+        {
+          "RuleID": "private-key",
+          "Category": "AsymmetricPrivateKey",
           "Severity": "HIGH",
-          "Title": "requests: Proxy-Authorization header leak",
-          "Description": "Requests before 2.31.0 leaks the Proxy-Authorization header to destination servers when redirected across origins.",
-          "CweIDs": ["CWE-200"]
+          "Title": "Asymmetric Private Key",
+          "StartLine": 21,
+          "EndLine": 21,
+          "Code": {
+            "Lines": [
+              {
+                "Number": 19,
+                "Content": "",
+                "IsCause": false,
+                "Annotation": "",
+                "Truncated": false,
+                "FirstCause": false,
+                "LastCause": false
+              },
+              {
+                "Number": 20,
+                "Content": "export const publicKey = fs ? fs.readFileSync('encryptionkeys/jwt.pub', 'utf8') : 'placeholder-publi",
+                "IsCause": false,
+                "Annotation": "",
+                "Truncated": false,
+                "Highlighted": "export const publicKey = fs ? fs.readFileSync('encryptionkeys/jwt.pub', 'utf8') : 'placeholder-publi",
+                "FirstCause": false,
+                "LastCause": false
+              },
+              {
+                "Number": 21,
+                "Content": "----BEGIN RSA PRIVATE KEY-----****************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************-----END RSA PRIVATE",
+                "IsCause": true,
+                "Annotation": "",
+                "Truncated": false,
+                "Highlighted": "----BEGIN RSA PRIVATE KEY-----****************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************-----END RSA PRIVATE",
+                "FirstCause": true,
+                "LastCause": true
+              },
+              {
+                "Number": 22,
+                "Content": "",
+                "IsCause": false,
+                "Annotation": "",
+                "Truncated": false,
+                "FirstCause": false,
+                "LastCause": false
+              }
+            ]
+          },
+          "Match": "----BEGIN RSA PRIVATE KEY-----****************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************-----END RSA PRIVATE",
+          "Layer": {
+            "Digest": "sha256:999581a335a1826baac5c4b394944f8bb3148f96cbfd97ad0be95763d4be212f",
+            "DiffID": "sha256:f5741490cfeb2d45b2feeb8c507b831c670d95de63d53173a005e146db338bbd",
+            "CreatedBy": "COPY --chown=65532:0 /juice-shop . # buildkit"
+          },
+          "Offset": 778
         }
       ]
     }

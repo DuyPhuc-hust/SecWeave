@@ -1,36 +1,827 @@
 {
-  "results": [
-    {
-      "check_id": "python.django.security.audit.sqli",
-      "path": "app/views.py",
-      "start": { "line": 42, "col": 5 },
-      "end": { "line": 42, "col": 48 },
-      "extra": {
-        "severity": "ERROR",
-        "lines": "cursor.execute(\"SELECT * FROM users WHERE id = %s\" % user_id)",
-        "message": "Potential SQL injection detected.",
-        "metadata": {
-          "cwe": [
-            "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
-          ]
+    "version": "1.172.0",
+    "results": [
+        {
+            "check_id": "javascript.express.security.audit.express-detect-notevil-usage.express-detect-notevil-usage",
+            "path": "/src/routes/b2bOrder.ts",
+            "start": {
+                "line": 23,
+                "col": 9,
+                "offset": 907
+            },
+            "end": {
+                "line": 23,
+                "col": 80,
+                "offset": 978
+            },
+            "extra": {
+                "message": "Detected usage of the `notevil` package, which is unmaintained and has vulnerabilities. Using any sort of `eval()` functionality can be very dangerous, but if you must, the `eval` package is an up to date alternative. Be sure that only trusted input reaches an `eval()` function.",
+                "metadata": {
+                    "category": "security",
+                    "references": [
+                        "https://github.com/mmckegg/notevil"
+                    ],
+                    "cwe": [
+                        "CWE-1104: Use of Unmaintained Third Party Components"
+                    ],
+                    "owasp": [
+                        "A06:2021 - Vulnerable and Outdated Components",
+                        "A03:2025 - Software Supply Chain Failures"
+                    ],
+                    "technology": [
+                        "javascript",
+                        "typescript"
+                    ],
+                    "subcategory": [
+                        "audit"
+                    ],
+                    "likelihood": "LOW",
+                    "impact": "HIGH",
+                    "confidence": "LOW",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Other"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.express.security.audit.express-detect-notevil-usage.express-detect-notevil-usage",
+                    "shortlink": "https://sg.run/W70E"
+                },
+                "severity": "WARNING",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.browser.security.eval-detected.eval-detected",
+            "path": "/src/routes/captcha.ts",
+            "start": {
+                "line": 22,
+                "col": 20,
+                "offset": 874
+            },
+            "end": {
+                "line": 22,
+                "col": 36,
+                "offset": 890
+            },
+            "extra": {
+                "message": "Detected the use of eval(). eval() can be dangerous if used to evaluate dynamic content. If this content can be input from outside the program, this may be a code injection vulnerability. Ensure evaluated content is not definable by external sources.",
+                "metadata": {
+                    "cwe": [
+                        "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code ('Eval Injection')"
+                    ],
+                    "owasp": [
+                        "A03:2021 - Injection",
+                        "A05:2025 - Injection"
+                    ],
+                    "asvs": {
+                        "control_id": "5.2.4 Dynamic Code Execution Features",
+                        "control_url": "https://github.com/OWASP/ASVS/blob/master/4.0/en/0x13-V5-Validation-Sanitization-Encoding.md#v52-sanitization-and-sandboxing",
+                        "section": "V5 Validation, Sanitization and Encoding",
+                        "version": "4"
+                    },
+                    "category": "security",
+                    "technology": [
+                        "browser"
+                    ],
+                    "subcategory": [
+                        "audit"
+                    ],
+                    "likelihood": "LOW",
+                    "impact": "MEDIUM",
+                    "confidence": "LOW",
+                    "references": [
+                        "https://owasp.org/Top10/A03_2021-Injection"
+                    ],
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Code Injection"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.browser.security.eval-detected.eval-detected",
+                    "shortlink": "https://sg.run/7ope"
+                },
+                "severity": "WARNING",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.express.security.audit.remote-property-injection.remote-property-injection",
+            "path": "/src/routes/currentUser.ts",
+            "start": {
+                "line": 31,
+                "col": 15,
+                "offset": 1260
+            },
+            "end": {
+                "line": 31,
+                "col": 76,
+                "offset": 1321
+            },
+            "extra": {
+                "message": "Bracket object notation with user input is present, this might allow an attacker to access all properties of the object and even it's prototype. Use literal values for object properties.",
+                "metadata": {
+                    "confidence": "LOW",
+                    "owasp": [
+                        "A02:2017 - Broken Authentication",
+                        "A04:2021 - Insecure Design",
+                        "A06:2025 - Insecure Design"
+                    ],
+                    "cwe": [
+                        "CWE-522: Insufficiently Protected Credentials"
+                    ],
+                    "category": "security",
+                    "technology": [
+                        "express"
+                    ],
+                    "references": [
+                        "https://github.com/nodesecurity/eslint-plugin-security/blob/3c7522ca1be800353513282867a1034c795d9eb4/docs/the-dangers-of-square-bracket-notation.md"
+                    ],
+                    "cwe2021-top25": true,
+                    "subcategory": [
+                        "vuln"
+                    ],
+                    "likelihood": "MEDIUM",
+                    "impact": "MEDIUM",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Cryptographic Issues"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.express.security.audit.remote-property-injection.remote-property-injection",
+                    "shortlink": "https://sg.run/Z4gn"
+                },
+                "severity": "ERROR",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.express.security.audit.express-res-sendfile.express-res-sendfile",
+            "path": "/src/routes/fileServer.ts",
+            "start": {
+                "line": 32,
+                "col": 20,
+                "offset": 1104
+            },
+            "end": {
+                "line": 32,
+                "col": 46,
+                "offset": 1130
+            },
+            "extra": {
+                "message": "The application processes user-input, this is passed to res.sendFile which can allow an attacker to arbitrarily read files on the system through path traversal. It is recommended to perform input validation in addition to canonicalizing the path. This allows you to validate the path against the intended directory it should be accessing.",
+                "metadata": {
+                    "references": [
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html"
+                    ],
+                    "technology": [
+                        "express"
+                    ],
+                    "category": "security",
+                    "cwe": [
+                        "CWE-73: External Control of File Name or Path"
+                    ],
+                    "owasp": [
+                        "A04:2021 - Insecure Design",
+                        "A06:2025 - Insecure Design"
+                    ],
+                    "subcategory": [
+                        "vuln"
+                    ],
+                    "likelihood": "HIGH",
+                    "impact": "MEDIUM",
+                    "confidence": "MEDIUM",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Path Traversal"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.express.security.audit.express-res-sendfile.express-res-sendfile",
+                    "shortlink": "https://sg.run/7DJk"
+                },
+                "severity": "WARNING",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.express.security.audit.express-res-sendfile.express-res-sendfile",
+            "path": "/src/routes/keyServer.ts",
+            "start": {
+                "line": 14,
+                "col": 20,
+                "offset": 410
+            },
+            "end": {
+                "line": 14,
+                "col": 57,
+                "offset": 447
+            },
+            "extra": {
+                "message": "The application processes user-input, this is passed to res.sendFile which can allow an attacker to arbitrarily read files on the system through path traversal. It is recommended to perform input validation in addition to canonicalizing the path. This allows you to validate the path against the intended directory it should be accessing.",
+                "metadata": {
+                    "references": [
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html"
+                    ],
+                    "technology": [
+                        "express"
+                    ],
+                    "category": "security",
+                    "cwe": [
+                        "CWE-73: External Control of File Name or Path"
+                    ],
+                    "owasp": [
+                        "A04:2021 - Insecure Design",
+                        "A06:2025 - Insecure Design"
+                    ],
+                    "subcategory": [
+                        "vuln"
+                    ],
+                    "likelihood": "HIGH",
+                    "impact": "MEDIUM",
+                    "confidence": "MEDIUM",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Path Traversal"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.express.security.audit.express-res-sendfile.express-res-sendfile",
+                    "shortlink": "https://sg.run/7DJk"
+                },
+                "severity": "WARNING",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.express.security.audit.express-res-sendfile.express-res-sendfile",
+            "path": "/src/routes/logfileServer.ts",
+            "start": {
+                "line": 14,
+                "col": 20,
+                "offset": 410
+            },
+            "end": {
+                "line": 14,
+                "col": 47,
+                "offset": 437
+            },
+            "extra": {
+                "message": "The application processes user-input, this is passed to res.sendFile which can allow an attacker to arbitrarily read files on the system through path traversal. It is recommended to perform input validation in addition to canonicalizing the path. This allows you to validate the path against the intended directory it should be accessing.",
+                "metadata": {
+                    "references": [
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html"
+                    ],
+                    "technology": [
+                        "express"
+                    ],
+                    "category": "security",
+                    "cwe": [
+                        "CWE-73: External Control of File Name or Path"
+                    ],
+                    "owasp": [
+                        "A04:2021 - Insecure Design",
+                        "A06:2025 - Insecure Design"
+                    ],
+                    "subcategory": [
+                        "vuln"
+                    ],
+                    "likelihood": "HIGH",
+                    "impact": "MEDIUM",
+                    "confidence": "MEDIUM",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Path Traversal"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.express.security.audit.express-res-sendfile.express-res-sendfile",
+                    "shortlink": "https://sg.run/7DJk"
+                },
+                "severity": "WARNING",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.sequelize.security.audit.sequelize-injection-express.express-sequelize-injection",
+            "path": "/src/routes/login.ts",
+            "start": {
+                "line": 34,
+                "col": 28,
+                "offset": 1488
+            },
+            "end": {
+                "line": 34,
+                "col": 169,
+                "offset": 1629
+            },
+            "extra": {
+                "message": "Detected a sequelize statement that is tainted by user-input. This could lead to SQL injection if the variable is user-controlled and is not properly sanitized. In order to prevent SQL injection, it is recommended to use parameterized queries or prepared statements.",
+                "metadata": {
+                    "interfile": true,
+                    "references": [
+                        "https://sequelize.org/docs/v6/core-concepts/raw-queries/#replacements"
+                    ],
+                    "category": "security",
+                    "technology": [
+                        "express"
+                    ],
+                    "cwe": [
+                        "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+                    ],
+                    "owasp": [
+                        "A01:2017 - Injection",
+                        "A03:2021 - Injection",
+                        "A05:2025 - Injection"
+                    ],
+                    "cwe2022-top25": true,
+                    "cwe2021-top25": true,
+                    "subcategory": [
+                        "vuln"
+                    ],
+                    "likelihood": "HIGH",
+                    "impact": "HIGH",
+                    "confidence": "HIGH",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "SQL Injection"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.sequelize.security.audit.sequelize-injection-express.express-sequelize-injection",
+                    "shortlink": "https://sg.run/gjoe"
+                },
+                "severity": "ERROR",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.express.security.audit.express-res-sendfile.express-res-sendfile",
+            "path": "/src/routes/quarantineServer.ts",
+            "start": {
+                "line": 14,
+                "col": 20,
+                "offset": 424
+            },
+            "end": {
+                "line": 14,
+                "col": 57,
+                "offset": 461
+            },
+            "extra": {
+                "message": "The application processes user-input, this is passed to res.sendFile which can allow an attacker to arbitrarily read files on the system through path traversal. It is recommended to perform input validation in addition to canonicalizing the path. This allows you to validate the path against the intended directory it should be accessing.",
+                "metadata": {
+                    "references": [
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html"
+                    ],
+                    "technology": [
+                        "express"
+                    ],
+                    "category": "security",
+                    "cwe": [
+                        "CWE-73: External Control of File Name or Path"
+                    ],
+                    "owasp": [
+                        "A04:2021 - Insecure Design",
+                        "A06:2025 - Insecure Design"
+                    ],
+                    "subcategory": [
+                        "vuln"
+                    ],
+                    "likelihood": "HIGH",
+                    "impact": "MEDIUM",
+                    "confidence": "MEDIUM",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Path Traversal"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.express.security.audit.express-res-sendfile.express-res-sendfile",
+                    "shortlink": "https://sg.run/7DJk"
+                },
+                "severity": "WARNING",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.express.security.audit.express-open-redirect.express-open-redirect",
+            "path": "/src/routes/redirect.ts",
+            "start": {
+                "line": 18,
+                "col": 20,
+                "offset": 1007
+            },
+            "end": {
+                "line": 18,
+                "col": 25,
+                "offset": 1012
+            },
+            "extra": {
+                "message": "The application redirects to a URL specified by user-supplied input `query` that is not validated. This could redirect users to malicious locations. Consider using an allow-list approach to validate URLs, or warn users they are being redirected to a third-party website.",
+                "metadata": {
+                    "technology": [
+                        "express"
+                    ],
+                    "references": [
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html"
+                    ],
+                    "cwe": [
+                        "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
+                    ],
+                    "category": "security",
+                    "owasp": [
+                        "A01:2021 - Broken Access Control",
+                        "A01:2025 - Broken Access Control"
+                    ],
+                    "subcategory": [
+                        "vuln"
+                    ],
+                    "likelihood": "HIGH",
+                    "impact": "MEDIUM",
+                    "confidence": "HIGH",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Open Redirect"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.express.security.audit.express-open-redirect.express-open-redirect",
+                    "shortlink": "https://sg.run/EpoP"
+                },
+                "severity": "WARNING",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.sequelize.security.audit.sequelize-injection-express.express-sequelize-injection",
+            "path": "/src/routes/search.ts",
+            "start": {
+                "line": 23,
+                "col": 28,
+                "offset": 847
+            },
+            "end": {
+                "line": 23,
+                "col": 159,
+                "offset": 978
+            },
+            "extra": {
+                "message": "Detected a sequelize statement that is tainted by user-input. This could lead to SQL injection if the variable is user-controlled and is not properly sanitized. In order to prevent SQL injection, it is recommended to use parameterized queries or prepared statements.",
+                "metadata": {
+                    "interfile": true,
+                    "references": [
+                        "https://sequelize.org/docs/v6/core-concepts/raw-queries/#replacements"
+                    ],
+                    "category": "security",
+                    "technology": [
+                        "express"
+                    ],
+                    "cwe": [
+                        "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+                    ],
+                    "owasp": [
+                        "A01:2017 - Injection",
+                        "A03:2021 - Injection",
+                        "A05:2025 - Injection"
+                    ],
+                    "cwe2022-top25": true,
+                    "cwe2021-top25": true,
+                    "subcategory": [
+                        "vuln"
+                    ],
+                    "likelihood": "HIGH",
+                    "impact": "HIGH",
+                    "confidence": "HIGH",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "SQL Injection"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.sequelize.security.audit.sequelize-injection-express.express-sequelize-injection",
+                    "shortlink": "https://sg.run/gjoe"
+                },
+                "severity": "ERROR",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.browser.security.eval-detected.eval-detected",
+            "path": "/src/routes/userProfile.ts",
+            "start": {
+                "line": 65,
+                "col": 22,
+                "offset": 2010
+            },
+            "end": {
+                "line": 65,
+                "col": 32,
+                "offset": 2020
+            },
+            "extra": {
+                "message": "Detected the use of eval(). eval() can be dangerous if used to evaluate dynamic content. If this content can be input from outside the program, this may be a code injection vulnerability. Ensure evaluated content is not definable by external sources.",
+                "metadata": {
+                    "cwe": [
+                        "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code ('Eval Injection')"
+                    ],
+                    "owasp": [
+                        "A03:2021 - Injection",
+                        "A05:2025 - Injection"
+                    ],
+                    "asvs": {
+                        "control_id": "5.2.4 Dynamic Code Execution Features",
+                        "control_url": "https://github.com/OWASP/ASVS/blob/master/4.0/en/0x13-V5-Validation-Sanitization-Encoding.md#v52-sanitization-and-sandboxing",
+                        "section": "V5 Validation, Sanitization and Encoding",
+                        "version": "4"
+                    },
+                    "category": "security",
+                    "technology": [
+                        "browser"
+                    ],
+                    "subcategory": [
+                        "audit"
+                    ],
+                    "likelihood": "LOW",
+                    "impact": "MEDIUM",
+                    "confidence": "LOW",
+                    "references": [
+                        "https://owasp.org/Top10/A03_2021-Injection"
+                    ],
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Code Injection"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.browser.security.eval-detected.eval-detected",
+                    "shortlink": "https://sg.run/7ope"
+                },
+                "severity": "WARNING",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.lang.security.audit.code-string-concat.code-string-concat",
+            "path": "/src/routes/userProfile.ts",
+            "start": {
+                "line": 65,
+                "col": 22,
+                "offset": 2010
+            },
+            "end": {
+                "line": 65,
+                "col": 32,
+                "offset": 2020
+            },
+            "extra": {
+                "message": "Found data from an Express or Next web request flowing to `eval`. If this data is user-controllable this can lead to execution of arbitrary system commands in the context of your application process. Avoid `eval` whenever possible.",
+                "metadata": {
+                    "interfile": true,
+                    "confidence": "HIGH",
+                    "owasp": [
+                        "A03:2021 - Injection",
+                        "A05:2025 - Injection"
+                    ],
+                    "cwe": [
+                        "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code ('Eval Injection')"
+                    ],
+                    "references": [
+                        "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/eval",
+                        "https://nodejs.org/api/child_process.html#child_processexeccommand-options-callback",
+                        "https://www.stackhawk.com/blog/nodejs-command-injection-examples-and-prevention/",
+                        "https://ckarande.gitbooks.io/owasp-nodegoat-tutorial/content/tutorial/a1_-_server_side_js_injection.html"
+                    ],
+                    "category": "security",
+                    "technology": [
+                        "node.js",
+                        "Express",
+                        "Next.js"
+                    ],
+                    "subcategory": [
+                        "vuln"
+                    ],
+                    "likelihood": "MEDIUM",
+                    "impact": "MEDIUM",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Code Injection"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.lang.security.audit.code-string-concat.code-string-concat",
+                    "shortlink": "https://sg.run/96Yk"
+                },
+                "severity": "ERROR",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
+        },
+        {
+            "check_id": "javascript.lang.security.audit.unknown-value-with-script-tag.unknown-value-with-script-tag",
+            "path": "/src/routes/videoHandler.ts",
+            "start": {
+                "line": 71,
+                "col": 165,
+                "offset": 2852
+            },
+            "end": {
+                "line": 71,
+                "col": 169,
+                "offset": 2856
+            },
+            "extra": {
+                "message": "Cannot determine what 'subs' is and it is used with a '<script>' tag. This could be susceptible to cross-site scripting (XSS). Ensure 'subs' is not externally controlled, or sanitize this data.",
+                "metadata": {
+                    "owasp": [
+                        "A07:2017 - Cross-Site Scripting (XSS)",
+                        "A03:2021 - Injection",
+                        "A05:2025 - Injection"
+                    ],
+                    "cwe": [
+                        "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+                    ],
+                    "references": [
+                        "https://www.developsec.com/2017/11/09/xss-in-a-script-tag/",
+                        "https://github.com/juice-shop/juice-shop/blob/1ceb8751e986dacd3214a618c37e7411be6bc11a/routes/videoHandler.ts#L68"
+                    ],
+                    "category": "security",
+                    "technology": [
+                        "javascript"
+                    ],
+                    "cwe2022-top25": true,
+                    "cwe2021-top25": true,
+                    "subcategory": [
+                        "audit"
+                    ],
+                    "likelihood": "LOW",
+                    "impact": "LOW",
+                    "confidence": "LOW",
+                    "license": "Semgrep Rules License v1.0. For more details, visit semgrep.dev/legal/rules-license",
+                    "vulnerability_class": [
+                        "Cross-Site-Scripting (XSS)"
+                    ],
+                    "source": "https://semgrep.dev/r/javascript.lang.security.audit.unknown-value-with-script-tag.unknown-value-with-script-tag",
+                    "shortlink": "https://sg.run/1Zy1"
+                },
+                "severity": "WARNING",
+                "fingerprint": "requires login",
+                "lines": "requires login",
+                "validation_state": "NO_VALIDATOR",
+                "engine_kind": "OSS"
+            }
         }
-      }
+    ],
+    "errors": [],
+    "paths": {
+        "scanned": [
+            "/src/routes/2fa.ts",
+            "/src/routes/address.ts",
+            "/src/routes/angular.ts",
+            "/src/routes/appConfiguration.ts",
+            "/src/routes/appVersion.ts",
+            "/src/routes/authenticatedUsers.ts",
+            "/src/routes/b2bOrder.ts",
+            "/src/routes/basket.ts",
+            "/src/routes/basketItems.ts",
+            "/src/routes/captcha.ts",
+            "/src/routes/changePassword.ts",
+            "/src/routes/chat.ts",
+            "/src/routes/checkKeys.ts",
+            "/src/routes/continueCode.ts",
+            "/src/routes/countryMapping.ts",
+            "/src/routes/coupon.ts",
+            "/src/routes/createProductReviews.ts",
+            "/src/routes/currentUser.ts",
+            "/src/routes/dataErasure.ts",
+            "/src/routes/dataExport.ts",
+            "/src/routes/delivery.ts",
+            "/src/routes/deluxe.ts",
+            "/src/routes/easterEgg.ts",
+            "/src/routes/fileServer.ts",
+            "/src/routes/fileUpload.ts",
+            "/src/routes/imageCaptcha.ts",
+            "/src/routes/keyServer.ts",
+            "/src/routes/languages.ts",
+            "/src/routes/likeProductReviews.ts",
+            "/src/routes/logfileServer.ts",
+            "/src/routes/login.ts",
+            "/src/routes/memory.ts",
+            "/src/routes/metrics.ts",
+            "/src/routes/nftMint.ts",
+            "/src/routes/order.ts",
+            "/src/routes/orderHistory.ts",
+            "/src/routes/payment.ts",
+            "/src/routes/premiumReward.ts",
+            "/src/routes/privacyPolicyProof.ts",
+            "/src/routes/profileImageFileUpload.ts",
+            "/src/routes/profileImageUrlUpload.ts",
+            "/src/routes/quarantineServer.ts",
+            "/src/routes/recycles.ts",
+            "/src/routes/redirect.ts",
+            "/src/routes/repeatNotification.ts",
+            "/src/routes/resetPassword.ts",
+            "/src/routes/restoreProgress.ts",
+            "/src/routes/saveLoginIp.ts",
+            "/src/routes/search.ts",
+            "/src/routes/securityQuestion.ts",
+            "/src/routes/showProductReviews.ts",
+            "/src/routes/trackOrder.ts",
+            "/src/routes/updateProductReviews.ts",
+            "/src/routes/updateUserProfile.ts",
+            "/src/routes/userProfile.ts",
+            "/src/routes/verify.ts",
+            "/src/routes/videoHandler.ts",
+            "/src/routes/vulnCodeFixes.ts",
+            "/src/routes/vulnCodeSnippet.ts",
+            "/src/routes/wallet.ts",
+            "/src/routes/web3Wallet.ts"
+        ]
     },
-    {
-      "check_id": "python.lang.security.audit.eval-detected",
-      "path": "app/utils.py",
-      "start": { "line": 10, "col": 1 },
-      "end": { "line": 10, "col": 20 },
-      "extra": {
-        "severity": "WARNING",
-        "lines": "eval(user_input)",
-        "message": "Detected use of eval().",
-        "metadata": {
-          "cwe": [
-            "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
-          ]
-        }
-      }
-    }
-  ]
+    "time": {
+        "rules": [],
+        "rules_parse_time": 0.3364078998565674,
+        "profiling_times": {
+            "config_time": 1.5091907978057861,
+            "core_time": 1.8567748069763184,
+            "ignores_time": 0.0012590885162353516,
+            "total_time": 3.385866403579712
+        },
+        "parsing_time": {
+            "total_time": 0.0,
+            "per_file_time": {
+                "mean": 0.0,
+                "std_dev": 0.0
+            },
+            "very_slow_stats": {
+                "time_ratio": 0.0,
+                "count_ratio": 0.0
+            },
+            "very_slow_files": []
+        },
+        "scanning_time": {
+            "total_time": 5.9531331062316895,
+            "per_file_time": {
+                "mean": 0.03253078200126606,
+                "std_dev": 0.006303771420332799
+            },
+            "very_slow_stats": {
+                "time_ratio": 0.0,
+                "count_ratio": 0.0
+            },
+            "very_slow_files": []
+        },
+        "matching_time": {
+            "total_time": 0.0,
+            "per_file_and_rule_time": {
+                "mean": 0.0,
+                "std_dev": 0.0
+            },
+            "very_slow_stats": {
+                "time_ratio": 0.0,
+                "count_ratio": 0.0
+            },
+            "very_slow_rules_on_files": []
+        },
+        "tainting_time": {
+            "total_time": 0.0,
+            "per_def_and_rule_time": {
+                "mean": 0.0,
+                "std_dev": 0.0
+            },
+            "very_slow_stats": {
+                "time_ratio": 0.0,
+                "count_ratio": 0.0
+            },
+            "very_slow_rules_on_defs": []
+        },
+        "fixpoint_timeouts": [],
+        "prefiltering": {
+            "project_level_time": 0.0,
+            "file_level_time": 0.0,
+            "rules_with_project_prefilters_ratio": 0.0,
+            "rules_with_file_prefilters_ratio": 0.9857142857142858,
+            "rules_selected_ratio": 0.04324746291959407,
+            "rules_matched_ratio": 0.04324746291959407
+        },
+        "targets": [],
+        "total_bytes": 0,
+        "max_memory_bytes": 1100083904
+    },
+    "engine_requested": "OSS",
+    "skipped_rules": [],
+    "profiling_results": []
 }

@@ -10,6 +10,7 @@ from shared.models.signal import (
     NormalizedSignal,
     RawReference,
     RuleInfo,
+    SastLocation,
     ScaLocation,
     SeverityInfo,
     SignalCoverage,
@@ -99,6 +100,53 @@ class TrivyAdapter(SignalAdapter):
                     if on_skip:
                         on_skip(
                             f"Bỏ qua Results[{result_index}].Vulnerabilities[{vuln_index}] "
+                            f"(trivy): thiếu/sai field — {exc}"
+                        )
+
+            # Trivy's secret-detection results (Class=="secret") live in a
+            # completely separate "Secrets" key with its own shape (RuleID/
+            # Category/Title/StartLine/EndLine/Match, not VulnerabilityID/
+            # PkgName/...) — found via real Trivy output that this adapter
+            # was silently dropping actual secrets (including a real RSA
+            # private key in a scanned image) with no on_skip warning at all,
+            # since it only ever read "Vulnerabilities". Location reuses
+            # SastLocation: a secret is a file+line finding, same shape as a
+            # SAST result, not a package-version finding like ScaLocation.
+            for secret_index, secret in enumerate(result.get("Secrets", [])):
+                try:
+                    signals.append(
+                        NormalizedSignal(
+                            signal_id=generate_id("sig"),
+                            source=SignalSource(
+                                tool=self.tool_name,
+                                tool_version=tool_version,
+                                type=signal_type,
+                                coverage=coverage,
+                            ),
+                            rule=RuleInfo(
+                                id=secret["RuleID"],
+                                name=secret.get("Title", secret["RuleID"]),
+                                cwe=[],
+                            ),
+                            severity=SeverityInfo(
+                                raw=secret.get("Severity") or "UNKNOWN",
+                                normalized=SEVERITY_MAP.get(secret.get("Severity") or "UNKNOWN", NormalizedSeverity.INFO),
+                            ),
+                            location=SastLocation(
+                                file_path=artifact_ref,
+                                start_line=secret["StartLine"],
+                                end_line=secret["EndLine"],
+                            ),
+                            signal_context=f"{secret.get('Title', '')}\n\n{secret.get('Match', '')}".strip(),
+                            target_hint=TargetHint(),
+                            ingested_at=datetime.now(timezone.utc),
+                            raw_reference=raw_reference,
+                        )
+                    )
+                except (KeyError, ValidationError, TypeError, AttributeError) as exc:
+                    if on_skip:
+                        on_skip(
+                            f"Bỏ qua Results[{result_index}].Secrets[{secret_index}] "
                             f"(trivy): thiếu/sai field — {exc}"
                         )
         return signals

@@ -9,34 +9,48 @@ FIXTURE = Path(__file__).parent / "fixtures" / "semgrep_sample_report.json"
 
 
 def test_semgrep_adapter_maps_fields_correctly():
+    # FIXTURE is a real `semgrep scan --config=auto` run (see
+    # .secweave/manual_test/ for the session that captured it) against the
+    # real route handlers of OWASP Juice Shop (bkimminich/juice-shop) — not
+    # hand-written. 13 real findings, including Juice Shop's actual, known
+    # SQL-injection-via-Sequelize bugs in login.ts and search.ts.
     normalizer = SignalNormalizer()
     signals = normalizer.normalize_file(
         report_path=str(FIXTURE),
         tool="semgrep",
-        tool_version="1.78.0",
+        tool_version="1.172.0",
         coverage=SignalCoverage.COMPLETE,
     )
 
-    assert len(signals) == 2
+    assert len(signals) == 13
+    assert all(s.source.tool == "semgrep" for s in signals)
+    assert all(s.source.type == SignalType.SAST for s in signals)
+    assert all(s.source.coverage == SignalCoverage.COMPLETE for s in signals)
 
-    sqli = signals[0]
-    assert sqli.source.tool == "semgrep"
-    assert sqli.source.type == SignalType.SAST
-    assert sqli.source.coverage == SignalCoverage.COMPLETE
-    assert sqli.rule.id == "python.django.security.audit.sqli"
-    assert sqli.rule.cwe == [
-        "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+    login_sqli = next(s for s in signals if "login.ts" in s.location.file_path)
+    assert login_sqli.rule.id == (
+        "javascript.sequelize.security.audit.sequelize-injection-express."
+        "express-sequelize-injection"
+    )
+    assert login_sqli.rule.cwe == [
+        "CWE-89: Improper Neutralization of Special Elements used in an SQL Command "
+        "('SQL Injection')"
     ]
-    assert sqli.severity.raw == "ERROR"
-    assert sqli.severity.normalized == NormalizedSeverity.HIGH
-    assert sqli.location.file_path == "app/views.py"
-    assert sqli.location.start_line == 42
-    assert sqli.location.end_line == 42
-    assert "SELECT * FROM users" in sqli.signal_context
+    assert login_sqli.severity.raw == "ERROR"
+    assert login_sqli.severity.normalized == NormalizedSeverity.HIGH
+    assert login_sqli.location.start_line == 34
+    assert login_sqli.location.end_line == 34
+    # Real quirk, not a bug: Semgrep's free/anonymous CLI withholds the
+    # actual matched code line behind a semgrep.dev login — "lines" (mapped
+    # to signal_context) is literally this sentinel string, not real code.
+    assert login_sqli.signal_context == "requires login"
 
-    eval_signal = signals[1]
-    assert eval_signal.severity.raw == "WARNING"
-    assert eval_signal.severity.normalized == NormalizedSeverity.MEDIUM
+    warning_signals = [s for s in signals if s.severity.raw == "WARNING"]
+    error_signals = [s for s in signals if s.severity.raw == "ERROR"]
+    assert len(warning_signals) == 9
+    assert len(error_signals) == 4
+    assert all(s.severity.normalized == NormalizedSeverity.MEDIUM for s in warning_signals)
+    assert all(s.severity.normalized == NormalizedSeverity.HIGH for s in error_signals)
 
 
 def test_semgrep_adapter_raw_reference_matches_file_hash():

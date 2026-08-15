@@ -6,6 +6,7 @@ import pytest
 import cli
 
 SEMGREP_FIXTURE = str(Path(__file__).parent / "fixtures" / "semgrep_sample_report.json")
+ZAP_FIXTURE = str(Path(__file__).parent / "fixtures" / "zap_sample_report.json")
 
 
 def test_cli_normalize_json_output(capsys):
@@ -26,8 +27,11 @@ def test_cli_normalize_json_output(capsys):
     data = json.loads(captured.out)
 
     assert exit_code == 0
-    assert len(data) == 2
-    assert data[0]["rule"]["id"] == "python.django.security.audit.sqli"
+    assert len(data) == 13
+    assert data[0]["rule"]["id"] == (
+        "javascript.express.security.audit.express-detect-notevil-usage."
+        "express-detect-notevil-usage"
+    )
     assert data[0]["source"]["tool"] == "semgrep"
 
 
@@ -46,8 +50,8 @@ def test_cli_normalize_table_output(capsys):
     captured = capsys.readouterr()
 
     assert exit_code == 0
-    assert "python.django.security.audit.sqli" in captured.out
-    assert "2 NormalizedSignal" in captured.out
+    assert "express-detect-notevil-usage" in captured.out
+    assert "13 NormalizedSignal" in captured.out
 
 
 def test_cli_normalize_missing_file_returns_error_exit_code(capsys):
@@ -136,7 +140,7 @@ def test_cli_hypothesize_json_output_with_stubbed_real_client(capsys, monkeypatc
     data = json.loads(captured.out)
 
     assert exit_code == 0
-    assert len(data) == 2
+    assert len(data) == 13
     assert data[0]["result"]["status"] == "hypothesis"
     assert data[0]["result"]["hypothesis"]["provenance"]["source_tool"] == "semgrep"
     assert "CẢNH BÁO" in captured.err
@@ -490,29 +494,26 @@ def test_cli_hypothesize_missing_source_file_returns_error(capsys):
 def test_cli_hypothesize_agent_mode_batches_all_signals_into_one_wait(
     capsys, monkeypatch, tmp_path
 ):
-    # SEMGREP_FIXTURE has 2 findings — confirms both are processed through
-    # EXACTLY 1 wait for the agent (not 2), and both still get recorded
-    # correctly into the Context Store.
+    # SEMGREP_FIXTURE has 13 real findings (see its own comment) — confirms
+    # all 13 are processed through EXACTLY 1 wait for the agent (not 13),
+    # and all still get recorded correctly into the Context Store.
     import hypothesis_engine.llm_client.agent_bridge_client as agent_module
 
     wait_calls = []
 
     def _fake_wait(self, prompt_path, response_path):
         wait_calls.append(prompt_path)
-        response_path.write_text(
-            json.dumps(
-                [
-                    {
-                        "verifiable": True,
-                        "expected_behavior": "a",
-                        "suspected_behavior": "b",
-                        "observation_criteria": "c",
-                    },
-                    {"verifiable": False, "reason": "not enough context"},
-                ]
-            ),
-            encoding="utf-8",
-        )
+        responses = [
+            {
+                "verifiable": True,
+                "expected_behavior": "a",
+                "suspected_behavior": "b",
+                "observation_criteria": "c",
+            }
+            for _ in range(12)
+        ]
+        responses.append({"verifiable": False, "reason": "not enough context"})
+        response_path.write_text(json.dumps(responses), encoding="utf-8")
 
     monkeypatch.setattr(agent_module.AgentBridgeLLMClient, "_wait_for_agent", _fake_wait)
     # AgentBridgeLLMClient() uses the default work_dir (".secweave_agent_bridge",
@@ -542,9 +543,9 @@ def test_cli_hypothesize_agent_mode_batches_all_signals_into_one_wait(
 
     assert exit_code == 0
     assert len(wait_calls) == 1
-    assert len(data) == 2
+    assert len(data) == 13
     assert data[0]["result"]["status"] == "hypothesis"
-    assert data[1]["result"]["status"] == "not_verifiable"
+    assert data[-1]["result"]["status"] == "not_verifiable"
 
 
 class _StubPlanLLMClient:
@@ -558,7 +559,7 @@ class _StubPlanLLMClient:
                     {
                         "type": "read_only",
                         "method": "GET",
-                        "target": "https://staging.example.com/api/objects/42",
+                        "target": "http://host.docker.internal:3000",
                         "description": "Read object 42 as owner identity.",
                     }
                 ],
@@ -569,16 +570,27 @@ class _StubPlanLLMClient:
 def _create_stored_hypothesis(capsys, monkeypatch, db_path: str) -> str:
     import hypothesis_engine.llm_client.openai_compatible_client as llm_module
 
+    # Uses the ZAP (DAST) fixture, not Semgrep/SAST: these `plan` CLI tests
+    # exist to check plan-approval plumbing (allowlist, table/json output,
+    # agent mode), and _StubPlanLLMClient below fabricates a plan targeting
+    # "host.docker.internal:3000" — exploit_agent.agent's deterministic
+    # anti-fabrication backstop would (correctly) reject that same target
+    # for a SAST-sourced hypothesis, since SastLocation carries no url at
+    # all for it to trace back to. The ZAP fixture's real uri already IS
+    # host.docker.internal:3000 (real Juice Shop baseline scan — see
+    # tests/fixtures/zap_sample_report.json), so provenance.location is a
+    # genuine DastLocation and the backstop doesn't apply — matching what
+    # these tests are actually about.
     monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubOpenAICompatibleClient)
     exit_code = cli.main(
         [
             "hypothesize",
             "--signal",
-            SEMGREP_FIXTURE,
+            ZAP_FIXTURE,
             "--tool",
-            "semgrep",
+            "owasp_zap",
             "--tool-version",
-            "1.78.0",
+            "2.14.0",
             "--format",
             "json",
             "--context-db",
@@ -643,7 +655,7 @@ def test_cli_plan_approves_when_action_matches_allowlist(capsys, monkeypatch, tm
             "--hypothesis-id",
             hypothesis_id,
             "--allowed-action",
-            "GET https://staging.example.com/api/objects/{id}",
+            "GET http://host.docker.internal:3000",
             "--format",
             "json",
             "--context-db",
@@ -700,7 +712,7 @@ def test_cli_plan_table_output_shows_per_action_verdict(capsys, monkeypatch, tmp
             "--hypothesis-id",
             hypothesis_id,
             "--allowed-action",
-            "GET https://staging.example.com/api/objects/{id}",
+            "GET http://host.docker.internal:3000",
             "--context-db",
             db_path,
         ]
@@ -763,7 +775,7 @@ def test_cli_plan_agent_mode_uses_agent_bridge_client(capsys, monkeypatch, tmp_p
                         {
                             "type": "read_only",
                             "method": "GET",
-                            "target": "https://staging.example.com/api/objects/42",
+                            "target": "http://host.docker.internal:3000",
                             "description": "Read object 42.",
                         }
                     ],
@@ -784,7 +796,7 @@ def test_cli_plan_agent_mode_uses_agent_bridge_client(capsys, monkeypatch, tmp_p
             "--hypothesis-id",
             hypothesis_id,
             "--allowed-action",
-            "GET https://staging.example.com/api/objects/{id}",
+            "GET http://host.docker.internal:3000",
             "--llm-mode",
             "agent",
             "--context-db",

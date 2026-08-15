@@ -8,42 +8,61 @@ FIXTURE = Path(__file__).parent / "fixtures" / "trivy_sample_report.json"
 
 
 def test_trivy_adapter_maps_fields_correctly():
+    # FIXTURE is a real `trivy image bkimminich/juice-shop` run (see
+    # .secweave/manual_test/ for the session that captured it), trimmed down
+    # to 1 real OS-package CVE + 1 real secret finding — not hand-written.
     normalizer = SignalNormalizer()
     signals = normalizer.normalize_file(
         report_path=str(FIXTURE),
         tool="trivy",
-        tool_version="0.53.0",
+        tool_version="0.58.0",
         coverage=SignalCoverage.COMPLETE,
     )
 
-    assert len(signals) == 1
-    signal = signals[0]
+    assert len(signals) == 2
 
-    assert signal.source.tool == "trivy"
-    assert signal.source.type == SignalType.SCA
-    assert signal.rule.id == "CVE-2023-32681"
-    assert signal.rule.cwe == ["CWE-200"]
-    assert signal.severity.raw == "HIGH"
-    assert signal.severity.normalized == NormalizedSeverity.HIGH
-    assert signal.location.package_name == "requests"
-    assert signal.location.installed_version == "2.25.0"
-    assert signal.location.fixed_version == "2.31.0"
-    assert signal.location.artifact_ref == "requirements.txt"
-    assert "Proxy-Authorization header leak" in signal.signal_context
+    vuln = next(s for s in signals if s.rule.id.startswith("CVE-"))
+    assert vuln.source.tool == "trivy"
+    assert vuln.source.type == SignalType.CONTAINER
+    assert vuln.rule.id == "CVE-2026-5435"
+    assert vuln.rule.cwe == ["CWE-787"]
+    assert vuln.severity.raw == "MEDIUM"
+    assert vuln.severity.normalized == NormalizedSeverity.MEDIUM
+    assert vuln.location.package_name == "libc6"
+    assert vuln.location.installed_version == "2.41-12+deb13u3"
+    assert vuln.location.artifact_ref == "bkimminich/juice-shop (debian 13.6)"
+    assert "Out-of-bounds write via TSIG record processing" in vuln.signal_context
+
+    secret = next(s for s in signals if s.rule.id == "private-key")
+    assert secret.source.type == SignalType.CONTAINER
+    assert secret.rule.name == "Asymmetric Private Key"
+    assert secret.severity.normalized == NormalizedSeverity.HIGH
+    assert secret.location.file_path == "/juice-shop/lib/insecurity.ts"
+    assert secret.location.start_line == 21
+    assert "BEGIN RSA PRIVATE KEY" in secret.signal_context
 
 
-def test_trivy_adapter_container_artifact_type():
+def test_trivy_adapter_sca_type_when_artifact_type_is_not_container_image():
+    # The Vulnerabilities entry below is real (same `@tootallnate/once`
+    # CVE-2026-3449 finding as in the real juice-shop image scan) — only
+    # "ArtifactType" is changed from "container_image" to "filesystem" (a
+    # real value `trivy fs` reports) to exercise the adapter's SCA-vs-
+    # CONTAINER branch, which the real container-image fixture above can't.
     raw = {
-        "ArtifactType": "container_image",
+        "ArtifactType": "filesystem",
         "Results": [
             {
-                "Target": "myapp:latest (alpine 3.18.4)",
+                "Target": "package-lock.json",
                 "Vulnerabilities": [
                     {
-                        "VulnerabilityID": "CVE-2023-0001",
-                        "PkgName": "openssl",
-                        "InstalledVersion": "3.0.8-r0",
-                        "Severity": "CRITICAL",
+                        "VulnerabilityID": "CVE-2026-3449",
+                        "PkgName": "@tootallnate/once",
+                        "InstalledVersion": "1.1.2",
+                        "FixedVersion": "3.0.1, 2.0.1",
+                        "Severity": "LOW",
+                        "CweIDs": ["CWE-705"],
+                        "Title": "@tootallnate/once: Denial of Service due to incorrect control "
+                        "flow scoping with AbortSignal",
                     }
                 ],
             }
@@ -52,11 +71,11 @@ def test_trivy_adapter_container_artifact_type():
     signals = TrivyAdapter().parse(
         raw_report=raw,
         raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
-        tool_version="0.53.0",
+        tool_version="0.58.0",
         coverage=SignalCoverage.COMPLETE,
     )
-    assert signals[0].source.type == SignalType.CONTAINER
-    assert signals[0].severity.normalized == NormalizedSeverity.CRITICAL
+    assert signals[0].source.type == SignalType.SCA
+    assert signals[0].severity.normalized == NormalizedSeverity.LOW
 
 
 def test_trivy_adapter_result_with_no_vulnerabilities_key_produces_no_signals():
@@ -183,6 +202,30 @@ def test_trivy_adapter_skips_vulnerability_that_is_not_an_object():
     assert [s.rule.id for s in signals] == ["CVE-2023-0002"]
     assert len(skipped) == 1
     assert "Results[0].Vulnerabilities[0]" in skipped[0]
+
+
+def test_trivy_adapter_skips_secret_missing_required_field_and_reports_it():
+    raw = {
+        "Results": [
+            {
+                "Target": "app.py",
+                "Secrets": [
+                    {"RuleID": "private-key", "Title": "Asymmetric Private Key"},  # missing StartLine/EndLine
+                ],
+            }
+        ]
+    }
+    skipped = []
+    signals = TrivyAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="0.58.0",
+        coverage=SignalCoverage.COMPLETE,
+        on_skip=skipped.append,
+    )
+    assert signals == []
+    assert len(skipped) == 1
+    assert "Results[0].Secrets[0]" in skipped[0]
 
 
 def test_trivy_adapter_null_severity_treated_as_unknown():
