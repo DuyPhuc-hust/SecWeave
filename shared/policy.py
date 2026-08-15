@@ -1,6 +1,6 @@
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional, Set
 from urllib.parse import urlsplit
 
 from shared.models.action import ActionSpec, PolicyDecision
@@ -29,6 +29,26 @@ def _path_template_to_regex(template: str) -> re.Pattern:
     return re.compile("".join(regex_parts))
 
 
+_PARAMS_CLAUSE_PREFIX = "params:"
+
+
+def _parse_allowed_params(extra_tokens: List[str]) -> Optional[Set[str]]:
+    """Parses the optional 3rd token of an allowlist entry — `params:a,b,c`
+    — into the set of parameter keys that entry permits. No 3rd token means
+    the entry permits NO parameters at all (empty set), not "anything" — see
+    _matches_allowed_action's docstring for why this default matters.
+    Returns None for anything malformed (extra tokens beyond one, or a token
+    not starting with "params:"), signalling the caller to deny outright
+    rather than guess an interpretation.
+    """
+    if not extra_tokens:
+        return set()
+    if len(extra_tokens) > 1 or not extra_tokens[0].startswith(_PARAMS_CLAUSE_PREFIX):
+        return None
+    keys_part = extra_tokens[0][len(_PARAMS_CLAUSE_PREFIX) :]
+    return {key for key in keys_part.split(",") if key}
+
+
 def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
     # allowed_action MUST be a full URL with scheme+host, in the form
     # "METHOD https://host/path/template/{param}" — NOT just a path. Matching
@@ -36,16 +56,42 @@ def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
     # long as the path matches — equivalent to a scope-escape/SSRF
     # vulnerability inside Policy Service itself (found and fixed — see
     # tests/test_policy.py).
-    try:
-        method, template = allowed_action.split(maxsplit=1)
-    except ValueError:
+    #
+    # An optional 3rd token, "params:key1,key2", declares which
+    # ActionSpec.parameters keys this entry permits. Real gap found via
+    # full-codebase review: parameters were never checked at all — an action
+    # matching the URL/method could carry ANY key/value in its body or query
+    # string (e.g. {"debug_bypass_auth": "1"}), since ActionSpec.parameters
+    # is built directly from unvalidated LLM JSON (exploit_agent/agent.py)
+    # and sent as-is by evidence_harness/harness.py. Omitting the clause
+    # means the entry permits an EMPTY parameters dict only — not "anything"
+    # — matching this project's deny-by-default default in every other gate.
+    tokens = allowed_action.split()
+    if len(tokens) < 2:
+        return False
+    method, template = tokens[0], tokens[1]
+    allowed_params = _parse_allowed_params(tokens[2:])
+    if allowed_params is None:
         return False
     if action.method.upper() != method.upper():
+        return False
+    if not set(action.parameters.keys()) <= allowed_params:
         return False
 
     action_url = urlsplit(action.target)
     template_url = urlsplit(template)
 
+    if action_url.query:
+        # Real bypass found via review: the params check above only looks at
+        # action.parameters — it says nothing about a query string smuggled
+        # directly inside action.target itself (e.g.
+        # "https://host/api/objects/123?debug_bypass_auth=1"), which
+        # evidence_harness/harness.py sends to the real target completely
+        # unfiltered (httpx keeps a URL's own query string when params=None).
+        # Since ActionSpec.parameters is the one designated, checked channel
+        # for extra data, a target that already carries its own query string
+        # is always denied — no legitimate action needs both.
+        return False
     if not template_url.netloc:
         # Allowlist entry missing a host — treat as misconfiguration and deny
         # outright, instead of silently falling back to matching path only

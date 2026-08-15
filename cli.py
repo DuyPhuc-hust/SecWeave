@@ -414,8 +414,11 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument(
         "--allowed-action",
         action="append",
-        help='1 entry allowlist, dạng "METHOD https://host/path/{param}" — có thể lặp lại flag này '
-        "nhiều lần để cấp nhiều entry. Không truyền = allowlist rỗng = mọi action đều bị chặn.",
+        help='1 entry allowlist, dạng "METHOD https://host/path/{param} [params:key1,key2]" — có thể '
+        "lặp lại flag này nhiều lần để cấp nhiều entry. Không truyền = allowlist rỗng = mọi action đều "
+        "bị chặn. Phần 'params:...' tuỳ chọn: liệt kê tên field được phép xuất hiện trong "
+        "ActionSpec.parameters (query string hoặc JSON body) của action đó — không ghi thì mặc định "
+        "action PHẢI có parameters rỗng, không phải 'cho phép tất cả'.",
     )
     plan_parser.add_argument(
         "--cap", type=int, default=10, help="Cap số hành động dự kiến tối đa trong plan (mặc định: %(default)s)"

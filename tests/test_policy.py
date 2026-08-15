@@ -81,6 +81,94 @@ def test_allowlist_entry_tolerates_extra_whitespace_between_method_and_url():
     assert decision.allowed is True
 
 
+def test_action_with_unexpected_parameters_is_denied_even_if_url_matches():
+    # Real gap found via full-codebase review: an allowlist entry with no
+    # params clause used to say nothing about ActionSpec.parameters at all —
+    # an action matching the URL/method was approved regardless of what was
+    # in its (LLM-authored, unvalidated) body/query. An entry with no params
+    # clause must mean "parameters must be empty", not "anything goes".
+    authorization = sample_authorization(allowed_actions=[ALLOWED_ENTRY])
+    action = _action(parameters={"debug_bypass_auth": "1", "impersonate": "admin"})
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_action_with_empty_parameters_still_matches_entry_without_params_clause():
+    authorization = sample_authorization(allowed_actions=[ALLOWED_ENTRY])
+    decision = is_allowed(_action(parameters={}), authorization, now=NOW)
+    assert decision.allowed is True
+
+
+def test_action_parameters_allowed_when_keys_match_params_clause():
+    authorization = sample_authorization(
+        allowed_actions=["POST https://staging.example.com/api/basket params:username,password"]
+    )
+    action = _action(
+        method="POST",
+        type=ActionType.TEST_DATA_CREATION,
+        target="https://staging.example.com/api/basket",
+        parameters={"username": "tester", "password": "secret"},
+    )
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is True
+
+
+def test_action_parameter_key_outside_params_clause_is_denied():
+    authorization = sample_authorization(
+        allowed_actions=["POST https://staging.example.com/api/basket params:username,password"]
+    )
+    action = _action(
+        method="POST",
+        type=ActionType.TEST_DATA_CREATION,
+        target="https://staging.example.com/api/basket",
+        parameters={"username": "tester", "password": "secret", "role": "admin"},
+    )
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_action_with_no_parameters_still_matches_entry_that_has_a_params_clause():
+    # An entry permitting some keys doesn't REQUIRE them to be present.
+    authorization = sample_authorization(
+        allowed_actions=["POST https://staging.example.com/api/basket params:username,password"]
+    )
+    action = _action(
+        method="POST",
+        type=ActionType.TEST_DATA_CREATION,
+        target="https://staging.example.com/api/basket",
+        parameters={},
+    )
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is True
+
+
+def test_action_with_query_string_smuggled_directly_in_target_is_denied():
+    # Real bypass found via review: the parameters-check above only looks at
+    # ActionSpec.parameters — a query string embedded directly in
+    # action.target (e.g. "...?debug_bypass_auth=1") bypassed it entirely,
+    # since evidence_harness/harness.py sends the target URL's own query
+    # string to the real target unfiltered when params=None.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id} params:id"]
+    )
+    action = _action(
+        target="https://staging.example.com/api/objects/42?debug_bypass_auth=1&admin=true",
+        parameters={},
+    )
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_malformed_params_clause_denies_outright():
+    # A 3rd token that isn't a well-formed "params:..." clause is a
+    # misconfiguration — fail safe (deny), never guess an interpretation.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id} not-a-params-clause"]
+    )
+    decision = is_allowed(_action(parameters={}), authorization, now=NOW)
+    assert decision.allowed is False
+
+
 @pytest.mark.parametrize("method", ["DELETE", "PUT", "PATCH", "delete", "put"])
 def test_destructive_methods_are_always_denied_regardless_of_allowlist(method):
     # The allowlist "allows" this endpoint for any method — but a
