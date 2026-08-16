@@ -252,3 +252,86 @@ def test_trivy_adapter_null_severity_treated_as_unknown():
     )
     assert signals[0].severity.raw == "UNKNOWN"
     assert signals[0].severity.normalized == NormalizedSeverity.INFO
+
+
+def test_trivy_adapter_treats_null_results_as_empty_not_a_crash():
+    # Real bug found via independent review: {"Results": null} used to crash
+    # with TypeError: 'NoneType' object is not iterable — dict.get(key, [])
+    # only substitutes on a MISSING key, not a present-but-null one.
+    raw = {"Results": None}
+    skipped = []
+    signals = TrivyAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="0.58.0",
+        coverage=SignalCoverage.COMPLETE,
+        on_skip=skipped.append,
+    )
+    assert signals == []
+    assert len(skipped) == 1
+    assert "Results" in skipped[0]
+
+
+def test_trivy_adapter_null_vulnerabilities_in_one_result_does_not_lose_signals_from_another():
+    # Sharper version of the bug above: a null container buried in ONE
+    # result entry must not discard signals already parsed from OTHER,
+    # perfectly valid result entries in the same report — the exact "must
+    # not lose the other valid entries" contract (base.py's docstring).
+    raw = {
+        "Results": [
+            {"Target": "app-a.py", "Vulnerabilities": None},
+            {
+                "Target": "app-b.py",
+                "Vulnerabilities": [
+                    {
+                        "VulnerabilityID": "CVE-2024-1111",
+                        "PkgName": "requests",
+                        "InstalledVersion": "2.25.0",
+                        "Severity": "HIGH",
+                    }
+                ],
+            },
+        ]
+    }
+    skipped = []
+    signals = TrivyAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="0.58.0",
+        coverage=SignalCoverage.COMPLETE,
+        on_skip=skipped.append,
+    )
+    assert [s.rule.id for s in signals] == ["CVE-2024-1111"]
+    assert any("Vulnerabilities" in msg for msg in skipped)
+
+
+def test_trivy_adapter_null_secrets_does_not_warn_when_key_is_simply_absent():
+    # A result with Vulnerabilities but no "Secrets" key at all is a normal,
+    # everyday shape (not every Trivy result has secrets) — must NOT warn,
+    # unlike a "Secrets": null (present but wrong type), which should.
+    raw = {
+        "Results": [
+            {
+                "Target": "app.py",
+                "Vulnerabilities": [
+                    {
+                        "VulnerabilityID": "CVE-2024-2222",
+                        "PkgName": "flask",
+                        "InstalledVersion": "1.0",
+                        "Severity": "LOW",
+                    }
+                ],
+                # no "Secrets" key at all
+            }
+        ]
+    }
+    skipped = []
+    signals = TrivyAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="0.58.0",
+        coverage=SignalCoverage.COMPLETE,
+        on_skip=skipped.append,
+    )
+    assert [s.rule.id for s in signals] == ["CVE-2024-2222"]
+    assert skipped == []

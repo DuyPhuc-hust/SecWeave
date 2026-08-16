@@ -25,3 +25,18 @@ def test_non_object_top_level_json_raises_clean_value_error(tmp_path, bad_conten
         normalizer.normalize_file(
             report_path=str(bad_file), tool="semgrep", tool_version="1.78.0"
         )
+
+
+def test_pathologically_deep_json_raises_clean_value_error_not_recursion_error(tmp_path):
+    # Real bug found via independent review: ordinary malformed JSON raises
+    # json.JSONDecodeError (a ValueError subclass, caught cleanly), but a
+    # syntactically VALID, pathologically deeply-nested document raises
+    # RecursionError instead — not a ValueError, so it used to escape
+    # uncaught and dump a raw traceback instead of a clean CLI error.
+    bad_file = tmp_path / "too_deep.json"
+    depth = 200_000
+    bad_file.write_text(("[" * depth) + ("]" * depth), encoding="utf-8")
+
+    normalizer = SignalNormalizer()
+    with pytest.raises(ValueError, match="lồng quá sâu"):
+        normalizer.normalize_file(report_path=str(bad_file), tool="semgrep", tool_version="1.78.0")

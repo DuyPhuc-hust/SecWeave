@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import ValidationError
 
-from hypothesis_engine.signal_normalizer.base import OnSkipCallback, SignalAdapter
+from hypothesis_engine.signal_normalizer.base import OnSkipCallback, SignalAdapter, container_as_list
 from shared.id_generator import generate_id
 from shared.models.signal import (
     NormalizedSeverity,
@@ -46,7 +46,7 @@ class TrivyAdapter(SignalAdapter):
         )
 
         signals = []
-        for result_index, result in enumerate(raw_report.get("Results", [])):
+        for result_index, result in enumerate(container_as_list(raw_report, "Results", "Results", on_skip)):
             try:
                 artifact_ref = result["Target"]
             except (KeyError, TypeError) as exc:
@@ -57,7 +57,10 @@ class TrivyAdapter(SignalAdapter):
                     on_skip(f"Bỏ qua Results[{result_index}] (trivy): thiếu/sai field — {exc}")
                 continue
 
-            for vuln_index, vuln in enumerate(result.get("Vulnerabilities", [])):
+            vulnerabilities = container_as_list(
+                result, "Vulnerabilities", f"Results[{result_index}].Vulnerabilities", on_skip
+            )
+            for vuln_index, vuln in enumerate(vulnerabilities):
                 try:
                     # "Severity" can be either absent OR present but null —
                     # both cases must fall back to "UNKNOWN" (the value Trivy
@@ -112,7 +115,8 @@ class TrivyAdapter(SignalAdapter):
             # since it only ever read "Vulnerabilities". Location reuses
             # SastLocation: a secret is a file+line finding, same shape as a
             # SAST result, not a package-version finding like ScaLocation.
-            for secret_index, secret in enumerate(result.get("Secrets", [])):
+            secrets = container_as_list(result, "Secrets", f"Results[{result_index}].Secrets", on_skip)
+            for secret_index, secret in enumerate(secrets):
                 try:
                     signals.append(
                         NormalizedSignal(

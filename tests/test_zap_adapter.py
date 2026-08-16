@@ -243,3 +243,60 @@ def test_zap_adapter_alert_with_no_instances_reports_via_on_skip():
     assert len(skipped) == 1
     assert "pluginid=99" in skipped[0]
     assert "không có instance nào" in skipped[0]
+
+
+def test_zap_adapter_treats_null_site_as_empty_not_a_crash():
+    # Real bug found via independent review: {"site": null} used to crash
+    # with TypeError: 'NoneType' object is not iterable.
+    raw = {"site": None}
+    skipped = []
+    signals = ZapAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="2.14.0",
+        coverage=SignalCoverage.COMPLETE,
+        on_skip=skipped.append,
+    )
+    assert signals == []
+    assert len(skipped) == 1
+    assert "site" in skipped[0]
+
+
+def test_zap_adapter_treats_null_alerts_as_empty_not_a_crash():
+    raw = {"site": [{"alerts": None}]}
+    skipped = []
+    signals = ZapAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="2.14.0",
+        coverage=SignalCoverage.COMPLETE,
+        on_skip=skipped.append,
+    )
+    assert signals == []
+    assert any("alerts" in msg for msg in skipped)
+
+
+def test_zap_adapter_treats_null_instances_as_empty_not_a_crash():
+    # Real bug found via independent review: the code already correctly
+    # called on_skip("không có instance nào...") for a falsy `instances`
+    # value (since `not None` is True), then fell straight into
+    # enumerate(instances) with no `continue` and crashed anyway.
+    raw = {
+        "site": [
+            {
+                "alerts": [
+                    {"pluginid": "1", "alert": "Test Alert", "riskcode": "2", "riskdesc": "Medium (High)", "instances": None}
+                ]
+            }
+        ]
+    }
+    skipped = []
+    signals = ZapAdapter().parse(
+        raw_report=raw,
+        raw_reference=RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="2.14.0",
+        coverage=SignalCoverage.COMPLETE,
+        on_skip=skipped.append,
+    )
+    assert signals == []
+    assert any("instances" in msg for msg in skipped)

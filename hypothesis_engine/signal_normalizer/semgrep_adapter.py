@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import ValidationError
 
-from hypothesis_engine.signal_normalizer.base import OnSkipCallback, SignalAdapter
+from hypothesis_engine.signal_normalizer.base import OnSkipCallback, SignalAdapter, container_as_list
 from shared.id_generator import generate_id
 from shared.models.signal import (
     NormalizedSeverity,
@@ -54,7 +54,7 @@ class SemgrepAdapter(SignalAdapter):
         on_skip: Optional[OnSkipCallback] = None,
     ) -> List[NormalizedSignal]:
         signals = []
-        for index, result in enumerate(raw_report.get("results", [])):
+        for index, result in enumerate(container_as_list(raw_report, "results", "results", on_skip)):
             try:
                 extra = result.get("extra", {})
                 metadata = extra.get("metadata", {})

@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import ValidationError
 
-from hypothesis_engine.signal_normalizer.base import OnSkipCallback, SignalAdapter
+from hypothesis_engine.signal_normalizer.base import OnSkipCallback, SignalAdapter, container_as_list
 from shared.id_generator import generate_id
 from shared.models.signal import (
     DastLocation,
@@ -43,9 +43,9 @@ class ZapAdapter(SignalAdapter):
         on_skip: Optional[OnSkipCallback] = None,
     ) -> List[NormalizedSignal]:
         signals = []
-        for site_index, site in enumerate(raw_report.get("site", [])):
+        for site_index, site in enumerate(container_as_list(raw_report, "site", "site", on_skip)):
             try:
-                alerts = site.get("alerts", [])
+                alerts = container_as_list(site, "alerts", f"site[{site_index}].alerts", on_skip)
             except AttributeError as exc:
                 # site is not an object (e.g. a string/list/null slipping
                 # into "site" from a corrupted report or a mismatched --tool).
@@ -59,7 +59,9 @@ class ZapAdapter(SignalAdapter):
                     riskcode = str(alert.get("riskcode") or "")
                     cweid = alert.get("cweid")
                     cwe = [f"CWE-{cweid}"] if cweid and str(cweid) not in ("-1", "0") else []
-                    instances = alert.get("instances", [])
+                    instances = container_as_list(
+                        alert, "instances", f"site[{site_index}].alerts[{alert_index}].instances", on_skip
+                    )
                 except AttributeError as exc:
                     # alert is not an object — same reason as site above.
                     if on_skip:

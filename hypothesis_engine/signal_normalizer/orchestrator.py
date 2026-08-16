@@ -39,7 +39,21 @@ class SignalNormalizer:
             storage_path=str(path),
             hash=f"sha256:{hashlib.sha256(raw_bytes).hexdigest()}",
         )
-        raw_report = json.loads(raw_bytes)
+        try:
+            raw_report = json.loads(raw_bytes)
+        except RecursionError as exc:
+            # Real gap found via review: ordinary malformed JSON raises
+            # json.JSONDecodeError (a ValueError subclass, already caught
+            # cleanly by cli.py's existing `except ValueError`), but a
+            # pathologically deeply-nested (still syntactically valid) JSON
+            # document raises RecursionError instead — NOT a ValueError, so
+            # it escaped uncaught and dumped a raw traceback. Re-raised as
+            # ValueError so the existing error-handling path covers it too,
+            # without needing a new except clause at every call site.
+            raise ValueError(
+                f"Report JSON tại '{report_path}' lồng quá sâu để parse an toàn (RecursionError) — "
+                "có thể report đã bị hỏng hoặc giả mạo."
+            ) from exc
         if not isinstance(raw_report, dict):
             raise ValueError(
                 f"Report JSON gốc phải là object, nhận được {type(raw_report).__name__} "

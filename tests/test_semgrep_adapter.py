@@ -120,3 +120,42 @@ def test_semgrep_adapter_skips_entry_that_is_not_an_object():
     assert [s.rule.id for s in signals] == ["good.rule.1", "good.rule.2"]
     assert len(skipped) == 1
     assert "results[1]" in skipped[0]
+
+
+def test_semgrep_adapter_treats_null_results_as_empty_not_a_crash():
+    # Real bug found via independent review: {"results": null} used to crash
+    # with TypeError: 'NoneType' object is not iterable (dict.get(key, [])
+    # only substitutes its default on a MISSING key, not a present-but-null
+    # one) — this happened OUTSIDE the per-item try/except, so it wasn't
+    # just one entry lost, it was the whole report.
+    raw = {"results": None}
+    skipped = []
+    signals = SemgrepAdapter().parse(
+        raw,
+        RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="1.78.0",
+        coverage=SignalCoverage.UNKNOWN,
+        on_skip=skipped.append,
+    )
+    assert signals == []
+    assert len(skipped) == 1
+    assert "results" in skipped[0]
+
+
+def test_semgrep_adapter_null_result_does_not_lose_other_already_parsed_signals():
+    # The real-world severity of the bug above: a null container anywhere
+    # must not discard signals from OTHER, unrelated parts of the same
+    # report. This test constructs the scenario at the orchestrator level
+    # via a raw dict directly (results itself null means there's nothing
+    # else in this report to lose) — see the Trivy equivalent test for the
+    # "null buried among otherwise-valid data" case, which is the sharper
+    # version of this same bug.
+    raw = {"results": None}
+    signals = SemgrepAdapter().parse(
+        raw,
+        RawReference(storage_path="in-memory", hash="sha256:0"),
+        tool_version="1.78.0",
+        coverage=SignalCoverage.UNKNOWN,
+        on_skip=None,
+    )
+    assert signals == []  # did not raise
