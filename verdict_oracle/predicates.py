@@ -5,7 +5,9 @@ unapproved draft — see that file's docstring for why. Pure code, no LLM
 (SPEC §4.4: "Rule code thuần, không gọi LLM").
 """
 
-from typing import Dict, List
+import hashlib
+from pathlib import Path
+from typing import Dict, List, Optional
 
 from shared.models.observation import (
     AccessResult,
@@ -14,6 +16,30 @@ from shared.models.observation import (
     PredicateResult,
     PredicateStatus,
 )
+
+
+def _hash_mismatch_reason(observation: NormalizedObservation) -> Optional[str]:
+    """SPEC §6.4 control #8: "Hash không khớp thì không được CONFIRMED" — no
+    exceptions in MVP. Returns None if the on-disk artifact's bytes still
+    hash to `observation.raw_evidence_hash`, or a reason string if not (or
+    if the file can't even be read — an unreadable/missing artifact is at
+    least as bad as a mismatched one, never treated as "assume it's fine").
+    Called from evaluate_predicates() before a group's role-specific check
+    runs, so a failure here surfaces as INSUFFICIENT_DATA — real gap found
+    via independent review: this check did not exist anywhere in the
+    codebase before, so a tampered artifact would sail through unnoticed.
+    """
+    try:
+        raw_bytes = Path(observation.raw_evidence_ref).read_bytes()
+    except OSError as exc:
+        return f"Không đọc được raw evidence tại '{observation.raw_evidence_ref}': {exc}"
+    recomputed = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
+    if recomputed != observation.raw_evidence_hash:
+        return (
+            f"Hash không khớp (SPEC §6.4 control #8) — lưu trong observation là "
+            f"'{observation.raw_evidence_hash}', tính lại từ file thật trên đĩa là '{recomputed}'."
+        )
+    return None
 
 
 def check_main_predicate(observation: NormalizedObservation) -> PredicateResult:
@@ -164,5 +190,12 @@ def evaluate_predicates(observations: List[NormalizedObservation]) -> List[Predi
                 )
             )
         else:
-            results.append(check_fn(matches[0]))
+            observation = matches[0]
+            hash_problem = _hash_mismatch_reason(observation)
+            if hash_problem is not None:
+                results.append(
+                    PredicateResult(group=role, status=PredicateStatus.INSUFFICIENT_DATA, reason=hash_problem)
+                )
+            else:
+                results.append(check_fn(observation))
     return results

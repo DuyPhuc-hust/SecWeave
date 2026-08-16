@@ -35,10 +35,41 @@ call flagged explicitly:
 - All 3 SATISFIED -> CONFIRMED. SPEC: "thiếu positive control thì không có
   CONFIRMED" (no exceptions) — satisfied here by construction, since
   reaching this branch already required positive_control SATISFIED.
+
+Two gaps found via a whole-project independent review (2026-08-15/16), fixed
+here and in predicates.py — neither had been caught by any prior review
+because no prior review had looked at this module from the specific angle
+of "what SPEC controls does this violate," only "is the predicate logic
+correct" (which it always was):
+
+- SPEC §3.4's execution_status matrix: only `COMPLETED` can produce a final
+  CONFIRMED/NOT_REPRODUCED verdict; `PREPARED`/`RUNNING` means no verdict
+  yet, and `BLOCKED`/`STOPPED`/`ERROR` means no FINAL verification verdict —
+  "nếu một biểu mẫu buộc phải ghi gì đó thì chỉ được ghi INCONCLUSIVE."
+  `assemble_verdict()` didn't take execution_status as input at all before
+  this fix, so a run stopped by the kill-switch (shared/kill_switch.py)
+  could still produce CONFIRMED on whatever observations happened to be
+  captured before the stop. Now REQUIRED (no default) so no caller can
+  silently skip thinking about it — see the check right after group
+  validation below.
+- SPEC §6.4 control #8: "Hash không khớp thì không được CONFIRMED" — no
+  exceptions in MVP. Implemented in predicates.py's evaluate_predicates(),
+  not here: a hash mismatch (or unreadable raw evidence file) on any of the
+  3 groups' observations now surfaces as PredicateStatus.INSUFFICIENT_DATA
+  BEFORE that observation's role-specific check ever runs, which flows
+  through this function's EXISTING "any INSUFFICIENT_DATA -> INCONCLUSIVE"
+  rule with no new code path needed here. Chosen over a bespoke 4th status
+  or a separate check bolted onto this function specifically because (a)
+  PredicateStatus is a closed 3-value enum by design (SPEC §11: "không có
+  trạng thái thứ tư"), and (b) `assemble_verdict()` only ever sees
+  PredicateResult objects, never the underlying NormalizedObservation with
+  its raw_evidence_ref — only evaluate_predicates() has both the observation
+  and the file path to actually re-read and compare.
 """
 
 from typing import List
 
+from shared.models.kill_switch import ExecutionStatus
 from shared.models.observation import (
     NormalizedObservation,
     ObservationRole,
@@ -55,7 +86,7 @@ _REQUIRED_GROUPS = frozenset(
 )
 
 
-def assemble_verdict(results: List[PredicateResult]) -> VerdictResult:
+def assemble_verdict(results: List[PredicateResult], execution_status: ExecutionStatus) -> VerdictResult:
     """`results` should be exactly the 3-element list evaluate_predicates()
     produces (one per required group). Explicitly validated here (unlike a
     private internal helper) because this function is this tier's actual
@@ -65,12 +96,31 @@ def assemble_verdict(results: List[PredicateResult]) -> VerdictResult:
     never silently pick an arbitrary interpretation for a verdict this
     consequential (this codebase has a documented history of exactly this
     dict-comprehension-silently-keeps-last-duplicate bug elsewhere).
+
+    `execution_status` is REQUIRED, not optional/defaulted — see this
+    module's docstring for why a silent default would risk quietly
+    reintroducing the exact bug this parameter was added to close. Only
+    `ExecutionStatus.COMPLETED` can produce CONFIRMED/NOT_REPRODUCED; every
+    other status forces INCONCLUSIVE regardless of what the predicates say
+    (SPEC §3.4).
     """
     groups_present = [r.group for r in results]
     if set(groups_present) != _REQUIRED_GROUPS or len(groups_present) != len(_REQUIRED_GROUPS):
         raise ValueError(
             f"assemble_verdict() cần đúng 1 PredicateResult cho mỗi nhóm {sorted(g.value for g in _REQUIRED_GROUPS)}, "
             f"nhận được: {sorted(g.value for g in groups_present)}"
+        )
+
+    if execution_status != ExecutionStatus.COMPLETED:
+        return VerdictResult(
+            verdict=Verdict.INCONCLUSIVE,
+            reason=(
+                f"execution_status='{execution_status.value}', không phải COMPLETED — SPEC §3.4: chỉ "
+                "COMPLETED mới có thể có final verification verdict; PREPARED/RUNNING nghĩa là chưa có "
+                "verdict, còn BLOCKED/STOPPED/ERROR nghĩa là không có final verdict, nếu buộc phải ghi "
+                "gì đó thì chỉ được ghi INCONCLUSIVE."
+            ),
+            predicate_results=results,
         )
 
     by_group = {r.group: r for r in results}
@@ -122,7 +172,9 @@ def assemble_verdict(results: List[PredicateResult]) -> VerdictResult:
     )
 
 
-def decide(observations: List[NormalizedObservation]) -> VerdictResult:
+def decide(observations: List[NormalizedObservation], execution_status: ExecutionStatus) -> VerdictResult:
     """Convenience entry point: evaluate_predicates() + assemble_verdict()
-    in one call, for callers that only care about the final verdict."""
-    return assemble_verdict(evaluate_predicates(observations))
+    in one call, for callers that only care about the final verdict.
+    `execution_status` is passed straight through — see assemble_verdict's
+    docstring for why it's required, not optional."""
+    return assemble_verdict(evaluate_predicates(observations), execution_status)
