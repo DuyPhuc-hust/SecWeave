@@ -104,13 +104,22 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
         print(f"error: không mở được Context Store tại '{args.context_db}': {exc}", file=sys.stderr)
         return 1
 
-    results: List[tuple] = []
-    failure: Optional[str] = None
     try:
         verified_context = (
             context_store.get_verified_context(args.target_id) if args.target_id else []
         )
+    except RuntimeError as exc:
+        # Real gap found via independent review: get_verified_context() had
+        # no exception handling at all — a real sqlite failure here (e.g.
+        # lock contention) used to escape uncaught and dump a raw
+        # traceback instead of this clean error.
+        print(f"error: {exc}", file=sys.stderr)
+        context_store.close()
+        return 1
 
+    results: List[tuple] = []
+    failure: Optional[str] = None
+    try:
         llm_client = _build_llm_client(
             args,
             agent_mode_message=(
@@ -198,6 +207,24 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _record_for_json(record: dict) -> dict:
+    """Returns a copy of a Context Store row with `location` decoded from
+    its stored JSON-string form into a real nested object — matching the
+    shape `hypothesize --format json` already outputs (straight from the
+    in-memory pydantic model, never double-JSON-encoded). Real gap found
+    via independent review: without this, show-hypothesis's JSON output
+    ran `location` through json.dumps() a SECOND time (it's already a JSON
+    string in the DB — see context_store/store.py's schema), producing a
+    doubly-escaped string instead of a nested object for the exact same
+    logical field — a script consuming both commands' JSON the same way
+    would break on one of them.
+    """
+    result = dict(record)
+    if result.get("location") is not None:
+        result["location"] = json.loads(result["location"])
+    return result
+
+
 def _print_hypothesis_record(record: dict) -> None:
     print(f"hypothesis_id       : {record['hypothesis_id']}")
     print(f"signal_id           : {record['signal_id']}")
@@ -228,6 +255,9 @@ def cmd_show_hypothesis(args: argparse.Namespace) -> int:
             # NOT_VERIFIABLE record (no Hypothesis was ever created) can only
             # be looked up by signal_id, it has no hypothesis_id to query by.
             records = context_store.get_hypotheses_by_signal_id(args.signal_id)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     finally:
         context_store.close()
 
@@ -237,7 +267,8 @@ def cmd_show_hypothesis(args: argparse.Namespace) -> int:
         return 1
 
     if args.format == "json":
-        print(json.dumps(records if args.signal_id else records[0], indent=2, ensure_ascii=False))
+        payload = [_record_for_json(r) for r in records] if args.signal_id else _record_for_json(records[0])
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         for i, record in enumerate(records):
             if i > 0:
@@ -277,6 +308,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     try:
         record = context_store.get_hypothesis(args.hypothesis_id)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     finally:
         context_store.close()
 

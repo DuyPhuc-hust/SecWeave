@@ -214,6 +214,13 @@ def test_cli_hypothesize_records_hypothesis_to_context_store(capsys, monkeypatch
     assert show_exit_code == 0
     assert record["hypothesis_id"] == hypothesis_id
     assert record["status"] == "hypothesis"
+    # Real gap found via independent review: `location` used to come back
+    # doubly-JSON-encoded (a string containing escaped JSON) from
+    # show-hypothesis, while hypothesize returned the same logical field as
+    # a real nested object — inconsistent shape for the same field across
+    # 2 commands. Both must now agree.
+    assert isinstance(record["location"], dict)
+    assert record["location"] == data[0]["result"]["hypothesis"]["provenance"]["location"]
 
 
 def test_cli_show_hypothesis_not_found_returns_error(capsys, tmp_path):
@@ -294,6 +301,37 @@ def test_cli_hypothesize_bad_context_db_path_fails_cleanly(capsys, tmp_path):
     # Pointing --context-db at a directory (not a file) makes sqlite3.connect fail.
     bad_path = tmp_path / "not_a_file"
     bad_path.mkdir()
+
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--context-db",
+            str(bad_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không mở được Context Store" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_hypothesize_context_db_parent_path_is_a_file_fails_cleanly(capsys, tmp_path):
+    # Real gap found via independent review: this is a DIFFERENT failure
+    # mode from the test above — here sqlite3.connect() never even runs,
+    # because Path(db_path).parent.mkdir(...) itself raises a plain OSError
+    # (the parent path component is an existing regular FILE, not a
+    # directory). This used to escape the `except sqlite3.Error` around the
+    # constructor entirely and dump a raw traceback.
+    blocking_file = tmp_path / "not_a_dir"
+    blocking_file.write_text("i am a file, not a directory")
+    bad_path = blocking_file / "context.db"
 
     exit_code = cli.main(
         [
@@ -503,16 +541,20 @@ def test_cli_hypothesize_agent_mode_batches_all_signals_into_one_wait(
 
     def _fake_wait(self, prompt_path, response_path):
         wait_calls.append(prompt_path)
-        responses = [
-            {
+        # Object keyed by string index "1".."13" — not a positional array —
+        # since generate_many() now requires each answer to declare which
+        # signal it's for, rather than trusting file order (see
+        # agent_bridge_client.py's real mis-association fix).
+        responses = {
+            str(i): {
                 "verifiable": True,
                 "expected_behavior": "a",
                 "suspected_behavior": "b",
                 "observation_criteria": "c",
             }
-            for _ in range(12)
-        ]
-        responses.append({"verifiable": False, "reason": "not enough context"})
+            for i in range(1, 13)
+        }
+        responses["13"] = {"verifiable": False, "reason": "not enough context"}
         response_path.write_text(json.dumps(responses), encoding="utf-8")
 
     monkeypatch.setattr(agent_module.AgentBridgeLLMClient, "_wait_for_agent", _fake_wait)

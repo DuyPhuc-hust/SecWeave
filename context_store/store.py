@@ -12,7 +12,23 @@ DEFAULT_DB_PATH = ".secweave/context.db"
 class SecurityContextStore:
     def __init__(self, db_path: str = DEFAULT_DB_PATH) -> None:
         if db_path != ":memory:":
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            try:
+                Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                # Real gap found via independent review: this raised a
+                # plain OSError (e.g. a parent path component is an
+                # existing regular file, not a directory) — every cli.py
+                # call site only catches sqlite3.Error around construction,
+                # so this used to escape uncaught and dump a raw traceback
+                # (leaking local file paths) instead of a clean error.
+                # Re-raised as sqlite3.OperationalError (a sqlite3.Error
+                # subclass) so "the store couldn't be opened" has exactly
+                # ONE exception type to catch, regardless of whether the
+                # failure was directory creation or the sqlite connection
+                # itself.
+                raise sqlite3.OperationalError(
+                    f"Không tạo được thư mục chứa Context Store tại '{db_path}': {exc}"
+                ) from exc
         self._conn = sqlite3.connect(db_path)
         self._init_schema()
 
@@ -61,14 +77,20 @@ class SecurityContextStore:
             self._conn.execute("ALTER TABLE hypotheses ADD COLUMN location TEXT")
 
     def get_verified_context(self, target_id: str) -> List[Dict[str, Any]]:
-        cursor = self._conn.execute(
-            "SELECT id, description, verified_at FROM verified_observations WHERE target_id = ?",
-            (target_id,),
-        )
-        return [
-            {"id": row[0], "description": row[1], "verified_at": row[2]}
-            for row in cursor.fetchall()
-        ]
+        # Real gap found via independent review: unlike record_hypothesis(),
+        # this had zero exception handling — a real sqlite failure (e.g.
+        # "database is locked" under contention) used to escape uncaught.
+        try:
+            cursor = self._conn.execute(
+                "SELECT id, description, verified_at FROM verified_observations WHERE target_id = ?",
+                (target_id,),
+            )
+            return [
+                {"id": row[0], "description": row[1], "verified_at": row[2]}
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.Error as exc:
+            raise RuntimeError(f"Không đọc được verified context cho target_id '{target_id}': {exc}") from exc
 
     def record_hypothesis(self, result: HypothesisResult, signal: NormalizedSignal) -> None:
         is_hypothesis = result.status == HypothesisStatus.HYPOTHESIS
@@ -106,11 +128,14 @@ class SecurityContextStore:
     )
 
     def get_hypothesis(self, hypothesis_id: str) -> Optional[Dict[str, Any]]:
-        cursor = self._conn.execute(
-            f"SELECT {', '.join(self._HYPOTHESIS_COLUMNS)} FROM hypotheses WHERE hypothesis_id = ?",
-            (hypothesis_id,),
-        )
-        row = cursor.fetchone()
+        try:
+            cursor = self._conn.execute(
+                f"SELECT {', '.join(self._HYPOTHESIS_COLUMNS)} FROM hypotheses WHERE hypothesis_id = ?",
+                (hypothesis_id,),
+            )
+            row = cursor.fetchone()
+        except sqlite3.Error as exc:
+            raise RuntimeError(f"Không đọc được hypothesis_id '{hypothesis_id}': {exc}") from exc
         if row is None:
             return None
         return dict(zip(self._HYPOTHESIS_COLUMNS, row))
@@ -120,12 +145,15 @@ class SecurityContextStore:
         # created), so get_hypothesis() can't look it up — querying by
         # signal_id is the only way to retrieve "a hypothesis that was
         # rejected along with its reason" (SPEC §4.6).
-        cursor = self._conn.execute(
-            f"SELECT {', '.join(self._HYPOTHESIS_COLUMNS)} FROM hypotheses "
-            "WHERE signal_id = ? ORDER BY row_id",
-            (signal_id,),
-        )
-        return [dict(zip(self._HYPOTHESIS_COLUMNS, row)) for row in cursor.fetchall()]
+        try:
+            cursor = self._conn.execute(
+                f"SELECT {', '.join(self._HYPOTHESIS_COLUMNS)} FROM hypotheses "
+                "WHERE signal_id = ? ORDER BY row_id",
+                (signal_id,),
+            )
+            return [dict(zip(self._HYPOTHESIS_COLUMNS, row)) for row in cursor.fetchall()]
+        except sqlite3.Error as exc:
+            raise RuntimeError(f"Không đọc được hypotheses cho signal_id '{signal_id}': {exc}") from exc
 
     def close(self) -> None:
         self._conn.close()

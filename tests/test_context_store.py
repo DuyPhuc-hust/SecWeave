@@ -202,3 +202,42 @@ def test_default_db_path_persists_to_disk(tmp_path, monkeypatch):
     store = SecurityContextStore(db_path="nested/context.db")
     store.close()
     assert db_file.exists()
+
+
+def test_constructor_raises_sqlite_error_when_parent_path_is_a_file_not_a_directory(tmp_path):
+    # Real gap found via independent review: Path(db_path).parent.mkdir(...)
+    # used to raise a plain OSError here, which every cli.py call site
+    # catching only sqlite3.Error (the documented, natural failure mode for
+    # "the store couldn't be opened") never caught — dumped a raw traceback
+    # instead of a clean error.
+    blocking_file = tmp_path / "not_a_dir"
+    blocking_file.write_text("i am a file, not a directory")
+    db_path = str(blocking_file / "context.db")
+
+    with pytest.raises(sqlite3.Error):
+        SecurityContextStore(db_path=db_path)
+
+
+def test_get_hypothesis_raises_runtime_error_not_a_raw_sqlite_error():
+    # Real gap found via independent review: unlike record_hypothesis(),
+    # the 3 read methods had zero exception handling — a real sqlite
+    # failure used to escape as a raw sqlite3.Error instead of the
+    # RuntimeError every other Context Store failure raises.
+    store = SecurityContextStore(db_path=":memory:")
+    store.close()  # any query after this raises a real sqlite3.Error
+    with pytest.raises(RuntimeError):
+        store.get_hypothesis("hyp_1")
+
+
+def test_get_verified_context_raises_runtime_error_not_a_raw_sqlite_error():
+    store = SecurityContextStore(db_path=":memory:")
+    store.close()
+    with pytest.raises(RuntimeError):
+        store.get_verified_context("target_1")
+
+
+def test_get_hypotheses_by_signal_id_raises_runtime_error_not_a_raw_sqlite_error():
+    store = SecurityContextStore(db_path=":memory:")
+    store.close()
+    with pytest.raises(RuntimeError):
+        store.get_hypotheses_by_signal_id("sig_1")
