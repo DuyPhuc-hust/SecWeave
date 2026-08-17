@@ -8,7 +8,15 @@ from pydantic import ValidationError
 from shared.models.action import ActionSpec, ActionType
 from shared.models.entities import Authorization, AuthorizationLayer
 from shared.models.kill_switch import ExecutionStatus
-from shared.models.observation import AccessResult, EvidenceChannel, NormalizedObservation, ObservationRole, Verdict
+from shared.models.observation import (
+    AccessResult,
+    EvidenceChannel,
+    NormalizedObservation,
+    ObservationRole,
+    PredicateResult,
+    PredicateStatus,
+    Verdict,
+)
 from shared.models.verification_package import (
     Environment,
     HumanReviewRecord,
@@ -73,6 +81,7 @@ def _base_package_kwargs(**overrides) -> dict:
         normalized_observations=[_observation()],
         oracle_rule_version="v1-draft",
         predicate_results=[],
+        verdict_reason="No predicate groups were evaluated in this fixture.",
         verdict=Verdict.INCONCLUSIVE,
         limitations="Only the main predicate was evaluated in this fixture.",
         next_action="N/A — test fixture.",
@@ -101,14 +110,57 @@ def test_package_with_only_human_review_still_missing_retest():
             human_review_record=HumanReviewRecord(
                 reviewer="reviewer@secweave.local",
                 reviewed_at=datetime(2026, 8, 18, tzinfo=timezone.utc),
-                decision=ReviewDecision.RETEST,
-                reason="Need 3 retest runs before release.",
+                decision=ReviewDecision.RELEASE,
+                reason="Looks good pending retest.",
                 checked_raw_artifact=True,
             )
         )
     )
     assert package.missing_fields_for_release() == ["retest_reference"]
     assert package.is_release_ready is False
+
+
+def test_package_release_ready_ignores_decision_content_was_a_real_bug_now_fixed():
+    # Real gap found via independent review: missing_fields_for_release()
+    # used to only check "is human_review_record non-None" — a package
+    # where the reviewer explicitly chose decision=REJECT (or RETEST) still
+    # reported is_release_ready=True, the exact opposite of what the
+    # human's own recorded decision said.
+    package = VerificationPackage(
+        **_base_package_kwargs(
+            human_review_record=HumanReviewRecord(
+                reviewer="reviewer@secweave.local",
+                reviewed_at=datetime(2026, 8, 18, tzinfo=timezone.utc),
+                decision=ReviewDecision.REJECT,
+                reason="False positive — not a real IDOR.",
+                checked_raw_artifact=True,
+            ),
+            retest_reference="retest_run_1",
+        )
+    )
+    assert package.is_release_ready is False
+    assert any("decision" in m for m in package.missing_fields_for_release())
+
+
+def test_package_release_ready_requires_checked_raw_artifact_true():
+    # Real gap found via independent review: a reviewer setting
+    # decision=RELEASE without ever actually cross-checking a raw artifact
+    # (SPEC §4.5's own requirement for what counts as a real review) still
+    # reported is_release_ready=True.
+    package = VerificationPackage(
+        **_base_package_kwargs(
+            human_review_record=HumanReviewRecord(
+                reviewer="reviewer@secweave.local",
+                reviewed_at=datetime(2026, 8, 18, tzinfo=timezone.utc),
+                decision=ReviewDecision.RELEASE,
+                reason="Looks fine.",
+                checked_raw_artifact=False,
+            ),
+            retest_reference="retest_run_1",
+        )
+    )
+    assert package.is_release_ready is False
+    assert any("checked_raw_artifact" in m for m in package.missing_fields_for_release())
 
 
 def test_package_with_both_fields_is_release_ready():
@@ -159,6 +211,95 @@ def test_package_rejects_mismatched_evidence_reference_and_hash_lengths():
                 artifact_hashes=["sha256:aaa"],
             )
         )
+
+
+def test_package_rejects_evidence_references_and_hashes_swapped_relative_to_observations():
+    # Real gap found via independent review: the ORIGINAL version of this
+    # check only compared list LENGTHS — 2 same-length lists that are
+    # positionally SWAPPED relative to each other (or relative to
+    # normalized_observations, the authoritative source) sailed through
+    # with zero errors. A reviewer trusting artifact_hashes[i] to verify
+    # raw_evidence_references[i]'s integrity would silently check the
+    # wrong hash against the wrong file.
+    obs_a = _observation(observation_id="obs_a", action_ref="act_a", raw_evidence_ref="a.json", raw_evidence_hash="sha256:a")
+    obs_b = _observation(observation_id="obs_b", action_ref="act_b", raw_evidence_ref="b.json", raw_evidence_hash="sha256:b")
+    with pytest.raises(ValidationError):
+        VerificationPackage(
+            **_base_package_kwargs(
+                normalized_observations=[obs_a, obs_b],
+                action_record=[_action("act_a"), _action("act_b")],  # covers both, isolates the check below
+                raw_evidence_references=["a.json", "b.json"],
+                artifact_hashes=["sha256:b", "sha256:a"],  # swapped relative to the observations above
+            )
+        )
+
+
+def test_package_rejects_action_record_missing_an_executed_actions_id():
+    # Real gap found via independent review: action_record used to be
+    # whatever the caller passed, with no check that it actually COVERS
+    # every action_ref appearing in normalized_observations — a caller
+    # passing an incomplete actions list produced a package that looked
+    # complete (min_length=1 satisfied) while silently missing the
+    # ActionSpecs a verdict actually rested on.
+    obs_main = _observation()  # action_ref="act_main", raw_evidence_ref="/tmp/obs_1.json"
+    obs_positive = _observation(
+        observation_id="obs_positive",
+        action_ref="act_positive",
+        role=ObservationRole.POSITIVE_CONTROL,
+        raw_evidence_ref="/tmp/obs_2.json",
+        raw_evidence_hash="sha256:bbb",
+    )
+    with pytest.raises(ValidationError):
+        VerificationPackage(
+            **_base_package_kwargs(
+                normalized_observations=[obs_main, obs_positive],
+                raw_evidence_references=["/tmp/obs_1.json", "/tmp/obs_2.json"],
+                artifact_hashes=["sha256:aaa", "sha256:bbb"],
+                action_record=[_action("act_main")],  # missing act_positive
+            )
+        )
+
+
+def test_package_rejects_duplicate_action_ids_in_action_record():
+    # Real gap found via independent review: 2 different ActionSpecs
+    # sharing the same action_id (nothing enforces uniqueness upstream)
+    # produced duplicate, ambiguous entries for what was really one
+    # executed action — a reviewer couldn't tell which of the two
+    # (potentially different!) ActionSpecs actually ran.
+    duplicate_1 = _action("act_main", target="https://staging.example.com/api/objects/42")
+    duplicate_2 = _action("act_main", target="https://staging.example.com/api/objects/999")
+    with pytest.raises(ValidationError):
+        VerificationPackage(**_base_package_kwargs(action_record=[duplicate_1, duplicate_2]))
+
+
+def test_package_rejects_confirmed_verdict_with_an_unsatisfied_group():
+    # Real gap found via independent review: VerdictResult (shared/models/
+    # observation.py) already has this exact check — VerificationPackage
+    # stores verdict/predicate_results as its own 2 separate fields
+    # (matching SPEC's field layout) rather than embedding a VerdictResult,
+    # so that protection had been lost here entirely.
+    unsatisfied_results = [
+        PredicateResult(group=ObservationRole.MAIN, status=PredicateStatus.SATISFIED, reason="x"),
+        PredicateResult(group=ObservationRole.POSITIVE_CONTROL, status=PredicateStatus.UNSATISFIED, reason="x"),
+        PredicateResult(group=ObservationRole.DENIED_CONTROL, status=PredicateStatus.SATISFIED, reason="x"),
+    ]
+    with pytest.raises(ValidationError):
+        VerificationPackage(
+            **_base_package_kwargs(verdict=Verdict.CONFIRMED, predicate_results=unsatisfied_results)
+        )
+
+
+def test_package_allows_inconclusive_verdict_even_when_predicate_results_is_empty():
+    # The validator must be ONE-DIRECTIONAL (same reasoning as VerdictResult's
+    # own validator) — an empty/incomplete predicate_results with a
+    # non-CONFIRMED verdict must not be rejected.
+    package = VerificationPackage(**_base_package_kwargs(verdict=Verdict.INCONCLUSIVE, predicate_results=[]))
+    assert package.verdict == Verdict.INCONCLUSIVE
+
+
+def test_package_rejects_empty_verdict_reason():
+    with pytest.raises(ValidationError):
+        VerificationPackage(**_base_package_kwargs(verdict_reason=""))
 
 
 def test_human_review_record_rejects_timezone_naive_reviewed_at():
@@ -251,6 +392,57 @@ def test_assemble_produces_confirmed_package_from_a_full_satisfied_run(tmp_path)
     assert package.oracle_rule_version  # non-empty, sourced from predicates.py
     assert package.human_review_record is None  # no Gate 4 review has happened yet
     assert package.is_release_ready is False
+    assert package.verdict_reason  # the Oracle's own rationale, not silently dropped
+
+
+def test_assemble_raises_a_clear_error_for_a_completely_empty_observation_list():
+    # Real gap found via independent review: this used to fall through to
+    # decide()'s own graceful INCONCLUSIVE handling and then crash with a
+    # confusing pydantic ValidationError naming 5 unrelated fields at once
+    # (identities/action_record/raw_evidence_references/artifact_hashes/
+    # normalized_observations all failing min_length=1 simultaneously) —
+    # now raises one clear, specific error instead.
+    with pytest.raises(ValueError, match="observations rỗng"):
+        assemble_verification_package(
+            target_id="tgt_1",
+            environment=Environment.STAGING,
+            revision="rev_1",
+            authorization=_authorization(),
+            scenario="x",
+            execution_id="exec_1",
+            actions=[],
+            observations=[],
+            execution_status=ExecutionStatus.STOPPED,
+            limitations="x",
+            next_action="x",
+        )
+
+
+def test_assemble_carries_the_oracles_verdict_reason_into_the_package(tmp_path):
+    # Real gap found via independent review: VerdictResult.reason (the ONLY
+    # place explaining an unusual-but-correct combination, e.g. all 3
+    # predicates satisfied yet verdict=INCONCLUSIVE because execution_status
+    # wasn't COMPLETED) used to be silently discarded by the assembler,
+    # leaving nothing in the 19-field package to explain why.
+    observations = _three_role_observations(tmp_path)  # all 3 groups would be SATISFIED
+    actions = [_action("act_main"), _action("act_positive"), _action("act_denied")]
+
+    package = assemble_verification_package(
+        target_id="tgt_1",
+        environment=Environment.STAGING,
+        revision="rev_1",
+        authorization=_authorization(),
+        scenario="x",
+        execution_id="exec_1",
+        actions=actions,
+        observations=observations,
+        execution_status=ExecutionStatus.STOPPED,  # forces INCONCLUSIVE despite all groups satisfied
+        limitations="x",
+        next_action="x",
+    )
+
+    assert package.verdict == Verdict.INCONCLUSIVE
+    assert "stopped" in package.verdict_reason.lower()
 
 
 def test_assemble_excludes_planned_but_never_executed_actions_from_action_record(tmp_path):

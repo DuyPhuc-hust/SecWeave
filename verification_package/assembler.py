@@ -11,16 +11,14 @@ combining plan_check/cost_check instead of trusting a separately-passed
 
 Scope, stated plainly: this does NOT build SPEC §4.5's alternate
 "execution record" artifact (for when a package genuinely cannot be
-formed at all). decide() never raises for an incomplete observation set —
+formed at all — see the empty-observations check below, which raises a
+clear error for exactly that case rather than attempting to build one).
+decide() never raises for an INCOMPLETE-but-non-empty observation set —
 evaluate_predicates() fills in INSUFFICIENT_DATA for any of the 3 required
 groups with no matching observation, which assemble_verdict() turns into a
 graceful INCONCLUSIVE verdict — so assembling a package from a partial run
-still succeeds here, just with an unhelpful verdict and (ideally) a
-`limitations` string that says so. decide() DOES still raise a clear
-ValueError if `assemble_verdict()` is ever called directly (not through
-decide()) with a malformed predicate-result list, but that path isn't
-reachable from this module — this assembler exists specifically to remove
-the chance of ever constructing that malformed list by hand.
+(at least 1 real observation) still succeeds here, just with an unhelpful
+verdict and (ideally) a `limitations` string that says so.
 """
 
 from typing import List
@@ -63,7 +61,25 @@ def assemble_verification_package(
     evaluate_predicates() (called inside decide() below) already correctly
     ignores SETUP observations on its own, so passing the full list here
     costs nothing and loses no evidence from the package.
+
+    Raises ValueError immediately for `observations=[]` — real gap found
+    via independent review: this used to fall through to a generic,
+    confusing pydantic ValidationError naming 5 unrelated fields
+    (identities/action_record/raw_evidence_references/artifact_hashes/
+    normalized_observations all failing min_length=1 at once) instead of
+    one clear message naming the actual problem. A completely empty run
+    (e.g. the kill-switch stopped everything before any evidence was ever
+    captured) is exactly SPEC §4.5's "execution record" case this module
+    doesn't build — better to fail loud and specific here than let a
+    caller puzzle out 5 field errors that all trace back to one root cause.
     """
+    if not observations:
+        raise ValueError(
+            "assemble_verification_package(): observations rỗng — không thể tạo Verification Package "
+            "khi execution chưa thu được bất kỳ bằng chứng nào (đây là trường hợp SPEC §4.5 gọi là "
+            "'execution record', chưa có code hỗ trợ ở increment này)."
+        )
+
     verdict_result = decide(observations, execution_status=execution_status)
 
     executed_action_ids = {observation.action_ref for observation in observations}
@@ -90,6 +106,7 @@ def assemble_verification_package(
         oracle_rule_version=PREDICATE_RULE_VERSION,
         predicate_results=verdict_result.predicate_results,
         verdict=verdict_result.verdict,
+        verdict_reason=verdict_result.reason,
         limitations=limitations,
         next_action=next_action,
     )
