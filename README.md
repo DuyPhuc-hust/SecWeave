@@ -45,6 +45,8 @@ pip install -r requirements.txt
 
 Copy `.env.example` thành `.env`, điền `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` — dùng được bất kỳ provider nào tương thích chuẩn OpenAI Chat Completions (đã thử: Groq, Google Gemini). `.env` bị `.gitignore` chặn, không bao giờ commit được.
 
+`tests/test_end_to_end.py` (2026-08-17, sau khi xác nhận trước đó không có test nào nối các tầng lại với nhau) nối thật Signal Normalizer → Hypothesis Engine → Exploit Agent → Evidence Harness → Verdict Oracle trong 1 test (chỉ mock network + LLM, còn lại là logic thật 100%) — verdict cuối ra đúng `CONFIRMED` cho 1 kịch bản IDOR 3 role, cộng 1 test cho nhánh `NOT_PLANNABLE` (finding SAST thuần, không có network location). Đã mutation-test: cố tình phá đường truyền field `location` từ signal sang hypothesis, xác nhận test bắt được lỗi ngay.
+
 ## Chạy test
 
 ```bash
