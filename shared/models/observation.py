@@ -78,7 +78,7 @@ from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class ObservationRole(str, Enum):
@@ -223,3 +223,35 @@ class VerdictResult(BaseModel):
     verdict: Verdict
     reason: str
     predicate_results: List[PredicateResult]
+
+    @model_validator(mode="after")
+    def _check_confirmed_requires_all_groups_satisfied(self) -> "VerdictResult":
+        # Real gap found via independent review: unlike PlanCheckResult/
+        # CostDecision/ActionPlanResult/HypothesisResult/RuntimeCostDecision/
+        # StopEvent (all of which enforce their own safety-critical field
+        # against the data it's derived from), VerdictResult had NO
+        # independent check at all — nothing stopped constructing
+        # VerdictResult(verdict=CONFIRMED, predicate_results=[...an
+        # UNSATISFIED positive_control...]), the exact failure mode SPEC
+        # treats as never acceptable ("thiếu positive control thì không có
+        # CONFIRMED", no exceptions).
+        #
+        # Deliberately ONE-DIRECTIONAL, not a full "iff": verdict_oracle/
+        # oracle.py::assemble_verdict() can legitimately return INCONCLUSIVE
+        # even when all 3 groups happen to be SATISFIED (the
+        # execution_status gate, e.g. a kill-switch STOPPED run, overrides
+        # regardless of predicate content) — execution_status isn't a field
+        # on this model, so that direction can't be checked here. But
+        # verdict==CONFIRMED, in every branch of assemble_verdict(), is only
+        # ever reached after main/positive_control/denied_control are ALL
+        # SATISFIED — that direction holds unconditionally and is the one
+        # that actually matters: a false CONFIRMED, not an overly-cautious
+        # INCONCLUSIVE, is the failure SPEC cannot tolerate.
+        if self.verdict == Verdict.CONFIRMED and not all(
+            r.status == PredicateStatus.SATISFIED for r in self.predicate_results
+        ):
+            raise ValueError(
+                "verdict=confirmed yêu cầu CẢ 3 nhóm predicate đều satisfied — không được set "
+                "verdict=confirmed khi bất kỳ nhóm nào unsatisfied/insufficient_data."
+            )
+        return self

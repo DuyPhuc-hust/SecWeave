@@ -90,6 +90,36 @@ def test_verdict_result_carries_the_original_predicate_results():
     assert verdict_result.predicate_results == results
 
 
+def test_verdict_result_rejects_confirmed_when_a_group_is_not_satisfied():
+    # Real gap found via independent review: unlike PlanCheckResult/
+    # CostDecision/ActionPlanResult/HypothesisResult/RuntimeCostDecision/
+    # StopEvent (all of which independently enforce their own safety-
+    # critical field against the data it's derived from), VerdictResult had
+    # NO such check — nothing stopped constructing a VerdictResult claiming
+    # verdict=CONFIRMED alongside predicate_results that don't actually
+    # support it, directly violating SPEC's "thiếu positive control thì
+    # không có CONFIRMED, không ngoại lệ".
+    from pydantic import ValidationError
+
+    from shared.models.observation import VerdictResult
+
+    with pytest.raises(ValidationError):
+        VerdictResult(verdict=Verdict.CONFIRMED, reason="x", predicate_results=_all(S, U, S))
+
+
+def test_verdict_result_allows_inconclusive_even_when_all_groups_satisfied():
+    # The validator must be ONE-DIRECTIONAL: assemble_verdict() can
+    # legitimately return INCONCLUSIVE while every group is SATISFIED (the
+    # execution_status gate overrides regardless of predicate content — see
+    # test_non_completed_execution_status_forces_inconclusive_even_when_all_satisfied
+    # below) — execution_status isn't a field on VerdictResult, so this
+    # direction can't and shouldn't be checked here.
+    from shared.models.observation import VerdictResult
+
+    verdict_result = VerdictResult(verdict=Verdict.INCONCLUSIVE, reason="stopped mid-run", predicate_results=_all(S, S, S))
+    assert verdict_result.verdict == Verdict.INCONCLUSIVE
+
+
 def test_duplicate_group_raises_instead_of_silently_picking_one():
     # Real gap found via review: a by_group dict-comprehension built from a
     # malformed list would silently keep only the LAST duplicate — this
