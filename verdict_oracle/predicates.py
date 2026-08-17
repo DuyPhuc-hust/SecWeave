@@ -17,6 +17,20 @@ from shared.models.observation import (
     PredicateStatus,
 )
 
+# SPEC §4.4.3: "Tập predicate của một kịch bản có version, ghi vào package.
+# Khi rule thay đổi, package cũ không bị đánh giá lại âm thầm." Recorded into
+# the Verification Package's "Oracle rule / version" field (§7, field #13) —
+# until now nothing in the codebase actually carried a version string at
+# all, a real gap the assembler would otherwise have nowhere to source it
+# from. "v1-draft" because this predicate set itself is an explicit DRAFT
+# (see this module's own docstring) — freezing happens at Gate 3, not yet
+# reached (still Chặng 1). Bump this string any time the logic in
+# check_main_predicate/check_positive_control/check_denied_control/
+# evaluate_predicates changes in any way that could affect a verdict for
+# the SAME evidence, so an old package's version honestly reflects what
+# rule set actually produced it.
+PREDICATE_RULE_VERSION = "v1-draft"
+
 
 def _hash_mismatch_reason(observation: NormalizedObservation) -> Optional[str]:
     """SPEC §6.4 control #8: "Hash không khớp thì không được CONFIRMED" — no
