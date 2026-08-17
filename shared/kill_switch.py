@@ -206,13 +206,37 @@ class KillSwitch:
         # recovery correct regardless of when this write actually lands.
         self._append_audit_log(event)
 
-    def stop(self, source: StopSource, reason: str, actor: Optional[str] = None) -> StopEvent:
+    def stop(
+        self,
+        source: StopSource,
+        reason: str,
+        actor: Optional[str] = None,
+        automatic_threshold_reason: Optional[AutomaticThresholdReason] = None,
+    ) -> StopEvent:
         """Any of the 6 values in StopSource can call this, from ANY status
         other than STOPPED — including PREPARED (aborting before start() was
         ever called is a legitimate stop, not an error: a real emergency-stop
         button doesn't first check whether the machine happens to be running
         before it's allowed to work). No negotiation, no permission check
         (see module docstring).
+
+        `automatic_threshold_reason` is REQUIRED when `source=
+        StopSource.AUTOMATIC_THRESHOLD` (which of SPEC §6.3's 5 automatic
+        conditions fired) and must be omitted for every human source, whose
+        reason is free text instead — checked explicitly HERE, at the very
+        top, before touching `_status` or running cleanup. Real gap found
+        via independent review: StopEvent's own model validator enforces
+        the same rule, but only at CONSTRUCTION time — which used to happen
+        AFTER this method had already flipped `_status` to STOPPED and run
+        `self._cleanup()`. A caller that got the two arguments wrong (e.g.
+        forgot `automatic_threshold_reason`) would trigger real, irreversible
+        cleanup, yet the raised ValueError meant `_append_audit_log` was
+        never reached — so the audit log has NO record the stop (or cleanup)
+        ever happened, and a freshly-reconstructed KillSwitch for the same
+        execution_id would recover whatever status preceded this call,
+        silently resurrecting a run whose cleanup had already, irreversibly,
+        run. Validating here, before any state mutation at all, means a
+        misused call raises cleanly with NOTHING having happened yet.
 
         Thread-safe: if two sources call stop() at nearly the same time, the
         first to acquire the lock while status is not yet STOPPED wins — it
@@ -232,6 +256,14 @@ class KillSwitch:
         switch must never have (a second source trying to stop things should
         never be made to wait on the first source's cleanup).
         """
+        if source == StopSource.AUTOMATIC_THRESHOLD and automatic_threshold_reason is None:
+            raise ValueError(
+                "source=automatic_threshold yêu cầu automatic_threshold_reason (1 trong 5 điều "
+                "kiện SPEC §6.3) — không được để trống khi nguồn dừng là tự động."
+            )
+        if source != StopSource.AUTOMATIC_THRESHOLD and automatic_threshold_reason is not None:
+            raise ValueError("automatic_threshold_reason chỉ có ý nghĩa khi source=automatic_threshold.")
+
         with self._lock:
             already_stopped = self._status == ExecutionStatus.STOPPED
             self._status = ExecutionStatus.STOPPED
@@ -249,6 +281,7 @@ class KillSwitch:
                 reason=reason,
                 actor=actor,
                 cleanup_status=CleanupStatus.SKIPPED,
+                automatic_threshold_reason=automatic_threshold_reason,
             )
             self._append_audit_log(event)
             return event
@@ -273,6 +306,7 @@ class KillSwitch:
             actor=actor,
             cleanup_status=cleanup_status,
             cleanup_error=cleanup_error,
+            automatic_threshold_reason=automatic_threshold_reason,
         )
         self._append_audit_log(event)
         return event

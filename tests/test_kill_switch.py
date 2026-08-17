@@ -287,18 +287,21 @@ def test_concurrent_stop_with_slow_cleanup_does_not_block_other_callers_from_bei
 
 
 @pytest.mark.parametrize(
-    "source,reason,actor",
+    "source,reason,actor,automatic_threshold_reason",
     [
-        (StopSource.OPERATOR, "operator drill", "operator@secweave.local"),
-        (StopSource.TARGET_OWNER, "owner drill (simulated)", "owner@target.example.com"),
+        (StopSource.OPERATOR, "operator drill", "operator@secweave.local", None),
+        (StopSource.TARGET_OWNER, "owner drill (simulated)", "owner@target.example.com", None),
         (
             StopSource.AUTOMATIC_THRESHOLD,
-            AutomaticThresholdReason.COST_CAP_EXCEEDED.value,
+            "cost cap drill",
             None,
+            AutomaticThresholdReason.COST_CAP_EXCEEDED,
         ),
     ],
 )
-def test_kill_switch_drill_from_each_required_source(tmp_path, source, reason, actor):
+def test_kill_switch_drill_from_each_required_source(
+    tmp_path, source, reason, actor, automatic_threshold_reason
+):
     # Weekly plan Tuần 6's "Kill-switch drill (bắt buộc, có checklist ký)":
     # trigger a stop from operator, owner (simulated), and the automatic
     # cost-cap threshold, each tried once -> assert 100% transition to
@@ -310,7 +313,12 @@ def test_kill_switch_drill_from_each_required_source(tmp_path, source, reason, a
         cleanup=lambda: cleanup_ran.append(True),
     )
     ks.start()
-    ks.stop(source=source, reason=reason, actor=actor)
+    ks.stop(
+        source=source,
+        reason=reason,
+        actor=actor,
+        automatic_threshold_reason=automatic_threshold_reason,
+    )
 
     assert ks.status == ExecutionStatus.STOPPED
     assert cleanup_ran == [True]
@@ -319,6 +327,10 @@ def test_kill_switch_drill_from_each_required_source(tmp_path, source, reason, a
     assert stop_entry["source"] == source.value
     assert stop_entry["reason"] == reason
     assert "at" in stop_entry
+    if automatic_threshold_reason is not None:
+        assert stop_entry["automatic_threshold_reason"] == automatic_threshold_reason.value
+    else:
+        assert "automatic_threshold_reason" not in stop_entry
 
 
 def test_concurrent_stop_calls_run_cleanup_exactly_once_and_never_crash(tmp_path):
@@ -360,6 +372,54 @@ def test_concurrent_stop_calls_run_cleanup_exactly_once_and_never_crash(tmp_path
     assert cleanup_calls == [1]
     assert ks.status == ExecutionStatus.STOPPED
     assert len(ks.read_audit_log()) == 9  # start + 8 stop attempts, only 1 actually cleaned up
+
+
+def test_stop_requires_automatic_threshold_reason_when_source_is_automatic(tmp_path):
+    # StopEvent's own validator: source=AUTOMATIC_THRESHOLD without a
+    # structured automatic_threshold_reason must be rejected outright, not
+    # silently accepted with the reason only ever recorded as free text
+    # (which can't be reliably queried later for SPEC §6.3's 5-condition
+    # breakdown).
+    ks = KillSwitch(execution_id="exec_1", storage_dir=str(tmp_path))
+    ks.start()
+    with pytest.raises(ValueError):
+        ks.stop(source=StopSource.AUTOMATIC_THRESHOLD, reason="cap exceeded")
+
+
+def test_stop_rejects_automatic_threshold_reason_for_a_human_source(tmp_path):
+    ks = KillSwitch(execution_id="exec_1", storage_dir=str(tmp_path))
+    ks.start()
+    with pytest.raises(ValueError):
+        ks.stop(
+            source=StopSource.OPERATOR,
+            reason="operator stop",
+            automatic_threshold_reason=AutomaticThresholdReason.COST_CAP_EXCEEDED,
+        )
+
+
+def test_stop_with_missing_automatic_threshold_reason_does_not_run_cleanup_or_mutate_status(tmp_path):
+    # Real bug found via independent review: StopEvent's own model validator
+    # enforces the same source/automatic_threshold_reason consistency rule,
+    # but only at CONSTRUCTION time — which used to happen AFTER stop() had
+    # already flipped _status to STOPPED and run self._cleanup(). A caller
+    # that got the two arguments wrong would trigger real, irreversible
+    # cleanup, yet the raised ValueError meant _append_audit_log was never
+    # reached — no record the stop (or cleanup) ever happened, so a fresh
+    # KillSwitch for the same execution_id would recover RUNNING, silently
+    # resurrecting a run whose cleanup had already run. stop() must now
+    # validate BEFORE any state mutation, so a misused call leaves NOTHING
+    # having happened yet.
+    cleanup_ran = []
+    ks = KillSwitch(
+        execution_id="exec_1", storage_dir=str(tmp_path), cleanup=lambda: cleanup_ran.append(True)
+    )
+    ks.start()
+    with pytest.raises(ValueError):
+        ks.stop(source=StopSource.AUTOMATIC_THRESHOLD, reason="cap exceeded")  # missing the new arg
+
+    assert ks.status == ExecutionStatus.RUNNING  # unchanged — no STOPPED flip happened
+    assert cleanup_ran == []  # cleanup never ran
+    assert len(ks.read_audit_log()) == 1  # only the start() event — nothing else recorded
 
 
 def test_evidence_harness_capture_raises_execution_stopped_error_when_stopped(tmp_path):

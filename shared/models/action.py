@@ -144,6 +144,39 @@ class CostDecision(BaseModel):
         return self
 
 
+class RuntimeCostDecision(BaseModel):
+    """Result of CostService.record_action() (shared/cost.py) — the RUNTIME
+    cost-cap gate, enforced during an actual active run (weekly plan
+    Tuần 6: "đếm hành động thực tế... tự động trigger STOPPED khi chạm
+    cap"). Distinct from CostDecision above, which only checks a PLANNED
+    count before execution ever starts — one CostService.record_action()
+    call happens per real EvidenceHarness.capture() ATTEMPT (success or
+    failure at the HTTP level both count — an attempted request against
+    the target already consumed real budget regardless of the response it
+    got back).
+
+    `executed_action_count` is the count of actions ALREADY recorded
+    BEFORE this one is considered (a plain descriptive fact, same
+    reasoning as CostDecision.planned_action_count) — this action is
+    `allowed` exactly when that count is still under `cap`.
+    """
+
+    allowed: bool
+    reason: str
+    executed_action_count: int
+    cap: int
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> "RuntimeCostDecision":
+        expected_allowed = self.executed_action_count < self.cap
+        if self.allowed != expected_allowed:
+            raise ValueError(
+                f"allowed phải khớp đúng executed_action_count ({self.executed_action_count}) so "
+                f"với cap ({self.cap}) — không được set allowed khác với so sánh thực tế."
+            )
+        return self
+
+
 class PlanReviewResult(BaseModel):
     """The single gate to use before treating an ActionPlan as safe to
     proceed with — combines both the allowlist check (PlanCheckResult) and

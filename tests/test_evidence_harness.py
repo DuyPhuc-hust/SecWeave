@@ -767,6 +767,201 @@ def test_login_wipes_entire_response_body_on_disk_when_token_extraction_fails(tm
     assert "REAL-SECRET-JWT-VALUE" not in raw_text
 
 
+def test_capture_raises_cost_cap_exceeded_and_stops_kill_switch_when_cap_reached(tmp_path):
+    # Cross-module integration: a CostService wired in must actually refuse
+    # the action that would exceed cap AND halt the whole execution via the
+    # shared KillSwitch — a CostService that exists but nothing enforces it
+    # would be pure decoration, same reasoning as the analogous kill-switch
+    # integration test in tests/test_kill_switch.py.
+    from shared.cost import CostCapExceededError, CostService
+    from shared.kill_switch import KillSwitch
+    from shared.models.kill_switch import AutomaticThresholdReason
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    kill_switch = KillSwitch(execution_id="exec_cost", storage_dir=str(tmp_path / "kill_switch"))
+    kill_switch.start()
+    cost_service = CostService(execution_id="exec_cost", storage_dir=str(tmp_path / "cost"), cap=1)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    harness = EvidenceHarness(
+        execution_id="exec_cost",
+        target_id="tgt_1",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path / "evidence"),
+        http_client=client,
+        kill_switch=kill_switch,
+        cost_service=cost_service,
+    )
+
+    observation = harness.capture(_action(), role=ObservationRole.MAIN)
+    assert observation.access_result == AccessResult.GRANTED
+    assert len(calls) == 1
+
+    with pytest.raises(CostCapExceededError):
+        harness.capture(_action(), role=ObservationRole.MAIN)
+
+    assert len(calls) == 1  # the 2nd action's real request was never sent
+    assert kill_switch.is_stopped is True
+    stop_entry = kill_switch.read_audit_log()[-1]
+    assert stop_entry["source"] == "automatic_threshold"
+    assert stop_entry["automatic_threshold_reason"] == AutomaticThresholdReason.ACTION_COUNT_EXCEEDED.value
+
+
+def test_capture_cost_cap_breach_permanently_halts_via_kill_switch_not_just_the_cost_check(tmp_path):
+    # After a cost-triggered stop, a THIRD capture() attempt must be refused
+    # by the kill-switch check (ExecutionStoppedError), not the cost check
+    # again — proving the two mechanisms actually compose: the kill-switch
+    # is what makes the halt STICK, not just a one-off refusal from
+    # CostService alone.
+    from shared.cost import CostCapExceededError, CostService
+    from shared.kill_switch import ExecutionStoppedError, KillSwitch
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    kill_switch = KillSwitch(execution_id="exec_cost2", storage_dir=str(tmp_path / "kill_switch"))
+    kill_switch.start()
+    cost_service = CostService(execution_id="exec_cost2", storage_dir=str(tmp_path / "cost"), cap=1)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    harness = EvidenceHarness(
+        execution_id="exec_cost2",
+        target_id="tgt_1",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path / "evidence"),
+        http_client=client,
+        kill_switch=kill_switch,
+        cost_service=cost_service,
+    )
+
+    harness.capture(_action(), role=ObservationRole.MAIN)
+    with pytest.raises(CostCapExceededError):
+        harness.capture(_action(), role=ObservationRole.MAIN)
+    with pytest.raises(ExecutionStoppedError):
+        harness.capture(_action(), role=ObservationRole.MAIN)
+
+
+def test_capture_cost_cap_exceeded_without_a_kill_switch_still_refuses_but_does_not_crash(tmp_path):
+    # cost_service alone (no kill_switch) must still refuse the over-cap
+    # action — the "if self._kill_switch is not None" guard must not skip
+    # the refusal itself, only the auto-stop side effect.
+    from shared.cost import CostCapExceededError, CostService
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    cost_service = CostService(execution_id="exec_cost3", storage_dir=str(tmp_path / "cost"), cap=1)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    harness = EvidenceHarness(
+        execution_id="exec_cost3",
+        target_id="tgt_1",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path / "evidence"),
+        http_client=client,
+        cost_service=cost_service,
+    )
+
+    harness.capture(_action(), role=ObservationRole.MAIN)
+    with pytest.raises(CostCapExceededError):
+        harness.capture(_action(), role=ObservationRole.MAIN)
+
+
+def test_capture_succeeds_normally_when_cost_service_present_but_within_cap(tmp_path):
+    from shared.cost import CostService
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    cost_service = CostService(execution_id="exec_cost4", storage_dir=str(tmp_path / "cost"), cap=10)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    harness = EvidenceHarness(
+        execution_id="exec_cost4",
+        target_id="tgt_1",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path / "evidence"),
+        http_client=client,
+        cost_service=cost_service,
+    )
+    observation = harness.capture(_action(), role=ObservationRole.MAIN)
+    assert observation.access_result == AccessResult.GRANTED
+    assert cost_service.executed_action_count == 1
+
+
+def test_capture_does_not_consume_a_cost_slot_when_client_factory_raises_before_send(tmp_path):
+    # Real bug found via independent review: the cost check used to run
+    # BEFORE self._client_for(identity) — so a harness-internal failure
+    # completely unrelated to the target (a broken http_client_factory) that
+    # happened AFTER the slot was already consumed left the cost ledger
+    # permanently diverged from reality, with no artifact anywhere
+    # documenting that consumption. The cost check must only run once we
+    # know the request can actually be built.
+    from shared.cost import CostService
+
+    def _broken_factory():
+        raise RuntimeError("broken factory — simulates a harness-internal config bug")
+
+    cost_service = CostService(execution_id="exec_broken_factory", storage_dir=str(tmp_path / "cost"), cap=5)
+    harness = EvidenceHarness(
+        execution_id="exec_broken_factory",
+        target_id="tgt_1",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path / "evidence"),
+        http_client_factory=_broken_factory,
+        cost_service=cost_service,
+    )
+
+    with pytest.raises(RuntimeError):
+        harness.capture(_action(), role=ObservationRole.MAIN)
+
+    assert cost_service.executed_action_count == 0  # never consumed — the failure was pre-send
+
+
+def test_capture_does_not_consume_a_cost_slot_when_build_request_fails_before_send(tmp_path):
+    # Same bug, the other failure point named in the review: a non-JSON-
+    # serializable action.parameters makes client.build_request() itself
+    # raise (a plain TypeError, not httpx.HTTPError/InvalidURL) — this must
+    # also happen BEFORE the cost slot is consumed, not after.
+    from shared.cost import CostService
+
+    class _Unserializable:
+        pass
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    cost_service = CostService(execution_id="exec_bad_json", storage_dir=str(tmp_path / "cost"), cap=5)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    harness = EvidenceHarness(
+        execution_id="exec_bad_json",
+        target_id="tgt_1",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path / "evidence"),
+        http_client=client,
+        cost_service=cost_service,
+    )
+    action = _action(method="POST", parameters={"bad": _Unserializable()})
+
+    with pytest.raises(TypeError):
+        harness.capture(action, role=ObservationRole.MAIN)
+
+    assert cost_service.executed_action_count == 0
+
+
+def test_capture_never_refuses_when_no_cost_service_is_given(tmp_path):
+    # Default behavior (cost_service=None) is unchanged — every other test
+    # in this file that doesn't pass cost_service relies on this too.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    harness = _harness(tmp_path, handler)
+    for _ in range(5):
+        observation = harness.capture(_action(), role=ObservationRole.MAIN)
+        assert observation.access_result == AccessResult.GRANTED
+
+
 def test_login_rejects_a_null_token_instead_of_building_a_broken_credential(tmp_path):
     # Real gap found via review: a token that resolves (path exists) but is
     # null/empty/non-string used to sail through silently, becoming a

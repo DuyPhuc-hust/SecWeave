@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class StopSource(str, Enum):
@@ -104,3 +104,24 @@ class StopEvent(BaseModel):
     authorization_reference: Optional[str] = None  # only meaningful for "resume"
     cleanup_status: Optional[CleanupStatus] = None  # only meaningful for "stop" events
     cleanup_error: Optional[str] = None
+    # Which of SPEC §6.3's 5 automatic conditions triggered this stop — only
+    # meaningful when source=AUTOMATIC_THRESHOLD. Before Cost Service thật
+    # (the first real caller of source=AUTOMATIC_THRESHOLD), this enum
+    # existed in the model but nothing ever set it structurally — a caller
+    # could only embed it as free text in `reason`, which can't be reliably
+    # queried later (e.g. Tuần 8's "how many times did each of the 5
+    # automatic conditions fire across the whole project" measurement).
+    automatic_threshold_reason: Optional[AutomaticThresholdReason] = None
+
+    @model_validator(mode="after")
+    def _check_automatic_threshold_reason_consistency(self) -> "StopEvent":
+        if self.source == StopSource.AUTOMATIC_THRESHOLD and self.automatic_threshold_reason is None:
+            raise ValueError(
+                "source=automatic_threshold yêu cầu automatic_threshold_reason (1 trong 5 điều "
+                "kiện SPEC §6.3) — không được để trống khi nguồn dừng là tự động."
+            )
+        if self.source != StopSource.AUTOMATIC_THRESHOLD and self.automatic_threshold_reason is not None:
+            raise ValueError(
+                "automatic_threshold_reason chỉ có ý nghĩa khi source=automatic_threshold."
+            )
+        return self

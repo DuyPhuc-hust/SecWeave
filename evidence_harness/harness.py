@@ -46,8 +46,21 @@ full design): capture() optionally takes a KillSwitch and checks
 `is_stopped` before sending any real request, raising ExecutionStoppedError
 instead of executing it once stopped. EvidenceHarness does not own or
 create the KillSwitch — a caller constructs one and shares the SAME instance
-across everything for one execution (capture() calls, and eventually a real
-Cost Service / Execute loop), same as it shares one execution_id.
+across everything for one execution (capture() calls, and the real Cost
+Service below), same as it shares one execution_id.
+
+Cost Service integration (SPEC P6/§6.4 control #9, weekly plan Tuần 6, see
+shared/cost.py for the full design): capture() optionally takes a
+CostService and records each real ATTEMPT against it before sending
+anything. The moment the next action would exceed the configured cap,
+capture() refuses to send it (raising CostCapExceededError) AND — if a
+KillSwitch is also wired in — automatically stops the execution
+(source=AUTOMATIC_THRESHOLD, automatic_threshold_reason=
+ACTION_COUNT_EXCEEDED), same "gates assumed approved, operator-supplied cap"
+situation as everything else in Chặng 1: this module doesn't decide what
+the cap should be, only enforces whatever value a caller configured.
+EvidenceHarness does not own or create the CostService either, same
+sharing convention as KillSwitch.
 """
 
 import base64
@@ -64,8 +77,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
+from shared.cost import CostCapExceededError, CostService
 from shared.id_generator import generate_id
-from shared.kill_switch import ExecutionStoppedError, KillSwitch
+from shared.kill_switch import AutomaticThresholdReason, ExecutionStoppedError, KillSwitch, StopSource
 from shared.models.action import ActionSpec
 from shared.models.observation import (
     AccessResult,
@@ -293,6 +307,7 @@ class EvidenceHarness:
         http_client: Optional[httpx.Client] = None,
         http_client_factory: Optional[Callable[[], httpx.Client]] = None,
         kill_switch: Optional[KillSwitch] = None,
+        cost_service: Optional[CostService] = None,
     ) -> None:
         self._execution_id = execution_id
         self._target_id = target_id
@@ -304,6 +319,10 @@ class EvidenceHarness:
         # shared/kill_switch.py. None means no kill-switch is wired in at
         # all (capture() never refuses on that basis), not "never stopped".
         self._kill_switch = kill_switch
+        # Same "not owned/created here" convention — see this module's
+        # docstring and shared/cost.py. None means no runtime cost cap is
+        # enforced at all (capture() never refuses on that basis).
+        self._cost_service = cost_service
         # `http_client`: one SHARED instance/jar for EVERY identity — ONLY
         # for tests that genuinely don't care about identity isolation
         # (testing something else entirely, e.g. a single-identity capture()
@@ -459,6 +478,22 @@ class EvidenceHarness:
         shared/kill_switch.py for the full design and its stated limits
         (this is a check-before-send guard, not a mid-flight abort).
 
+        Raises CostCapExceededError instead of sending anything if this
+        instance was given a CostService and this action would be the one
+        to push the executed-action count past its configured cap — also
+        automatically calls kill_switch.stop(source=AUTOMATIC_THRESHOLD) if
+        a KillSwitch was ALSO given, so a cap breach doesn't just refuse
+        this one action but halts the whole execution (SPEC §6.4 control
+        #9: "không vượt hard cost cap"). See shared/cost.py for the full
+        design. The cost check deliberately runs only AFTER
+        client.build_request() has already succeeded (real gap found via
+        independent review: consuming a cost slot any EARLIER — before
+        confirming the request can even be built — meant a harness-internal
+        failure unrelated to the target at all, e.g. a broken
+        http_client_factory or a non-serializable action.parameters, could
+        consume real budget for an action that never had a chance to reach
+        the wire, with no artifact anywhere recording that consumption).
+
         Raises RuntimeError if this harness instance has already been
         close()'d — real gap found via review: reusing an identity whose
         client was already closed used to crash with an uncaught
@@ -477,7 +512,6 @@ class EvidenceHarness:
                 f"thật cho action '{action.action_id}'. Xem kill_switch_audit_log.jsonl của "
                 "execution này để biết ai/khi nào/vì sao đã dừng."
             )
-
         observation_id = generate_id("obs")
         captured_at = datetime.now(timezone.utc)
         client = self._client_for(identity)
@@ -512,6 +546,21 @@ class EvidenceHarness:
             )
             sent_url = str(request.url)
             request_headers = _redact_headers(dict(request.headers), self._sensitive_header_names)
+
+            if self._cost_service is not None:
+                decision = self._cost_service.record_action(action.action_id)
+                if not decision.allowed:
+                    if self._kill_switch is not None:
+                        self._kill_switch.stop(
+                            source=StopSource.AUTOMATIC_THRESHOLD,
+                            automatic_threshold_reason=AutomaticThresholdReason.ACTION_COUNT_EXCEEDED,
+                            reason=decision.reason,
+                        )
+                    raise CostCapExceededError(
+                        f"Execution '{self._execution_id}': {decision.reason} Không gửi request "
+                        f"thật cho action '{action.action_id}'."
+                    )
+
             # stream=True so the body can be read in bounded chunks (size
             # cap below) instead of httpx buffering the entire body into
             # memory unconditionally before we get any say in the matter.
