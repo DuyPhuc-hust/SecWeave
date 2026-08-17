@@ -177,6 +177,103 @@ def test_new_instance_with_no_prior_history_is_prepared(tmp_path):
     assert ks.status == ExecutionStatus.PREPARED
 
 
+def test_refresh_picks_up_a_stop_written_by_a_separate_instance(tmp_path):
+    # The actual gap this closes: a live, already-running KillSwitch
+    # instance only ever saw ITS OWN stop() calls — a stop() written by a
+    # SEPARATE instance pointed at the same execution_id/storage_dir (e.g.
+    # a `secweave kill` CLI invocation running in a different process) was
+    # invisible no matter how long the first instance kept running.
+    execution_id = "exec_refresh"
+    running_instance = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    running_instance.start()
+
+    external_instance = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    external_instance.stop(source=StopSource.OPERATOR, reason="external stop, e.g. from another process")
+
+    assert running_instance.is_stopped is False  # not yet refreshed
+    running_instance.refresh()
+    assert running_instance.is_stopped is True
+
+
+def test_refresh_is_a_safe_no_op_when_nothing_changed(tmp_path):
+    ks = KillSwitch(execution_id="exec_refresh_noop", storage_dir=str(tmp_path))
+    ks.start()
+    ks.refresh()
+    assert ks.status == ExecutionStatus.RUNNING
+
+
+def test_refresh_never_regresses_this_instances_own_more_recent_state(tmp_path):
+    # refresh() re-reads from disk, but must compare by `sequence` rather
+    # than trusting the read outright — otherwise a refresh() racing this
+    # SAME instance's own concurrent stop() could read a stale view and
+    # regress `_status` backward.
+    execution_id = "exec_refresh_no_regress"
+    ks = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    ks.start()
+    ks.stop(source=StopSource.OPERATOR, reason="local stop")
+    assert ks.status == ExecutionStatus.STOPPED
+
+    # A separate instance recovers the same (older) STOPPED state, then
+    # resumes it — writing a NEWER sequence to the shared log.
+    other = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    other.resume(actor="owner", authorization_reference="re-approved")
+
+    ks.refresh()
+    assert ks.status == ExecutionStatus.RUNNING  # correctly adopts the NEWER state
+
+
+def test_evidence_harness_capture_refuses_after_a_stop_from_a_separate_kill_switch_instance(tmp_path):
+    # Cross-module, cross-instance integration: this is the actual scenario
+    # `secweave kill` (a separate CLI invocation/process) needs to work —
+    # EvidenceHarness.capture() must refuse a real request even when the
+    # stop() that caused it was written by a DIFFERENT KillSwitch instance
+    # than the one the harness holds, not just its own.
+    import httpx
+
+    from evidence_harness.harness import EvidenceHarness
+    from shared.models.action import ActionSpec, ActionType
+    from shared.models.observation import ObservationRole
+
+    execution_id = "exec_cross_instance_kill"
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    running_kill_switch = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path / "kill_switch"))
+    running_kill_switch.start()
+    harness = EvidenceHarness(
+        execution_id=execution_id,
+        target_id="tgt_1",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path / "evidence"),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        kill_switch=running_kill_switch,
+    )
+    action = ActionSpec(
+        type=ActionType.READ_ONLY,
+        method="GET",
+        target="https://target.example.com/api/objects/1",
+        description="First action, before the external stop.",
+    )
+    harness.capture(action, role=ObservationRole.MAIN)
+    assert len(calls) == 1
+
+    # A SEPARATE KillSwitch instance, pointed at the same execution_id/
+    # storage_dir — simulating a `secweave kill` invocation in another
+    # process — stops the execution. `running_kill_switch` above never has
+    # .stop() called on it directly.
+    external_kill_switch = KillSwitch(
+        execution_id=execution_id, storage_dir=str(tmp_path / "kill_switch")
+    )
+    external_kill_switch.stop(source=StopSource.OPERATOR, reason="operator aborts from another process")
+
+    with pytest.raises(ExecutionStoppedError):
+        harness.capture(action, role=ObservationRole.MAIN)
+    assert len(calls) == 1  # the second action's real request was never sent
+
+
 def test_recovery_uses_sequence_not_physical_write_order_when_a_slow_stop_races_a_resume(tmp_path):
     import time
 

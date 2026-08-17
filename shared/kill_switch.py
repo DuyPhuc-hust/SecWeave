@@ -185,6 +185,34 @@ class KillSwitch:
     def is_stopped(self) -> bool:
         return self._status == ExecutionStatus.STOPPED
 
+    def refresh(self) -> None:
+        """Re-reads the audit log and adopts a NEWER status if the log now
+        shows one — closes a real, previously-documented gap: a separate
+        `KillSwitch` instance (e.g. a `secweave kill` CLI invocation
+        pointed at the same execution_id/storage_dir) calling stop() only
+        ever wrote to the shared audit log; a DIFFERENT, already-running
+        instance (e.g. inside EvidenceHarness.capture()'s loop) had no way
+        to notice that write short of being reconstructed from scratch.
+        `__init__` already does this recovery once, at construction time —
+        this is the same recovery logic, callable again on an existing,
+        live instance.
+
+        Only ever moves forward: adopts the disk-recovered state ONLY if
+        its `sequence` is strictly greater than what this instance already
+        has. This matters even for a single-instance/single-process caller
+        — without it, a `refresh()` call racing a concurrent `stop()` on
+        THIS SAME instance could read a stale/incomplete view mid-write and
+        regress `_status` backward. Comparing by `sequence` (assigned
+        atomically under `self._lock` at transition time — see this
+        module's docstring) rather than trusting whatever the read
+        happened to see keeps this safe regardless of timing.
+        """
+        recovered_status, recovered_sequence = self._recover_from_audit_log()
+        with self._lock:
+            if recovered_sequence > self._sequence:
+                self._status = recovered_status
+                self._sequence = recovered_sequence
+
     def start(self) -> None:
         with self._lock:
             if self._status != ExecutionStatus.PREPARED:

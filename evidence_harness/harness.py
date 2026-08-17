@@ -506,12 +506,23 @@ class EvidenceHarness:
                 f"EvidenceHarness cho execution '{self._execution_id}' đã close() — không thể "
                 "capture() thêm trên instance này. Tạo instance mới nếu cần tiếp tục thu bằng chứng."
             )
-        if self._kill_switch is not None and self._kill_switch.is_stopped:
-            raise ExecutionStoppedError(
-                f"Execution '{self._execution_id}' đã STOPPED — capture() từ chối gửi request "
-                f"thật cho action '{action.action_id}'. Xem kill_switch_audit_log.jsonl của "
-                "execution này để biết ai/khi nào/vì sao đã dừng."
-            )
+        if self._kill_switch is not None:
+            # refresh() before checking — real gap found via review: without
+            # this, capture() only ever saw STOPPED if THIS SAME KillSwitch
+            # instance's own stop() had been called; a stop() written by a
+            # SEPARATE instance (e.g. a `secweave kill` CLI invocation
+            # pointed at the same execution_id/storage_dir, running in a
+            # different process) was invisible here no matter how many
+            # actions ran afterward, since `is_stopped` only ever read this
+            # instance's own in-memory `_status`. See KillSwitch.refresh()'s
+            # docstring for why this is still safe for a single instance too.
+            self._kill_switch.refresh()
+            if self._kill_switch.is_stopped:
+                raise ExecutionStoppedError(
+                    f"Execution '{self._execution_id}' đã STOPPED — capture() từ chối gửi request "
+                    f"thật cho action '{action.action_id}'. Xem kill_switch_audit_log.jsonl của "
+                    "execution này để biết ai/khi nào/vì sao đã dừng."
+                )
         observation_id = generate_id("obs")
         captured_at = datetime.now(timezone.utc)
         client = self._client_for(identity)

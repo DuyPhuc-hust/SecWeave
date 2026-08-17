@@ -9,14 +9,22 @@ from typing import List, Optional
 import httpx
 
 from context_store.store import DEFAULT_DB_PATH, SecurityContextStore
+from evidence_harness.harness import EvidenceHarness
 from exploit_agent.agent import ExploitAgent
 from hypothesis_engine.engine import HypothesisEngine
 from hypothesis_engine.signal_normalizer.orchestrator import SignalNormalizer
+from shared.cost import CostCapExceededError, CostService
 from shared.id_generator import generate_id
+from shared.kill_switch import AutomaticThresholdReason, ExecutionStoppedError, KillSwitch, StopSource
 from shared.models.action import ActionPlanStatus
 from shared.models.entities import Authorization, AuthorizationLayer
 from shared.models.hypothesis import Hypothesis, HypothesisProvenance, HypothesisStatus
+from shared.models.kill_switch import ExecutionStatus
+from shared.models.observation import ObservationRole
 from shared.models.signal import NormalizedSignal, SignalCoverage
+from verdict_oracle.oracle import decide
+
+DEFAULT_EVIDENCE_STORAGE_DIR = ".secweave/evidence"
 
 
 def _print_skip_warning(message: str) -> None:
@@ -415,6 +423,189 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_execute(args: argparse.Namespace) -> int:
+    """Thực thi THẬT các action đã approve của 1 plan — nối KillSwitch/
+    CostService/EvidenceHarness vào CLI, thứ 3 thành phần này trước đó chỉ
+    chạy được qua script thủ công (.secweave/manual_test/*.py), chưa từng
+    có entrypoint CLI/API thật nào (real gap tìm được qua review toàn dự
+    án). Mỗi action approve được capture với role=MAIN — SCOPE THẬT: lệnh
+    này không tự dựng được kịch bản 3-role (main/positive_control/
+    denied_control), vì ActionSpec chưa có field nào đánh dấu 1 action
+    đóng vai trò gì (gap đã biết, xem shared/models/observation.py) — muốn
+    kịch bản đủ 3 role vẫn cần script tự viết như
+    .secweave/manual_test/identity_scenario_example.py. decide() vẫn được
+    gọi ở cuối để verdict thật ra đúng INCONCLUSIVE khi thiếu 2 nhóm kia,
+    thay vì giả vờ có thể kết luận CONFIRMED/NOT_REPRODUCED từ 1 identity.
+    """
+    try:
+        context_store = SecurityContextStore(db_path=args.context_db)
+    except sqlite3.Error as exc:
+        print(f"error: không mở được Context Store tại '{args.context_db}': {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        record = context_store.get_hypothesis(args.hypothesis_id)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        context_store.close()
+
+    if record is None:
+        print(
+            f"error: không tìm thấy hypothesis_id '{args.hypothesis_id}' (chỉ tra được bản ghi "
+            "status=hypothesis, không tra được not_verifiable)",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        hypothesis = _load_stored_hypothesis(record)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    llm_client = _build_llm_client(
+        args,
+        agent_mode_message="Nhờ agent (Claude Code) đọc file prompt và trả JSON, rồi chờ Enter đúng 1 lần.",
+        api_mode_subject="Hypothesis",
+    )
+    if llm_client is None:
+        return 1
+
+    agent = ExploitAgent(llm_client)
+    try:
+        plan_result = agent.plan(hypothesis)
+    except (RuntimeError, httpx.HTTPError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if plan_result.status == ActionPlanStatus.NOT_PLANNABLE:
+        print(f"NOT_PLANNABLE — {plan_result.reason}")
+        return 0
+
+    print(
+        "CẢNH BÁO: authorization dùng để check dưới đây CHỈ dựng tạm để test cục bộ từ "
+        "--allowed-action — KHÔNG phải Gate 2/3 thật đã duyệt. Lệnh này SẼ GỬI REQUEST THẬT tới "
+        "các host trong allowlist — chỉ chạy khi bạn thực sự được phép làm điều đó trên target đó.",
+        file=sys.stderr,
+    )
+    authorization = Authorization(
+        id=generate_id("auth"),
+        layer=AuthorizationLayer.TARGET_AUTHORIZATION,
+        approved_by="cli-local-test",
+        approved_at=datetime.now(timezone.utc),
+        allowed_actions=args.allowed_action or [],
+    )
+    review = agent.review_plan(plan_result.plan, authorization, cap=args.cap)
+    if not review.approved:
+        print("-> Kết quả tổng: BLOCKED — không action nào được thực thi.")
+        for check in review.plan_check.checks:
+            verdict = "PASS" if check.decision.allowed else "FAIL"
+            print(f"  [{verdict}] {check.action.method} {check.action.target} — {check.decision.reason}")
+        if not review.cost_check.allowed:
+            print(f"  Cost: {review.cost_check.reason}")
+        return 1
+
+    execution_id = args.execution_id or generate_id("exec")
+    kill_switch = KillSwitch(execution_id=execution_id, storage_dir=args.storage_dir)
+    cost_service = CostService(execution_id=execution_id, storage_dir=args.storage_dir, cap=args.cap)
+    harness = EvidenceHarness(
+        execution_id=execution_id,
+        target_id=args.target_id,
+        target_revision_id=args.target_revision_id,
+        storage_dir=args.storage_dir,
+        kill_switch=kill_switch,
+        cost_service=cost_service,
+    )
+    kill_switch.start()
+
+    print(f"-> execution_id: {execution_id}")
+    print(
+        f"-> Đang thực thi {len(plan_result.plan.actions)} action đã approve (identity="
+        f"'{args.identity}', role=main cho tất cả — xem docstring cmd_execute về giới hạn này)..."
+    )
+
+    observations = []
+    stopped_reason = None
+    try:
+        for check in review.plan_check.checks:
+            try:
+                observation = harness.capture(check.action, role=ObservationRole.MAIN, identity=args.identity)
+            except (ExecutionStoppedError, CostCapExceededError) as exc:
+                stopped_reason = str(exc)
+                print(f"   DỪNG GIỮA CHỪNG: {exc}", file=sys.stderr)
+                break
+            observations.append(observation)
+            print(
+                f"   [{observation.access_result.value}] {check.action.method} {check.action.target} "
+                f"(HTTP {observation.status_code})"
+            )
+    finally:
+        harness.close()
+
+    print(f"-> Kill-switch status cuối: {kill_switch.status.value}")
+    print(f"-> Cost: {cost_service.executed_action_count}/{cost_service.cap}")
+
+    if observations:
+        execution_status = ExecutionStatus.STOPPED if stopped_reason else ExecutionStatus.COMPLETED
+        result = decide(observations, execution_status=execution_status)
+        print(f"-> Verdict: {result.verdict.value}")
+        print(f"   {result.reason}")
+
+    return 1 if stopped_reason else 0
+
+
+def cmd_kill(args: argparse.Namespace) -> int:
+    """Dừng 1 execution từ CLI — gọi được từ process KHÁC với process đang
+    thực sự chạy `execute` (vd operator hoảng, muốn dừng ngay giữa chừng
+    từ terminal khác). Instance KillSwitch của lệnh này KHÔNG chạy cleanup
+    thật (không có tham chiếu gì tới EvidenceHarness đang mở ở process
+    kia) — process đang chạy `execute` tự đóng harness của NÓ khi
+    capture() tiếp theo raise ExecutionStoppedError (sau khi tự
+    KillSwitch.refresh() nhận ra dòng log mới do lệnh này ghi).
+    """
+    try:
+        source = StopSource(args.source)
+    except ValueError:
+        valid = ", ".join(s.value for s in StopSource)
+        print(f"error: --source không hợp lệ '{args.source}' — chỉ chấp nhận: {valid}", file=sys.stderr)
+        return 1
+
+    automatic_threshold_reason = None
+    if args.automatic_threshold_reason:
+        try:
+            automatic_threshold_reason = AutomaticThresholdReason(args.automatic_threshold_reason)
+        except ValueError:
+            valid = ", ".join(r.value for r in AutomaticThresholdReason)
+            print(
+                f"error: --automatic-threshold-reason không hợp lệ "
+                f"'{args.automatic_threshold_reason}' — chỉ chấp nhận: {valid}",
+                file=sys.stderr,
+            )
+            return 1
+
+    kill_switch = KillSwitch(execution_id=args.execution_id, storage_dir=args.storage_dir)
+    try:
+        event = kill_switch.stop(
+            source=source,
+            reason=args.reason,
+            actor=args.actor,
+            automatic_threshold_reason=automatic_threshold_reason,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"-> execution '{args.execution_id}': {event.event.value}")
+    print(f"   status hiện tại: {kill_switch.status.value}")
+    if event.cleanup_status is not None:
+        print(f"   cleanup (của riêng lệnh kill này, KHÔNG phải cleanup của process đang chạy): "
+              f"{event.cleanup_status.value}")
+
+    return 0
+
+
 def _add_report_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--signal", required=True, help="Đường dẫn tới report JSON thô")
     parser.add_argument("--tool", required=True, choices=["semgrep", "trivy", "owasp_zap"])
@@ -503,6 +694,70 @@ def build_parser() -> argparse.ArgumentParser:
     show_hypothesis_parser.add_argument("--format", default="table", choices=["table", "json"])
     _add_context_db_arg(show_hypothesis_parser)
     show_hypothesis_parser.set_defaults(func=cmd_show_hypothesis)
+
+    execute_parser = subparsers.add_parser(
+        "execute",
+        help="Thực thi THẬT các action đã approve của 1 plan (nối KillSwitch/CostService/"
+        "EvidenceHarness) — SẼ GỬI REQUEST THẬT, chỉ chạy khi thực sự được phép trên target đó",
+    )
+    execute_parser.add_argument(
+        "--hypothesis-id", required=True, help="hypothesis_id đã lưu trong Context Store (từ `hypothesize`)"
+    )
+    execute_parser.add_argument(
+        "--allowed-action",
+        action="append",
+        help='Giống hệt `plan --allowed-action` — 1 entry allowlist, dạng "METHOD https://host/path/'
+        '{param} [params:key1,key2]", lặp lại flag để cấp nhiều entry.',
+    )
+    execute_parser.add_argument(
+        "--cap",
+        type=int,
+        default=10,
+        help="Cap số hành động — dùng CHUNG cho cả cost-check lúc lập plan lẫn CostService lúc thực "
+        "thi thật (mặc định: %(default)s)",
+    )
+    execute_parser.add_argument("--target-id", required=True, help="target_id ghi vào evidence")
+    execute_parser.add_argument("--target-revision-id", required=True, help="target_revision_id ghi vào evidence")
+    execute_parser.add_argument(
+        "--execution-id", help="Định danh execution (mặc định: tự sinh mới mỗi lần chạy)"
+    )
+    execute_parser.add_argument(
+        "--storage-dir",
+        default=DEFAULT_EVIDENCE_STORAGE_DIR,
+        help="Thư mục lưu evidence + kill-switch/cost audit log (mặc định: %(default)s)",
+    )
+    execute_parser.add_argument(
+        "--identity", default="anonymous", help="Identity dùng để gửi mọi action (mặc định: %(default)s)"
+    )
+    _add_llm_mode_arg(execute_parser)
+    _add_context_db_arg(execute_parser)
+    execute_parser.set_defaults(func=cmd_execute)
+
+    kill_parser = subparsers.add_parser(
+        "kill",
+        help="Dừng 1 execution đang chạy — gọi được từ process/terminal khác với process đang chạy "
+        "`execute` (SPEC §6.3: 5 nguồn người + 1 ngưỡng tự động)",
+    )
+    kill_parser.add_argument("--execution-id", required=True, help="execution_id cần dừng")
+    kill_parser.add_argument(
+        "--storage-dir",
+        default=DEFAULT_EVIDENCE_STORAGE_DIR,
+        help="Phải TRÙNG --storage-dir đã dùng khi `execute` execution này (mặc định: %(default)s)",
+    )
+    kill_parser.add_argument(
+        "--source",
+        required=True,
+        choices=[s.value for s in StopSource],
+        help="Nguồn dừng (SPEC §6.3)",
+    )
+    kill_parser.add_argument("--reason", required=True, help="Lý do dừng (ghi vào audit log)")
+    kill_parser.add_argument("--actor", help="Người/hệ thống thực hiện lệnh dừng (tuỳ chọn)")
+    kill_parser.add_argument(
+        "--automatic-threshold-reason",
+        choices=[r.value for r in AutomaticThresholdReason],
+        help="BẮT BUỘC nếu --source=automatic_threshold — 1 trong 5 điều kiện SPEC §6.3",
+    )
+    kill_parser.set_defaults(func=cmd_kill)
 
     return parser
 

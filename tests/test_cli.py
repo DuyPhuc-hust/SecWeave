@@ -925,3 +925,301 @@ def test_cli_plan_llm_call_failure_is_reported_cleanly_not_as_traceback(
     assert exit_code == 1
     assert "error: LLM provider unreachable" in captured.err
     assert "Traceback" not in captured.err
+
+
+# ----- `execute` / `kill` — Kill-switch/CostService/EvidenceHarness wired
+# into the CLI for the first time (real gap found via whole-project review:
+# these 3 components existed only as tested library code + throwaway manual
+# scripts, never a real CLI entrypoint). -----
+
+
+def _patch_evidence_harness_transport(monkeypatch, handler):
+    import evidence_harness.harness as harness_module
+    import httpx
+
+    real_client_class = httpx.Client  # captured BEFORE patching — see below
+    monkeypatch.setattr(
+        harness_module.httpx,
+        "Client",
+        # Must NOT reference httpx.Client by name inside this lambda: this
+        # setattr call patches httpx.Client (the module attribute) itself,
+        # so httpx.Client(...) evaluated later, inside the lambda's own
+        # body, would resolve to this SAME lambda (infinite self-reference)
+        # instead of the real class — use the reference captured above.
+        lambda: real_client_class(transport=httpx.MockTransport(handler)),
+    )
+
+
+def test_cli_execute_captures_evidence_for_approved_actions(capsys, monkeypatch, tmp_path):
+    import httpx
+
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "granted" in captured.out
+    assert "Verdict: inconclusive" in captured.out  # only role=main captured, no controls
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_cli_execute_blocked_when_action_outside_allowlist_sends_no_real_request(
+    capsys, monkeypatch, tmp_path
+):
+    import httpx
+
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            # No --allowed-action -> empty allowlist -> BLOCKED before anything executes.
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "BLOCKED" in captured.out
+    assert calls == []  # no real request was ever sent
+
+
+def test_cli_execute_stops_when_cost_cap_is_reached(capsys, monkeypatch, tmp_path):
+    import httpx
+
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--cap",
+            "0",  # the plan's 1 action would be the 1st — already over a cap of 0
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    # cap=0 also fails the PLANNING-time cost check (review.cost_check),
+    # so this is refused as BLOCKED before ever reaching CostService/the
+    # real network call — consistent with `plan`'s own existing behavior.
+    assert exit_code == 1
+    assert calls == []
+
+
+def test_cli_kill_stops_an_already_running_execution(capsys, tmp_path):
+    from shared.kill_switch import ExecutionStatus, KillSwitch
+
+    storage_dir = str(tmp_path / "evidence")
+    kill_switch = KillSwitch(execution_id="exec_cli_kill_test", storage_dir=storage_dir)
+    kill_switch.start()
+
+    exit_code = cli.main(
+        [
+            "kill",
+            "--execution-id",
+            "exec_cli_kill_test",
+            "--storage-dir",
+            storage_dir,
+            "--source",
+            "operator",
+            "--reason",
+            "manual test stop",
+            "--actor",
+            "test-operator",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "stop" in captured.out
+    assert kill_switch.status == ExecutionStatus.RUNNING  # the ORIGINAL instance hasn't refreshed yet
+
+    kill_switch.refresh()
+    assert kill_switch.status == ExecutionStatus.STOPPED  # now picks up the CLI's stop
+
+
+def test_cli_kill_rejects_automatic_threshold_without_a_reason(capsys, tmp_path):
+    exit_code = cli.main(
+        [
+            "kill",
+            "--execution-id",
+            "exec_cli_kill_test2",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--source",
+            "automatic_threshold",
+            "--reason",
+            "cap exceeded",
+            # missing --automatic-threshold-reason
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "automatic_threshold_reason" in captured.err or "error" in captured.err
+
+
+def test_cli_execute_stops_mid_run_when_killed_by_a_separate_process(capsys, monkeypatch, tmp_path):
+    # The actual end-to-end proof this whole increment exists for: an
+    # execution started by `execute` genuinely reacts to a `kill` command
+    # issued from what this test simulates as a SEPARATE process (its own
+    # KillSwitch instance, invoked via cli.main() from inside the mock
+    # transport handler — i.e. "something else called `secweave kill`
+    # between these 2 real requests").
+    import httpx
+
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    class _StubTwoActionPlanLLMClient:
+        model = "stub-two-action-plan"
+
+        def generate(self, prompt: str) -> str:
+            return json.dumps(
+                {
+                    "plannable": True,
+                    "actions": [
+                        {
+                            "type": "read_only",
+                            "method": "GET",
+                            "target": "http://host.docker.internal:3000",
+                            "description": "First action.",
+                        },
+                        {
+                            "type": "read_only",
+                            "method": "GET",
+                            "target": "http://host.docker.internal:3000",
+                            "description": "Second action — must never actually be sent.",
+                        },
+                    ],
+                }
+            )
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubTwoActionPlanLLMClient)
+
+    storage_dir = str(tmp_path / "evidence")
+    execution_id = "exec_cli_cross_process_kill"
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            # Simulates an operator, in a separate terminal/process, running
+            # `secweave kill` right after the first action goes out.
+            kill_exit_code = cli.main(
+                [
+                    "kill",
+                    "--execution-id",
+                    execution_id,
+                    "--storage-dir",
+                    storage_dir,
+                    "--source",
+                    "operator",
+                    "--reason",
+                    "operator aborts from another process",
+                ]
+            )
+            assert kill_exit_code == 0
+        return httpx.Response(200)
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--cap",
+            "10",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            storage_dir,
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert len(calls) == 1  # the 2nd action's real request was never sent
+    assert "DỪNG GIỮA CHỪNG" in captured.err
+    assert "STOPPED" in captured.out or "stopped" in captured.out.lower()
