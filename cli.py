@@ -444,8 +444,16 @@ def _load_frozen_plan(args: argparse.Namespace) -> Optional[ActionPlanResult]:
     supplied, not persisted) for the very same Gate-3-shaped reason.
 
     Returns None (error already printed) on any failure. `args.hypothesis_id`
-    is cross-checked against the file's own hypothesis_id so a mismatched
-    file can't be loaded silently.
+    is cross-checked against BOTH the file's own top-level hypothesis_id
+    AND the embedded ActionPlan.hypothesis_id — real gap found via
+    independent review: only the top-level one used to be checked, so a
+    hand-edited or corrupted file with the two disagreeing (top-level
+    matches --hypothesis-id, but plan_result.plan.hypothesis_id names a
+    DIFFERENT hypothesis) loaded and executed with zero error, silently
+    attributing another hypothesis's actions to this one. This doesn't
+    check against ground truth in Context Store either (the whole point of
+    --plan-file is to avoid needing that lookup) — it's self-consistency
+    between what the file claims, not proof the hypothesis_id is real.
     """
     try:
         plan_data = json.loads(Path(args.plan_file).read_text(encoding="utf-8"))
@@ -479,6 +487,16 @@ def _load_frozen_plan(args: argparse.Namespace) -> Optional[ActionPlanResult]:
         print(
             f"error: plan file '{args.plan_file}' có 'plan_result' không đúng schema ActionPlanResult: "
             f"{exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    if plan_result.plan is not None and plan_result.plan.hypothesis_id != args.hypothesis_id:
+        print(
+            f"error: plan file '{args.plan_file}': plan_result.plan.hypothesis_id "
+            f"('{plan_result.plan.hypothesis_id}') không khớp --hypothesis-id đã truyền "
+            f"('{args.hypothesis_id}') — dù hypothesis_id ở cấp ngoài của file khớp, ActionPlan bên "
+            "trong lại thuộc về 1 hypothesis khác. Có thể file đã bị sửa tay hoặc ghép nhầm.",
             file=sys.stderr,
         )
         return None

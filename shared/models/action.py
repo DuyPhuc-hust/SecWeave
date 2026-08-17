@@ -79,6 +79,17 @@ class ActionPlanResult(BaseModel):
             raise ValueError("status=planned requires a plan")
         if self.status == ActionPlanStatus.NOT_PLANNABLE and not self.reason:
             raise ValueError("status=not_plannable requires a reason")
+        if self.status == ActionPlanStatus.NOT_PLANNABLE and self.plan is not None:
+            # Real gap found via independent review: this direction was
+            # never checked, unlike its sibling PlanCheckResult/CostDecision/
+            # PlanReviewResult a few lines below, which all already enforce
+            # BOTH directions of their own consistency. A NOT_PLANNABLE
+            # result carrying a real ActionPlan is exactly the kind of
+            # ambiguous state this project's own established pattern says
+            # must never be constructible — some future caller reading
+            # `.plan` without first checking `.status` would silently act
+            # on a plan the engine itself explicitly refused to stand behind.
+            raise ValueError("status=not_plannable không được kèm theo plan")
         return self
 
 

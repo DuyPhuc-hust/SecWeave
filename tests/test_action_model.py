@@ -3,6 +3,9 @@ from pydantic import ValidationError
 
 from shared.models.action import (
     ActionCheckResult,
+    ActionPlan,
+    ActionPlanResult,
+    ActionPlanStatus,
     ActionSpec,
     ActionType,
     CostDecision,
@@ -18,6 +21,40 @@ def _action() -> ActionSpec:
 
 def _check(allowed: bool) -> ActionCheckResult:
     return ActionCheckResult(action=_action(), decision=PolicyDecision(allowed=allowed, reason="r"))
+
+
+# ----- ActionPlanResult: real gap found via independent review — the
+# consistency validator only checked PLANNED-requires-plan and
+# NOT_PLANNABLE-requires-reason, never the reverse: NOT_PLANNABLE must NOT
+# carry a plan. A future caller reading `.plan` without checking `.status`
+# first could silently act on a plan the engine explicitly refused. -----
+
+
+def test_action_plan_result_accepts_planned_with_a_plan():
+    plan = ActionPlan(hypothesis_id="hyp_1", actions=[_action()])
+    result = ActionPlanResult(status=ActionPlanStatus.PLANNED, plan=plan)
+    assert result.status == ActionPlanStatus.PLANNED
+
+
+def test_action_plan_result_accepts_not_plannable_with_a_reason():
+    result = ActionPlanResult(status=ActionPlanStatus.NOT_PLANNABLE, reason="no endpoint")
+    assert result.plan is None
+
+
+def test_action_plan_result_rejects_planned_without_a_plan():
+    with pytest.raises(ValidationError):
+        ActionPlanResult(status=ActionPlanStatus.PLANNED, plan=None)
+
+
+def test_action_plan_result_rejects_not_plannable_without_a_reason():
+    with pytest.raises(ValidationError):
+        ActionPlanResult(status=ActionPlanStatus.NOT_PLANNABLE, reason=None)
+
+
+def test_action_plan_result_rejects_not_plannable_carrying_a_plan():
+    plan = ActionPlan(hypothesis_id="hyp_1", actions=[_action()])
+    with pytest.raises(ValidationError):
+        ActionPlanResult(status=ActionPlanStatus.NOT_PLANNABLE, reason="no endpoint", plan=plan)
 
 
 # ----- PlanCheckResult: real gap found via independent review — approved

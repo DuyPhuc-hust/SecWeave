@@ -1579,6 +1579,69 @@ def test_cli_execute_plan_file_rejects_mismatched_hypothesis_id(capsys, monkeypa
     assert "không khớp" in captured.err
 
 
+def test_cli_execute_plan_file_rejects_mismatched_embedded_hypothesis_id(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: the ORIGINAL check only
+    # compared the file's TOP-LEVEL hypothesis_id (what `plan --format
+    # json` writes from --hypothesis-id at save time) against
+    # --hypothesis-id — it never checked plan_result.plan.hypothesis_id,
+    # the ActionPlan's OWN embedded field. A hand-edited/corrupted file
+    # where these two disagree used to load and execute with zero error,
+    # silently attributing another hypothesis's actions to this one.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": "hyp_this_one",  # matches --hypothesis-id below
+                "plan_result": {
+                    "status": "planned",
+                    # ...but the embedded plan claims a DIFFERENT hypothesis_id
+                    "plan": {"hypothesis_id": "hyp_a_totally_different_one", "actions": [
+                        {"type": "read_only", "method": "GET", "target": "http://host.docker.internal:3000/mismatched",
+                         "description": "d"}
+                    ]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            "hyp_this_one",
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/mismatched",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không khớp" in captured.err
+    assert calls == []  # no real request was ever sent
+
+
 def test_cli_execute_plan_file_missing_file_fails_cleanly(capsys, tmp_path):
     exit_code = cli.main(
         [
