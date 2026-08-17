@@ -1,10 +1,12 @@
+import base64
 import hashlib
 import json
 from pathlib import Path
 
 import httpx
+import pytest
 
-from evidence_harness.harness import EvidenceHarness
+from evidence_harness.harness import _MAX_RESPONSE_BYTES, EvidenceHarness
 from shared.models.action import ActionSpec, ActionType
 from shared.models.observation import AccessResult, EvidenceChannel, ObservationRole
 
@@ -672,3 +674,334 @@ def test_capture_never_refuses_when_no_kill_switch_is_given(tmp_path):
     harness = _harness(tmp_path, handler)
     observation = harness.capture(_action(), role=ObservationRole.MAIN)
     assert observation.access_result == AccessResult.GRANTED
+
+
+# ----- Regression tests: 2nd independent review of the Evidence Harness core
+# (capture()/generate_marker()/redaction) — 8 real gaps found, all fixed. -----
+
+
+def test_capture_records_the_real_sent_url_not_action_target_verbatim(tmp_path):
+    # Real bug found via review: httpx's params= REPLACES (not merges) a
+    # URL's own query string for GET/HEAD/DELETE — action.target's own query
+    # string is silently dropped from the real outgoing request, but the
+    # transcript used to store action.target verbatim as if that's what was
+    # sent, a request/artifact fidelity mismatch that could make a real test
+    # silently become a no-op while looking identical in the evidence.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    harness = _harness(tmp_path, handler)
+    action = _action(
+        method="GET",
+        target="https://target.example.com/api/objects/42?token=SECRET123",
+        parameters={"lang": "en"},
+    )
+    observation = harness.capture(action, role=ObservationRole.MAIN)
+
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    stored_url = raw["request"]["url"]
+    assert "token=SECRET123" not in stored_url  # the real request never carried it
+    assert "lang=en" in stored_url  # this is what was actually sent
+
+
+def test_capture_redacts_a_secret_embedded_in_action_target_query_string(tmp_path):
+    # Real gap found via review: a secret directly in action.target's own
+    # query string (e.g. a password-reset token) had NO redaction mechanism
+    # at all — sensitive_body_keys only ever covered the separate
+    # params/body dict, never the URL itself. Uses POST so the target's own
+    # query string genuinely passes through unaffected (unlike the GET case
+    # above), confirming the redaction applies to what's really sent.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    harness = _harness(tmp_path, handler)
+    action = _action(
+        method="POST",
+        type=ActionType.TEST_DATA_CREATION,
+        target="https://target.example.com/reset-password?token=SUPER-SECRET-RESET-TOKEN",
+    )
+    observation = harness.capture(action, role=ObservationRole.MAIN, sensitive_body_keys={"token"})
+
+    raw_text = Path(observation.raw_evidence_ref).read_text()
+    assert "SUPER-SECRET-RESET-TOKEN" not in raw_text
+
+
+def test_capture_raises_clean_runtime_error_after_close_instead_of_a_confusing_httpx_crash(tmp_path):
+    # Real bug found via review: reusing an identity whose client was
+    # already closed used to crash with an uncaught httpx-internal
+    # RuntimeError ("Cannot send a request, as the client has been closed"),
+    # NOT a subclass of httpx.HTTPError/InvalidURL — the same "narrow except
+    # clause misses a real failure mode" bug already fixed once for
+    # InvalidURL, recurring via a different exception type.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    harness = _harness_with_isolated_identities(tmp_path, handler)
+    harness.capture(_action(), role=ObservationRole.MAIN, identity="alice")
+    harness.close()
+
+    with pytest.raises(RuntimeError, match="đã close"):
+        harness.capture(_action(), role=ObservationRole.MAIN, identity="alice")
+
+
+def test_login_wipes_entire_response_body_on_disk_when_token_extraction_fails(tmp_path):
+    # Real HIGH-severity gap found via review: capture() always writes the
+    # full, unredacted response body to disk FIRST; only a SUCCESSFUL
+    # extraction used to trigger the redaction rewrite. A failed extraction
+    # (wrong path, typo) left a real secret sitting in the clear on disk
+    # forever, with the error message even pointing straight at the file.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"authToken": "REAL-SECRET-JWT-VALUE"}})
+
+    harness = _harness_with_isolated_identities(tmp_path, handler)
+    login_action = _action(
+        method="POST", target="https://target.example.com/login", type=ActionType.TEST_DATA_CREATION
+    )
+
+    with pytest.raises(ValueError, match="không trích được token"):
+        harness.login("alice", login_action, token_json_path="authentication.token")
+
+    artifact_files = [f for f in harness._storage_dir.glob("*.json") if f.name != "seed_manifest.json"]
+    assert len(artifact_files) == 1
+    raw_text = artifact_files[0].read_text()
+    assert "REAL-SECRET-JWT-VALUE" not in raw_text
+
+
+def test_login_rejects_a_null_token_instead_of_building_a_broken_credential(tmp_path):
+    # Real gap found via review: a token that resolves (path exists) but is
+    # null/empty/non-string used to sail through silently, becoming a
+    # literal broken credential (e.g. "Bearer None") sent on every later
+    # request with no error anywhere.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"authentication": {"token": None}})
+
+    harness = _harness_with_isolated_identities(tmp_path, handler)
+    login_action = _action(
+        method="POST", target="https://target.example.com/login", type=ActionType.TEST_DATA_CREATION
+    )
+
+    with pytest.raises(ValueError, match="rỗng hoặc không phải string"):
+        harness.login("alice", login_action, token_json_path="authentication.token")
+
+    client = harness._client_for("alice")
+    assert client.headers.get("Authorization") != "Bearer None"
+
+
+def test_login_redacts_only_the_known_path_when_the_null_token_check_fails(tmp_path):
+    # Unlike the extraction-FAILURE case (whole body wiped, since we don't
+    # know where the secret is), a null/invalid token DOES resolve to a
+    # known path — only that path should be redacted, not the whole body.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"authentication": {"token": None, "other_field": "still-visible"}})
+
+    harness = _harness_with_isolated_identities(tmp_path, handler)
+    login_action = _action(
+        method="POST", target="https://target.example.com/login", type=ActionType.TEST_DATA_CREATION
+    )
+
+    with pytest.raises(ValueError):
+        harness.login("alice", login_action, token_json_path="authentication.token")
+
+    artifact_files = [f for f in harness._storage_dir.glob("*.json") if f.name != "seed_manifest.json"]
+    raw_text = artifact_files[0].read_text()
+    assert "still-visible" in raw_text  # unrelated fields untouched
+
+
+def test_marker_check_is_case_insensitive(tmp_path):
+    # Real gap found via review: a target that reflects the marker back
+    # with different casing used to be reported as marker-ABSENT — a false
+    # negative that silently under-reports a real leak.
+    marker = "abc123def456"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=f"leaked value: {marker.upper()}")
+
+    harness = _harness(tmp_path, handler)
+    observation = harness.capture(_action(), role=ObservationRole.MAIN, marker=marker)
+    assert observation.response_contains_marker is True
+
+
+def test_capture_truncates_a_response_larger_than_the_size_cap(tmp_path):
+    # Real gap found via review: no cap on response size at all, an
+    # unbounded body risked an OOM crash on a single capture() call — a
+    # worse instance of the "lose evidence to a crash" failure this module
+    # otherwise guards against.
+    huge_body = "x" * (_MAX_RESPONSE_BYTES + 1000)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=huge_body)
+
+    harness = _harness(tmp_path, handler)
+    observation = harness.capture(_action(), role=ObservationRole.MAIN)
+
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    assert raw["response"]["truncated"] is True
+    assert len(raw["response"]["body"]) <= _MAX_RESPONSE_BYTES
+    # Still classified normally from the status code even though the body
+    # was truncated — truncation must not corrupt the mechanical
+    # access_result bucketing.
+    assert observation.access_result == AccessResult.GRANTED
+
+
+def test_capture_stores_non_utf8_response_as_base64_with_encoding_label(tmp_path):
+    # Real gap found via review: relying on a lossy text decode meant the
+    # stored artifact wasn't actually byte-faithful to the real response
+    # for binary/non-UTF8 bodies, undermining the Oracle's hash
+    # re-verification (which only proves the artifact hasn't changed SINCE
+    # capture, not that capture faithfully recorded the real wire bytes).
+    binary_body = b"\xff\xfe\x00\x01binary-data-not-utf8"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=binary_body)
+
+    harness = _harness(tmp_path, handler)
+    observation = harness.capture(_action(), role=ObservationRole.MAIN)
+
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    assert raw["response"]["body_encoding"] == "base64"
+    assert base64.b64decode(raw["response"]["body"]) == binary_body
+
+
+def test_capture_stores_normal_utf8_response_as_plain_text_not_base64(tmp_path):
+    # Confirms the common case (JSON/HTML/text bodies, the vast majority of
+    # real responses) stays human-readable rather than needlessly
+    # base64-encoding everything.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": 42, "owner": "alice"})
+
+    harness = _harness(tmp_path, handler)
+    observation = harness.capture(_action(), role=ObservationRole.MAIN)
+
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    assert raw["response"]["body_encoding"] == "utf-8"
+    assert json.loads(raw["response"]["body"]) == {"id": 42, "owner": "alice"}
+
+
+# ----- Regression tests: bugs found by the review that verified the fixes
+# above (finding the stale status_code, truncation losing everything,
+# marker-vs-truncation, URL-redaction drift, and charset handling). -----
+
+
+def test_capture_does_not_leak_a_stale_status_code_when_the_body_read_fails_midstream(tmp_path):
+    # Real HIGH bug introduced by the streaming rewrite itself, found by a
+    # 2nd review pass: splitting the read into "headers" then "body" stages
+    # created a state (headers known, body read then failed) where a STALE
+    # status_code leaked into the final observation even though
+    # received_response stayed False and the artifact recorded only an
+    # "error" key — producing a confident GRANTED/DENIED classification
+    # from evidence that itself says the capture failed.
+    class _BrokenStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"partial"
+            raise httpx.RemoteProtocolError("connection reset mid-response")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_BrokenStream())
+
+    harness = _harness(tmp_path, handler)
+    observation = harness.capture(_action(), role=ObservationRole.POSITIVE_CONTROL)
+
+    assert observation.status_code is None
+    assert observation.access_result == AccessResult.AMBIGUOUS
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    assert "response" not in raw
+    assert raw["error"]["type"] == "RemoteProtocolError"
+
+
+def test_capture_keeps_the_fitting_prefix_when_a_single_chunk_exceeds_the_cap(tmp_path):
+    # Real HIGH bug found by a 2nd review pass: breaking out of the read
+    # loop WITHOUT first keeping the part of the oversized chunk that still
+    # fit meant a response delivered as one single big chunk (guaranteed
+    # with httpx.MockTransport, i.e. every test in this suite, and plausible
+    # for fast loopback targets) lost its ENTIRE body — 0 bytes stored —
+    # while still merely labeled "truncated" rather than empty.
+    huge_body = "x" * (_MAX_RESPONSE_BYTES + 1000)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=huge_body)
+
+    harness = _harness(tmp_path, handler)
+    observation = harness.capture(_action(), role=ObservationRole.MAIN)
+
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    assert raw["response"]["truncated"] is True
+    assert len(raw["response"]["body"]) == _MAX_RESPONSE_BYTES  # kept the fitting prefix, not nothing
+    assert raw["response"]["body"] == "x" * _MAX_RESPONSE_BYTES
+
+
+def test_capture_reports_marker_as_uncertain_not_absent_when_response_is_truncated(tmp_path):
+    # Real gap found by a 2nd review pass: a marker sitting past the
+    # truncation cutoff used to come back as a confident "absent" —
+    # indistinguishable from genuinely reading the whole body and not
+    # finding it, a false negative for a real leak caused by the byte cap.
+    marker = "sw-marker-past-the-cutoff"
+    body = ("x" * (_MAX_RESPONSE_BYTES + 1000)) + marker  # marker sits AFTER the cutoff
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body)
+
+    harness = _harness(tmp_path, handler)
+    observation = harness.capture(_action(), role=ObservationRole.MAIN, marker=marker)
+
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    assert raw["response"]["truncated"] is True
+    assert observation.response_contains_marker is None  # uncertain, NOT a confident False
+
+
+def test_capture_still_reports_marker_found_even_if_response_was_truncated(tmp_path):
+    # The other half of the fix above: a marker found WITHIN the part that
+    # was actually read is still a real positive signal, not downgraded to
+    # uncertain just because truncation happened elsewhere.
+    marker = "sw-marker-before-the-cutoff"
+    body = marker + ("x" * (_MAX_RESPONSE_BYTES + 1000))  # marker sits BEFORE the cutoff
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body)
+
+    harness = _harness(tmp_path, handler)
+    observation = harness.capture(_action(), role=ObservationRole.MAIN, marker=marker)
+
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    assert raw["response"]["truncated"] is True
+    assert observation.response_contains_marker is True
+
+
+def test_redact_url_query_leaves_url_byte_for_byte_unchanged_when_nothing_matches(tmp_path):
+    # Real LOW gap found by a 2nd review pass: re-encoding via
+    # urlencode(parse_qsl(...)) is not byte-exact (e.g. a bare flag with no
+    # "=value" gains one) — must not touch the URL at all when no declared
+    # sensitive key actually appears in it.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    harness = _harness(tmp_path, handler)
+    action = _action(
+        method="POST",
+        type=ActionType.TEST_DATA_CREATION,
+        target="https://target.example.com/path?flag&kept=c%20d",
+    )
+    observation = harness.capture(action, role=ObservationRole.MAIN, sensitive_body_keys={"token"})
+
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    assert raw["request"]["url"] == "https://target.example.com/path?flag&kept=c%20d"
+
+
+def test_capture_decodes_body_using_declared_charset_not_blind_utf8(tmp_path):
+    # Real LOW/informational gap found by a 2nd review pass: a response
+    # genuinely encoded as windows-1252 that HAPPENS to also be valid (but
+    # WRONG) UTF-8 used to be silently misdecoded with no signal anything
+    # was off — a regression from httpx's own charset-aware `.text`.
+    text = "café"
+    encoded = text.encode("windows-1252")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=encoded, headers={"Content-Type": "text/html; charset=windows-1252"}
+        )
+
+    harness = _harness(tmp_path, handler)
+    observation = harness.capture(_action(), role=ObservationRole.MAIN)
+
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    assert raw["response"]["body_encoding"] == "windows-1252"
+    assert raw["response"]["body"] == text

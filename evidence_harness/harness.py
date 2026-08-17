@@ -50,6 +50,7 @@ across everything for one execution (capture() calls, and eventually a real
 Cost Service / Execute loop), same as it shares one execution_id.
 """
 
+import base64
 import copy
 import hashlib
 import json
@@ -58,7 +59,8 @@ import secrets
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -87,6 +89,15 @@ _REDACTED_PLACEHOLDER = "<redacted>"
 # this is a documented, simple heuristic rather than a guess made silently.
 _QUERY_STRING_METHODS = {"GET", "HEAD", "DELETE"}
 
+# Hard cap on how much of a response body capture() will read into memory
+# and store per action — real gap found via review: an unbounded response
+# (whether from a misbehaving target or an adversarial one) had no ceiling,
+# risking an OOM crash on a single capture() call — a worse instance of the
+# exact "lose evidence to a crash" failure this module already fixed once
+# for httpx.InvalidURL. 10 MiB is generous for the JSON/HTML/text bodies
+# this project's real targets (Juice Shop etc.) actually return.
+_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+
 
 def _redact_headers(headers: Dict[str, str], sensitive_names: Set[str]) -> Dict[str, str]:
     return {
@@ -106,6 +117,102 @@ def _redact_body(body: Any, sensitive_keys: Optional[Set[str]]) -> Any:
     if not sensitive_keys or not isinstance(body, dict):
         return body
     return {key: (_REDACTED_PLACEHOLDER if key in sensitive_keys else value) for key, value in body.items()}
+
+
+def _redact_url_query(url: str, sensitive_keys: Optional[Set[str]]) -> str:
+    """Redacts the VALUES of any query-string parameter whose key is in
+    `sensitive_keys`, directly in a URL string. Real gap found via review:
+    `action.target` can carry its OWN query string, independent of
+    `action.parameters` — nothing previously redacted that at all, so a
+    secret embedded directly in the URL (e.g. a password-reset token, an
+    API key in a query param) was stored on disk in the clear with no way
+    for a caller to declare it sensitive (unlike body/params, which
+    `sensitive_body_keys` already covers). Only rewrites the query
+    component; scheme/host/path/fragment untouched. In the properly-gated
+    pipeline, Policy Service already denies any action whose `target`
+    carries its own query string (shared/policy.py) — this is defense in
+    depth for any caller that reaches capture() directly, not the primary
+    control.
+    """
+    if not sensitive_keys:
+        return url
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    if not any(key in sensitive_keys for key, _ in pairs):
+        # Real gap found via a 2nd independent review pass: re-encoding via
+        # urlencode(parse_qsl(...)) is not a byte-exact identity transform
+        # (e.g. a bare flag with no "=value" gains one, "%20" becomes "+",
+        # an unescaped "/" becomes "%2F") — decodes to the same logical
+        # values, but drifts from what was literally sent, exactly the kind
+        # of fidelity gap this whole mechanism exists to close. Returning
+        # the URL byte-for-byte untouched when nothing actually needs
+        # redacting (the common case whenever sensitive_keys doesn't happen
+        # to match this action's query) avoids that drift entirely; some
+        # cosmetic re-encoding of the OTHER params is accepted only once at
+        # least one key genuinely must be hidden.
+        return url
+    redacted_pairs = [
+        (key, _REDACTED_PLACEHOLDER if key in sensitive_keys else value) for key, value in pairs
+    ]
+    new_query = urlencode(redacted_pairs)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+
+
+def _charset_from_headers(headers: Dict[str, str]) -> Optional[str]:
+    """Extracts a declared charset from a Content-Type header value, e.g.
+    "text/html; charset=windows-1252" -> "windows-1252", or None if absent.
+    Real gap found via a 2nd independent review pass: _decode_response_body
+    used to always try UTF-8 first with no regard for what the response
+    itself declared — a body genuinely encoded as e.g. windows-1252 that
+    HAPPENS to also be valid (but wrong) UTF-8 would be silently
+    misdecoded with no signal anything was off, a real regression from
+    httpx's own charset-aware `.text`. Reads the header directly rather
+    than relying on httpx's internal encoding-detection state, since this
+    module reads the body itself via manual chunked iteration (for the
+    size cap) rather than through httpx's normal buffered-read path.
+    """
+    content_type = headers.get("content-type") or headers.get("Content-Type")
+    if not content_type:
+        return None
+    for part in content_type.split(";")[1:]:
+        key, _, value = part.strip().partition("=")
+        if key.lower() == "charset" and value:
+            return value.strip('"').strip("'")
+    return None
+
+
+def _decode_response_body(raw_bytes: bytes, declared_charset: Optional[str] = None) -> Tuple[str, str]:
+    """Returns (text, encoding_label) for a raw response body. Prefers
+    literal UTF-8 (encoding_label="utf-8") so the common JSON/HTML/text
+    case stays human-readable in the stored artifact; falls back to
+    base64 (encoding_label="base64") for anything that isn't valid UTF-8,
+    so the stored bytes are always a LOSSLESS, byte-exact representation
+    of what was actually received. Real gap found via review: relying on
+    httpx's own `.text` property silently substitutes U+FFFD for invalid
+    bytes with no record that this happened — the stored artifact would
+    then not actually be byte-faithful to the real response, undermining
+    the Oracle's hash re-verification (which only proves the artifact
+    hasn't changed SINCE capture, not that capture faithfully recorded the
+    real wire bytes in the first place).
+
+    `declared_charset` (from `_charset_from_headers`), if given and not
+    already "utf-8", is tried FIRST — real gap found via a 2nd independent
+    review pass: always trying UTF-8 first with no regard for what the
+    response itself declared meant a body genuinely encoded as e.g.
+    windows-1252 that HAPPENS to also be valid (but wrong) UTF-8 would be
+    silently misdecoded with no signal anything was off.
+    """
+    if declared_charset and declared_charset.lower() not in ("utf-8", "utf8"):
+        try:
+            return raw_bytes.decode(declared_charset), declared_charset.lower()
+        except (LookupError, UnicodeDecodeError):
+            pass  # unknown/wrong-declared charset — fall through to UTF-8/base64 below
+    try:
+        return raw_bytes.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        return base64.b64encode(raw_bytes).decode("ascii"), "base64"
 
 
 def _redact_json_path(data: Any, path_parts: List[str]) -> Any:
@@ -150,7 +257,15 @@ def _contains_marker(text: Optional[str], marker: Optional[str]) -> Optional[boo
         return None
     if not text:
         return False
-    return marker in text
+    # Case-insensitive — real gap found via review: the marker is always
+    # lowercase hex (secrets.token_hex), but a target that reflects it back
+    # with different casing (e.g. a case-folding DB collation, an
+    # upper-casing display layer) would otherwise make this return False
+    # even though the marker demonstrably crossed the boundary — a false
+    # NEGATIVE that silently under-reports a real leak as "not reproduced"
+    # instead of just not caring about a distinction (upper vs lower hex)
+    # that carries no real signal either way.
+    return marker.lower() in text.lower()
 
 
 class EvidenceHarness:
@@ -215,6 +330,18 @@ class EvidenceHarness:
         # re-login()-ing with a DIFFERENT token_header can remove the stale
         # one instead of leaving both attached forever.
         self._token_header_by_identity: Dict[str, str] = {}
+        # Real gap found via review: close() closed every cached client but
+        # never marked the instance itself as done — a later capture() call
+        # reusing an identity whose client was just closed crashed with an
+        # uncaught httpx.RuntimeError ("Cannot send a request, as the client
+        # has been closed"), NOT a subclass of httpx.HTTPError/InvalidURL —
+        # the exact same "narrow except clause misses a real failure mode"
+        # bug already fixed once for InvalidURL, recurring via a different
+        # exception type. capture() now raises a clear, own RuntimeError
+        # instead once this instance is closed, rather than either crashing
+        # confusingly or silently building a fresh client that quietly
+        # drops the identity's prior session state.
+        self._closed = False
 
     def _client_for(self, identity: str) -> httpx.Client:
         if self._injected_client is not None:
@@ -302,15 +429,48 @@ class EvidenceHarness:
         `sensitive_body_keys`: top-level keys in action.parameters whose
         VALUES must never be written to disk (e.g. {"password"} for a login
         action) — see _redact_body's docstring for why this is caller-
-        declared rather than guessed. Only affects the STORED transcript,
-        never the real request actually sent.
+        declared rather than guessed. ALSO covers a same-named query-string
+        parameter embedded directly in `action.target`'s own URL (real gap
+        found via review — see _redact_url_query's docstring). Only affects
+        the STORED transcript, never the real request actually sent.
+
+        The stored `request.url` is the REAL, resolved URL httpx actually
+        sent (`str(request.url)`), not `action.target` verbatim — real gap
+        found via review: for GET/HEAD/DELETE, httpx's `params=` REPLACES
+        (not merges) a URL's own query string, so if `action.target`
+        carried its own query string AND `action.parameters` was non-empty,
+        the artifact used to record `action.target` as "what was sent" even
+        though the actual outgoing request had a DIFFERENT query string —
+        a request/artifact fidelity mismatch that could make a real test
+        silently become a no-op while looking identical in the evidence.
+        (In the properly-gated pipeline this specific combination can't
+        arise — Policy Service already denies any action.target with its
+        own query string — but this fixes capture()'s OWN behavior as
+        defense in depth, not reliance on the caller having gated first.)
+
+        The response body is read with a hard size cap (`_MAX_RESPONSE_BYTES`)
+        to bound memory use per call, and decoded as UTF-8 when possible or
+        base64 (labeled via `body_encoding` in the stored artifact) when
+        not — see `_decode_response_body`'s docstring for why.
 
         Raises ExecutionStoppedError instead of sending anything if this
         instance was given a KillSwitch and it is currently STOPPED (SPEC:
         "Agent hoặc model không có quyền từ chối lệnh dừng") — see
         shared/kill_switch.py for the full design and its stated limits
         (this is a check-before-send guard, not a mid-flight abort).
+
+        Raises RuntimeError if this harness instance has already been
+        close()'d — real gap found via review: reusing an identity whose
+        client was already closed used to crash with an uncaught
+        httpx-internal RuntimeError, not caught by the except clause below
+        (same failure class as the httpx.InvalidURL bug fixed earlier, via
+        a different exception type).
         """
+        if self._closed:
+            raise RuntimeError(
+                f"EvidenceHarness cho execution '{self._execution_id}' đã close() — không thể "
+                "capture() thêm trên instance này. Tạo instance mới nếu cần tiếp tục thu bằng chứng."
+            )
         if self._kill_switch is not None and self._kill_switch.is_stopped:
             raise ExecutionStoppedError(
                 f"Execution '{self._execution_id}' đã STOPPED — capture() từ chối gửi request "
@@ -331,8 +491,12 @@ class EvidenceHarness:
 
         status_code: Optional[int] = None
         response_text: Optional[str] = None
+        body_encoding = "utf-8"
+        response_truncated = False
+        response_headers_raw: Dict[str, str] = {}
         received_response = False
         request_headers: Dict[str, str] = {}
+        sent_url = action.target  # overwritten below once build_request() resolves the real URL
         try:
             # build_request() (not the one-shot request()) so the actual
             # resolved headers — including any cookies httpx's jar attaches
@@ -346,10 +510,38 @@ class EvidenceHarness:
                 params=params,
                 json=request_body,
             )
+            sent_url = str(request.url)
             request_headers = _redact_headers(dict(request.headers), self._sensitive_header_names)
-            response = client.send(request)
-            status_code = response.status_code
-            response_text = response.text
+            # stream=True so the body can be read in bounded chunks (size
+            # cap below) instead of httpx buffering the entire body into
+            # memory unconditionally before we get any say in the matter.
+            response = client.send(request, stream=True)
+            try:
+                status_code = response.status_code
+                response_headers_raw = dict(response.headers)
+                chunks: List[bytes] = []
+                total_bytes = 0
+                for chunk in response.iter_bytes():
+                    remaining = _MAX_RESPONSE_BYTES - total_bytes
+                    if len(chunk) > remaining:
+                        # Real gap found via a 2nd independent review pass:
+                        # breaking here WITHOUT first keeping the part of
+                        # this chunk that still fits meant a response
+                        # delivered as one single big chunk (guaranteed with
+                        # httpx.MockTransport, used by this whole test
+                        # suite, and plausible for fast loopback targets)
+                        # lost its ENTIRE body — 0 bytes stored — while
+                        # still being labeled merely "truncated", not empty.
+                        chunks.append(chunk[:remaining])
+                        response_truncated = True
+                        break
+                    chunks.append(chunk)
+                    total_bytes += len(chunk)
+            finally:
+                response.close()
+            response_text, body_encoding = _decode_response_body(
+                b"".join(chunks), _charset_from_headers(response_headers_raw)
+            )
             received_response = True
         except (httpx.HTTPError, httpx.InvalidURL) as exc:
             # httpx.InvalidURL (e.g. a malformed port/host in action.target,
@@ -360,6 +552,20 @@ class EvidenceHarness:
             # artifact was written — the exact "lose evidence to a crash"
             # failure this method's own docstring promises never happens.
             error_info = {"type": type(exc).__name__, "message": str(exc)}
+            # Real gap found via a 2nd independent review pass: splitting
+            # the read into "headers" then "body" stages (for the size cap
+            # above) created a new state — status_code already read from a
+            # real response, but the body read then failed mid-stream
+            # (e.g. httpx.RemoteProtocolError on a truncated/reset
+            # connection) — that this reset never accounted for. Without
+            # this, a STALE status_code from the partial response leaked
+            # into the final observation even though received_response
+            # stayed False and the artifact correctly recorded only an
+            # "error" key — producing a confident GRANTED/DENIED
+            # classification (and a predicate group wrongly marked
+            # SATISFIED/UNSATISFIED instead of INSUFFICIENT_DATA) from
+            # evidence the artifact itself says failed.
+            status_code = None
 
         transcript: Dict[str, Any] = {
             "observation_id": observation_id,
@@ -369,7 +575,7 @@ class EvidenceHarness:
             "captured_at": captured_at.isoformat(),
             "request": {
                 "method": action.method,
-                "url": action.target,
+                "url": _redact_url_query(sent_url, sensitive_body_keys),
                 "params": _redact_body(params, sensitive_body_keys),
                 "body": _redact_body(request_body, sensitive_body_keys),
                 "headers": request_headers,
@@ -378,9 +584,16 @@ class EvidenceHarness:
         if received_response:
             transcript["response"] = {
                 "status_code": status_code,
-                "headers": _redact_headers(dict(response.headers), self._sensitive_header_names),
+                "headers": _redact_headers(response_headers_raw, self._sensitive_header_names),
                 "body": response_text,
+                "body_encoding": body_encoding,
             }
+            if response_truncated:
+                transcript["response"]["truncated"] = True
+                transcript["response"]["truncated_reason"] = (
+                    f"Response vượt {_MAX_RESPONSE_BYTES} bytes — dừng đọc để tránh hết bộ nhớ, "
+                    "phần thân lưu lại chỉ là phần đã đọc trước khi dừng."
+                )
         else:
             transcript["error"] = error_info
 
@@ -391,7 +604,10 @@ class EvidenceHarness:
         artifact_path = self._storage_dir / f"{observation_id}.json"
         artifact_path.write_bytes(raw_bytes)
 
-        request_text = json.dumps({"url": action.target, "params": params, "body": request_body})
+        # Uses sent_url (the REAL resolved URL), not action.target verbatim
+        # — same fidelity reasoning as the stored transcript above: marker
+        # detection must reflect what was actually on the wire.
+        request_text = json.dumps({"url": sent_url, "params": params, "body": request_body})
 
         # A connection failure (received_response=False) must yield None here,
         # not the same False a real empty/marker-free body would produce —
@@ -402,6 +618,16 @@ class EvidenceHarness:
         # no such distinction to make: the request was built and (attempted
         # to be) sent either way, so its content is always known.
         response_contains_marker = _contains_marker(response_text, marker) if received_response else None
+        if response_truncated and response_contains_marker is False:
+            # Real gap found via a 2nd independent review pass: a marker
+            # sitting past the truncation cutoff would otherwise come back
+            # as a confident "absent" — indistinguishable from genuinely
+            # reading the whole body and not finding it, a false negative
+            # for a real leak caused by the byte cap rather than evidence
+            # of absence. A definitive True is left alone: finding the
+            # marker in what WAS read is still a real positive signal
+            # regardless of truncation.
+            response_contains_marker = None
 
         return NormalizedObservation(
             observation_id=observation_id,
@@ -420,6 +646,29 @@ class EvidenceHarness:
             status_code=status_code,
             response_contains_marker=response_contains_marker,
             request_contains_marker=_contains_marker(request_text, marker),
+        )
+
+    def _rewrite_artifact_response_body(
+        self, observation: NormalizedObservation, raw: Dict[str, Any], new_body: str
+    ) -> NormalizedObservation:
+        """Overwrites the stored response body of an already-written
+        artifact with `new_body`, recomputes hash/size to match the new
+        bytes, and returns an updated observation copy. `raw` is the
+        already-parsed artifact dict (the caller already has it in hand,
+        no need to re-read the file). Shared by login()'s 3 body-rewrite
+        cases: successful extraction (redact just the known path), a null/
+        invalid extracted value (same, still a known path), and a failed
+        extraction (redact the WHOLE body — see login()'s docstring for why
+        these need different treatment).
+        """
+        raw["response"]["body"] = new_body
+        rewritten_bytes = json.dumps(raw, indent=2, sort_keys=True).encode("utf-8")
+        Path(observation.raw_evidence_ref).write_bytes(rewritten_bytes)
+        return observation.model_copy(
+            update={
+                "raw_evidence_hash": "sha256:" + hashlib.sha256(rewritten_bytes).hexdigest(),
+                "raw_evidence_size_bytes": len(rewritten_bytes),
+            }
         )
 
     def login(
@@ -468,6 +717,22 @@ class EvidenceHarness:
           stored artifact once extracted — real gap found via review: the
           whole point of that path is "this is the secret", but it was
           previously left in the clear in the login's own raw response body.
+        - If extraction FAILS (wrong path, login_action itself failed, a
+          typo'd path segment), the ENTIRE response body is wiped from the
+          artifact instead — real HIGH-severity gap found via review:
+          capture() below always writes the full, unredacted body to disk
+          FIRST; only a SUCCESSFUL extraction used to trigger the redaction
+          rewrite, so a failed extraction left a real secret sitting in the
+          clear on disk permanently, with the error message even pointing
+          the reader straight at the file containing it. Since a failed
+          extraction means we don't know exactly where (or whether) a real
+          secret sits in that body, failing safe means treating the whole
+          body as sensitive, not just the one path we couldn't confirm.
+        - If the value AT `token_json_path` resolves but is null, empty, or
+          not a string, this raises instead of silently building a broken
+          credential (e.g. literal header value "Bearer None") that would
+          then be sent on every subsequent request with no error anywhere
+          — real MEDIUM-severity gap found via review, see the check below.
 
         Captured as evidence (role=SETUP) like any other action either way,
         for reproducibility, and to keep this out of the 3 real predicate
@@ -498,11 +763,43 @@ class EvidenceHarness:
             for part in path_parts:
                 token = token[int(part)] if isinstance(token, list) else token[part]
         except (KeyError, TypeError, IndexError, ValueError) as exc:
+            # Fail SAFE: we don't know exactly where (or whether) a real
+            # secret sits in this body, so wipe ALL of it rather than leave
+            # a possibly-real secret in the clear forever — see this
+            # method's own docstring for the full reasoning.
+            self._rewrite_artifact_response_body(
+                observation, raw, f"{_REDACTED_PLACEHOLDER} (token_json_path extraction thất bại)"
+            )
             raise ValueError(
                 f"login() cho identity '{identity}': không trích được token theo đường dẫn "
-                f"'{token_json_path}' — {type(exc).__name__}: {exc}. Xem response thật tại "
-                f"{observation.raw_evidence_ref} (có thể login đã thất bại, hoặc path sai)."
+                f"'{token_json_path}' — {type(exc).__name__}: {exc}. Response body đã bị redact "
+                f"TOÀN BỘ trên đĩa (không rõ secret nằm ở đâu nên xoá phòng ngừa) — chỉ còn status "
+                f"code/headers tại {observation.raw_evidence_ref} để chẩn đoán (có thể login đã "
+                "thất bại, hoặc path sai)."
             ) from exc
+
+        if not isinstance(token, str) or not token:
+            # Real gap found via review: a resolved-but-null/empty/non-
+            # string value used to sail through silently, becoming a
+            # literal broken credential (e.g. "Bearer None") sent on every
+            # later request with no error anywhere — if this identity is
+            # the positive_control, every later request now gets denied,
+            # and SPEC's rule ("thiếu positive control thì không có
+            # CONFIRMED") means a real vulnerability could never be
+            # CONFIRMED, silently misattributed to "the system correctly
+            # requires auth" instead of "our own login was broken." The
+            # path DID resolve here (unlike the exception case above), so
+            # we know exactly where it is — redact just that, not the
+            # whole body.
+            self._rewrite_artifact_response_body(
+                observation, raw, json.dumps(_redact_json_path(parsed, path_parts))
+            )
+            raise ValueError(
+                f"login() cho identity '{identity}': giá trị tại đường dẫn '{token_json_path}' "
+                f"rỗng hoặc không phải string (kiểu thực tế: {type(token).__name__}) — từ chối dùng "
+                "làm token thật, tránh gửi credential hỏng (vd 'Bearer None') trên mọi request sau "
+                f"đó mà không có lỗi nào báo. Xem {observation.raw_evidence_ref}."
+            )
 
         previous_header = self._token_header_by_identity.get(identity)
         client = self._client_for(identity)
@@ -515,21 +812,15 @@ class EvidenceHarness:
         # Scrub the token out of the already-written login artifact — it
         # must not sit in the clear on disk once extracted. Hash/size are
         # recomputed since the file's actual bytes just changed.
-        redacted_body = json.dumps(_redact_json_path(parsed, path_parts))
-        raw["response"]["body"] = redacted_body
-        redacted_bytes = json.dumps(raw, indent=2, sort_keys=True).encode("utf-8")
-        Path(observation.raw_evidence_ref).write_bytes(redacted_bytes)
-        return observation.model_copy(
-            update={
-                "raw_evidence_hash": "sha256:" + hashlib.sha256(redacted_bytes).hexdigest(),
-                "raw_evidence_size_bytes": len(redacted_bytes),
-            }
+        return self._rewrite_artifact_response_body(
+            observation, raw, json.dumps(_redact_json_path(parsed, path_parts))
         )
 
     def close(self) -> None:
         if self._owns_clients:
             for client in self._clients.values():
                 client.close()
+        self._closed = True
 
     def __enter__(self) -> "EvidenceHarness":
         return self
