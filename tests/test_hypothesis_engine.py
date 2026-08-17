@@ -164,6 +164,21 @@ def test_engine_recognizes_non_bool_falsy_verifiable_representations(falsy_value
     assert result.reason == "lý do thật của LLM"
 
 
+@pytest.mark.parametrize("bad_reason", [["multiple", "reasons"], {"why": "no evidence"}, 42])
+def test_engine_handles_non_string_reason_cleanly_instead_of_crashing(bad_reason):
+    # Real gap found via independent review: `reason` comes straight from
+    # untrusted LLM JSON with no type check — a model returning a non-
+    # string reason (plausible when explaining more than one issue) made
+    # pydantic's strict str field raise an uncaught ValidationError instead
+    # of this module's own clean NOT_VERIFIABLE result.
+    response = json.dumps({"verifiable": False, "reason": bad_reason})
+    engine = HypothesisEngine(FakeLLMClient(responses=[response]))
+    result = engine.generate_hypothesis(_signal())
+
+    assert result.status == HypothesisStatus.NOT_VERIFIABLE
+    assert "sai kiểu" in result.reason
+
+
 @pytest.mark.parametrize("truthy_value", ["true", "True", 1])
 def test_engine_recognizes_non_bool_truthy_verifiable_representations(truthy_value):
     response = json.dumps(

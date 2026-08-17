@@ -114,3 +114,68 @@ def test_generate_raises_clean_runtime_error_on_non_json_200_response(monkeypatc
     client = OpenAICompatibleLLMClient()
     with pytest.raises(RuntimeError, match="không đúng format OpenAI chat completions"):
         client.generate("hello prompt")
+
+
+def test_generate_raises_clean_runtime_error_when_content_is_null(monkeypatch):
+    # Real gap found via independent review: a spec-compliant response
+    # where the assistant message carries content=null (e.g. a tool-call-
+    # only message, or a provider quirk) had the key PRESENT with value
+    # None — dict access succeeded with no exception, so generate() used
+    # to silently return None instead of a string, crashing every
+    # downstream caller (strip_markdown_json_fence) with an unrelated,
+    # confusing TypeError instead of this module's own clean RuntimeError.
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": None}}]},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    client = OpenAICompatibleLLMClient()
+    with pytest.raises(RuntimeError, match="không phải string"):
+        client.generate("hello prompt")
+
+
+def test_generate_raises_clean_runtime_error_on_malformed_base_url(monkeypatch):
+    # Real gap found via independent review: httpx.InvalidURL (e.g. from a
+    # bad port, or a stray control character from a copy-pasted .env value)
+    # is NOT a subclass of httpx.HTTPError, so it wasn't caught by any of
+    # cli.py's `except (RuntimeError, httpx.HTTPError)` handlers — crashed
+    # with a raw traceback instead of this module's clean failure path.
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com:not-a-port/v1")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    client = OpenAICompatibleLLMClient()
+    with pytest.raises(RuntimeError, match="LLM_BASE_URL không hợp lệ"):
+        client.generate("hello prompt")
+
+
+def test_base_url_strips_stray_whitespace_and_newlines(monkeypatch):
+    # A trailing newline/CR in LLM_BASE_URL is a realistic .env copy-paste
+    # mistake and would otherwise trigger httpx.InvalidURL.
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1/\n")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    captured = {}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["url"] = url
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    client = OpenAICompatibleLLMClient()
+    client.generate("hello prompt")
+    assert captured["url"] == "https://example.com/v1/chat/completions"

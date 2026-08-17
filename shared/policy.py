@@ -97,7 +97,13 @@ def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
         # outright, instead of silently falling back to matching path only
         # (that's exactly the vulnerability that was fixed).
         return False
-    if action_url.scheme != template_url.scheme:
+    if action_url.scheme.lower() != template_url.scheme.lower():
+        # .lower() on both sides — real nitpick found via independent
+        # review: URL schemes are case-insensitive per RFC 3986, but this
+        # compared them case-sensitively while netloc (below) was already
+        # lowercased. Fails SAFE as-is (a legitimate "HTTPS://..." action
+        # was wrongly DENIED, not wrongly allowed), so not a bypass, but
+        # worth fixing for correctness rather than leaving an inconsistency.
         return False
     if action_url.netloc.lower() != template_url.netloc.lower():
         return False

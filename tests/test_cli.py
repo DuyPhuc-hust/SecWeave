@@ -529,6 +529,55 @@ def test_cli_hypothesize_missing_source_file_returns_error(capsys):
     assert "không tìm thấy source file" in captured.err
 
 
+def test_cli_hypothesize_source_pointing_at_a_directory_fails_cleanly(capsys, tmp_path):
+    # Real gap found via independent review: only FileNotFoundError was
+    # caught — --source pointing at a directory (a realistic CLI mistake,
+    # e.g. a mistyped path) crashed with an uncaught IsADirectoryError
+    # instead of this command's clean failure path.
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--source",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không đọc được source file" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_hypothesize_source_with_non_utf8_content_fails_cleanly(capsys, tmp_path):
+    binary_file = tmp_path / "binary.py"
+    binary_file.write_bytes(b"\xff\xfe\x00\x01not valid utf-8")
+
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--source",
+            str(binary_file),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không phải text UTF-8" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_cli_hypothesize_agent_mode_batches_all_signals_into_one_wait(
     capsys, monkeypatch, tmp_path
 ):

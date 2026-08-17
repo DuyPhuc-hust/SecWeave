@@ -90,7 +90,7 @@ class HypothesisEngine:
 
     def parse_response(self, raw_output: str, signal: NormalizedSignal) -> HypothesisResult:
         try:
-            data = json.loads(strip_markdown_json_fence(raw_output))
+            data = json.loads(strip_markdown_json_fence(raw_output, expected_keys={"verifiable"}))
         except json.JSONDecodeError:
             return HypothesisResult(
                 status=HypothesisStatus.NOT_VERIFIABLE,
@@ -115,7 +115,21 @@ class HypothesisEngine:
 
         if not is_truthy(data["verifiable"]):
             reason = data.get("reason") or "LLM đánh giá tín hiệu không đủ để lập giả thuyết"
-            return HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, reason=reason)
+            try:
+                return HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, reason=reason)
+            except ValidationError as exc:
+                # Real gap found via independent review: `reason` comes
+                # straight from untrusted LLM JSON with no type check — a
+                # model returning {"reason": ["multiple", "reasons"]}
+                # (plausible when explaining more than one issue) made
+                # pydantic's strict str field raise ValidationError here,
+                # uncaught by any surrounding handler (cli.py only catches
+                # RuntimeError/httpx.HTTPError around this call) — a raw
+                # traceback instead of this module's own clean failure mode.
+                return HypothesisResult(
+                    status=HypothesisStatus.NOT_VERIFIABLE,
+                    reason=f"LLM output có field 'reason' sai kiểu (không phải string): {exc}",
+                )
 
         missing = [field for field in REQUIRED_FIELDS if not data.get(field)]
         if missing:

@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from shared.cost import check_planned_action_cap
 from shared.models.action import ActionPlan, ActionSpec, ActionType
 
@@ -32,7 +35,15 @@ def test_plan_exceeding_cap_is_denied():
     assert decision.cap == 5
 
 
-def test_empty_plan_is_allowed():
-    decision = check_planned_action_cap(_plan_with_n_actions(0), cap=5)
-    assert decision.allowed is True
-    assert decision.planned_action_count == 0
+def test_empty_plan_cannot_be_constructed():
+    # Real gap found via independent review: an empty ActionPlan used to be
+    # constructible, making check_plan()'s all(...) over zero checks
+    # vacuously True ("approved") and check_planned_action_cap's count=0
+    # trivially within any cap — "approved, 0 actions" is never a
+    # meaningful state to report as safe. ActionPlan.actions now requires
+    # min_length=1, so this can't even be constructed in the first place —
+    # same "an ambiguous/empty state must never look identical to a
+    # verified-safe one" principle already applied to PlanCheckResult/
+    # CostDecision's own consistency validators.
+    with pytest.raises(ValidationError):
+        _plan_with_n_actions(0)

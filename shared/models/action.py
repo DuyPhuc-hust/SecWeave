@@ -44,7 +44,17 @@ class ActionSpec(BaseModel):
 
 class ActionPlan(BaseModel):
     hypothesis_id: str
-    actions: List[ActionSpec]
+    # min_length=1 — real gap found via independent review: an empty plan
+    # made check_plan()'s all(...) over zero checks vacuously True
+    # ("approved"), and check_planned_action_cap's count=0 is trivially
+    # within any cap — "approved, 0 actions" is never a meaningful state
+    # to report as safe, it should never be constructible in the first
+    # place. parse_plan() already only ever builds a non-empty ActionPlan
+    # today, so this is currently latent, not live — but the same "an
+    # ambiguous/empty state must never look identical to a verified-safe
+    # one" reasoning already applied to PlanCheckResult/CostDecision's new
+    # validators.
+    actions: List[ActionSpec] = Field(min_length=1)
 
 
 class ActionPlanStatus(str, Enum):
@@ -92,6 +102,25 @@ class PlanCheckResult(BaseModel):
     approved: bool
     checks: List[ActionCheckResult]
 
+    @model_validator(mode="after")
+    def _check_consistency(self) -> "PlanCheckResult":
+        # Real gap found via independent review: unlike ActionPlanResult/
+        # HypothesisResult (which already enforce their own status-vs-data
+        # consistency), this model let `approved` be constructed
+        # independently of `checks` — nothing stopped building a
+        # PlanCheckResult(approved=True, checks=[<a denied action>]).
+        # Today's only call site (exploit_agent/agent.py::check_plan)
+        # already computes this correctly, so this is inert now, but a
+        # safety-critical boolean must not be settable out of sync with the
+        # data it's supposed to summarize.
+        all_allowed = all(check.decision.allowed for check in self.checks)
+        if self.approved != all_allowed:
+            raise ValueError(
+                "approved phải khớp đúng: True chỉ khi TẤT CẢ checks đều allowed=True — "
+                "không được set approved khác với thực tế từng action."
+            )
+        return self
+
 
 class CostDecision(BaseModel):
     """Result of Cost Service (skeleton) — weekly plan W5: only counts the
@@ -104,6 +133,16 @@ class CostDecision(BaseModel):
     planned_action_count: int
     cap: int
 
+    @model_validator(mode="after")
+    def _check_consistency(self) -> "CostDecision":
+        expected_allowed = self.planned_action_count <= self.cap
+        if self.allowed != expected_allowed:
+            raise ValueError(
+                f"allowed phải khớp đúng planned_action_count ({self.planned_action_count}) so với "
+                f"cap ({self.cap}) — không được set allowed khác với so sánh thực tế."
+            )
+        return self
+
 
 class PlanReviewResult(BaseModel):
     """The single gate to use before treating an ActionPlan as safe to
@@ -115,3 +154,13 @@ class PlanReviewResult(BaseModel):
     approved: bool
     plan_check: PlanCheckResult
     cost_check: CostDecision
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> "PlanReviewResult":
+        expected_approved = self.plan_check.approved and self.cost_check.allowed
+        if self.approved != expected_approved:
+            raise ValueError(
+                "approved phải khớp đúng: True chỉ khi CẢ plan_check.approved VÀ cost_check.allowed "
+                "đều True — không được set approved khác với 2 điều kiện con."
+            )
+        return self

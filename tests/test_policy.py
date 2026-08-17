@@ -62,6 +62,18 @@ def test_same_path_different_scheme_is_denied():
     assert decision.allowed is False
 
 
+def test_scheme_comparison_is_case_insensitive():
+    # Real nitpick found via independent review: URL schemes are case-
+    # insensitive per RFC 3986, but this compared them case-sensitively
+    # while netloc was already lowercased — a legitimate "HTTPS://..."
+    # action used to be wrongly DENIED (fails safe, not a bypass, but a
+    # real inconsistency worth fixing).
+    authorization = sample_authorization(allowed_actions=[ALLOWED_ENTRY])
+    action = _action(target="HTTPS://staging.example.com/api/objects/42")
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is True
+
+
 def test_allowlist_entry_missing_host_never_matches():
     # A misconfigured entry (missing host, the old path-only shape) must be
     # denied outright, not silently fall back to matching path only — that's

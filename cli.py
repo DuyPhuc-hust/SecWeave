@@ -93,9 +93,35 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
     source_snippet = None
     if args.source:
         try:
-            source_snippet = Path(args.source).read_text()
+            # encoding="utf-8" explicit — real gap found by a 2nd
+            # independent review pass verifying this fix: without it,
+            # read_text() defaults to locale.getpreferredencoding(False),
+            # not UTF-8, so on a non-UTF-8-locale environment (e.g. a
+            # minimal container with no locale configured — a realistic
+            # deployment target given this project ingests CI/CD-produced
+            # reports) this could either wrongly reject a genuinely valid
+            # UTF-8 file, or silently decode non-UTF-8 bytes under some
+            # other codec that never raises, feeding corrupted content into
+            # the LLM prompt with the UnicodeDecodeError handler below
+            # never firing at all.
+            source_snippet = Path(args.source).read_text(encoding="utf-8")
         except FileNotFoundError:
             print(f"error: không tìm thấy source file '{args.source}'", file=sys.stderr)
+            return 1
+        except OSError as exc:
+            # Real gap found via independent review: only FileNotFoundError
+            # was caught — realistic misuse like --source pointing at a
+            # DIRECTORY (IsADirectoryError) or an unreadable file
+            # (PermissionError) crashed with a raw traceback instead of
+            # this command's otherwise-clean failure path. Both are OSError
+            # subclasses, caught together here.
+            print(f"error: không đọc được source file '{args.source}': {exc}", file=sys.stderr)
+            return 1
+        except UnicodeDecodeError as exc:
+            # A binary/non-UTF8 file is equally realistic --source misuse
+            # (e.g. accidentally pointing at a compiled artifact) and isn't
+            # an OSError, so needs its own clean handling.
+            print(f"error: source file '{args.source}' không phải text UTF-8: {exc}", file=sys.stderr)
             return 1
 
     try:

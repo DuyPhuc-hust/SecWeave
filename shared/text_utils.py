@@ -1,5 +1,6 @@
+import json
 import re
-from typing import Any
+from typing import Any, Iterable, Optional
 
 _FALSY_STRINGS = {"false", "0", "no", "null", "none", ""}
 
@@ -23,18 +24,67 @@ def is_truthy(value: Any) -> bool:
     return bool(value)
 
 
-def strip_markdown_json_fence(text: str) -> str:
+def strip_markdown_json_fence(text: str, expected_keys: Optional[Iterable[str]] = None) -> str:
     """LLMs often wrap JSON in ```json ... ``` even when the prompt asked for
     plain JSON — some models also add explanatory prose before/after the
-    fence instead of just the fenced JSON. Finds the first fence anywhere in
-    the response; if there is no fence at all, returns the text unchanged —
-    doesn't try to guess/fix other kinds of malformed JSON, so a genuine JSON
-    error is still reported correctly instead of being masked.
+    fence instead of just the fenced JSON. If there is no fence at all,
+    returns the text unchanged — doesn't try to guess/fix other kinds of
+    malformed JSON, so a genuine JSON error is still reported correctly
+    instead of being masked.
 
     Shared by every engine that parses JSON output from an LLM (Hypothesis
     Engine, Exploit Agent, ...) — not specific to any one engine.
+
+    `expected_keys` (e.g. `{"verifiable"}` for Hypothesis Engine,
+    `{"plannable"}` for Exploit Agent): when given, prefers the LAST fence
+    whose parsed JSON is an object containing at least one of these keys —
+    resolving ambiguity using information the CALLER already has (what
+    shape its own real answer takes), rather than guessing from fence
+    position alone, which independent review found is not reliable in
+    either direction (see history below). Falls back to the position-only
+    heuristic when no fence's keys match (or `expected_keys` isn't given).
+
+    History of real gaps found via 2 rounds of independent review, both now
+    closed by the `expected_keys` mechanism above:
+    - Originally always took the FIRST fence unconditionally. A model can
+      legitimately quote suspicious text it noticed in untrusted input
+      (e.g. a hypothesis prompt's `source_snippet`, which the prompt itself
+      warns may contain adversarial content) BEFORE giving its real,
+      considered answer — a fake fence first, real answer second, had the
+      fake one extracted.
+    - The first fix (prefer the LAST fence that merely parses as valid
+      JSON, on the theory that "final answer last" is the common LLM
+      convention) just moved the failure to the OPPOSITE ordering: a real
+      answer first, followed by an unrelated-but-also-valid-JSON reference
+      example or illustration fence, had the trailing irrelevant block
+      win instead. Neither fence *position* is a reliable signal on its
+      own — whether a fence actually contains the field names the caller
+      is looking for is.
     """
-    match = _FENCE_PATTERN.search(text)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
+    matches = list(_FENCE_PATTERN.finditer(text))
+    if not matches:
+        return text.strip()
+
+    parsed_candidates = []
+    for match in matches:
+        candidate = match.group(1).strip()
+        try:
+            parsed: Any = json.loads(candidate)
+        except json.JSONDecodeError:
+            parsed = None
+        parsed_candidates.append((candidate, parsed))
+
+    if expected_keys:
+        expected_keys = set(expected_keys)
+        for candidate, parsed in reversed(parsed_candidates):
+            if isinstance(parsed, dict) and expected_keys & parsed.keys():
+                return candidate
+
+    # No expected_keys given, or none of the fences' parsed objects matched
+    # any of them — fall back to the last fence that's valid JSON at all,
+    # else the very last fence's raw text (so a genuine JSON error still
+    # surfaces normally rather than being masked).
+    for candidate, parsed in reversed(parsed_candidates):
+        if parsed is not None:
+            return candidate
+    return parsed_candidates[-1][0]

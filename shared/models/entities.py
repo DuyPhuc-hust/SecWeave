@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Organization(BaseModel):
@@ -56,3 +56,29 @@ class Authorization(BaseModel):
     cleanup_plan: Optional[str] = None
     expiry: Optional[datetime] = None
     revoked: bool = False
+
+    @field_validator("window_start", "window_end", "expiry")
+    @classmethod
+    def _require_timezone_aware(cls, value: Optional[datetime]) -> Optional[datetime]:
+        """Real gap found via independent review: a timezone-NAIVE datetime
+        used to be accepted silently, then made shared/policy.py::is_allowed
+        crash with an uncaught TypeError ("can't compare offset-naive and
+        offset-aware datetimes") instead of a clean deny — is_allowed()
+        always compares against datetime.now(timezone.utc). Currently
+        unreachable through this codebase's own call sites (cli.py only
+        ever sets approved_at via datetime.now(timezone.utc) and never sets
+        these 3 fields), but a landmine for the day real Gate 2/3 data
+        loads from an operator-authored file or API, where an omitted UTC
+        offset is a very natural mistake. Rejects outright rather than
+        silently assuming UTC — guessing wrong here means an authorization
+        window could look valid past its real expiry, or expire early,
+        which is exactly the kind of silent misinterpretation this
+        project's controls are designed to never allow.
+        """
+        if value is not None and value.tzinfo is None:
+            raise ValueError(
+                "datetime phải có timezone (vd offset '+00:00' hoặc 'Z') — thiếu timezone dễ bị "
+                "hiểu nhầm giữa giờ địa phương và UTC, và is_allowed() luôn so sánh bằng "
+                "datetime.now(timezone.utc)."
+            )
+        return value

@@ -97,3 +97,42 @@ def test_authorization_valid_target_authorization():
 def test_authorization_missing_field():
     with pytest.raises(ValidationError):
         Authorization(id="auth_3", layer=AuthorizationLayer.EXECUTION_RELEASE)
+
+
+def test_authorization_rejects_timezone_naive_expiry():
+    # Real gap found via independent review: a naive datetime used to be
+    # accepted silently here, then made shared/policy.py::is_allowed crash
+    # with an uncaught TypeError (comparing offset-naive vs offset-aware)
+    # instead of a clean deny — is_allowed() always compares against
+    # datetime.now(timezone.utc).
+    with pytest.raises(ValidationError):
+        Authorization(
+            id="auth_4",
+            layer=AuthorizationLayer.TARGET_AUTHORIZATION,
+            approved_by="owner",
+            approved_at=datetime.now(timezone.utc),
+            expiry=datetime(2026, 8, 20, 10, 0, 0),  # no tzinfo
+        )
+
+
+@pytest.mark.parametrize("field", ["window_start", "window_end", "expiry"])
+def test_authorization_rejects_timezone_naive_on_every_datetime_field(field):
+    with pytest.raises(ValidationError):
+        Authorization(
+            id="auth_5",
+            layer=AuthorizationLayer.TARGET_AUTHORIZATION,
+            approved_by="owner",
+            approved_at=datetime.now(timezone.utc),
+            **{field: datetime(2026, 8, 20, 10, 0, 0)},
+        )
+
+
+def test_authorization_accepts_timezone_aware_expiry():
+    auth = Authorization(
+        id="auth_6",
+        layer=AuthorizationLayer.TARGET_AUTHORIZATION,
+        approved_by="owner",
+        approved_at=datetime.now(timezone.utc),
+        expiry=datetime(2026, 8, 20, 10, 0, 0, tzinfo=timezone.utc),
+    )
+    assert auth.expiry.tzinfo is not None
