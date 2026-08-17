@@ -70,6 +70,35 @@ def test_stop_records_who_when_why_in_audit_log(tmp_path):
     assert "at" in entry  # "khi nào"
 
 
+def test_stop_raises_a_clean_runtime_error_when_the_audit_log_write_fails(tmp_path, monkeypatch):
+    # Real gap found via independent review: _append_audit_log had ZERO
+    # exception handling around its own open()/write() — a bare OSError
+    # (disk full, permission lost) used to escape uncaught with no context,
+    # the same "narrow except clause misses a real failure mode" class of
+    # bug already fixed once for CostService's own analogous write. The
+    # in-memory status must still have flipped correctly (checked below) —
+    # unlike CostService, a kill switch's in-memory flip happens BEFORE the
+    # durable write and must not be undone by a failed write, since this
+    # process's own is_stopped() must never depend on disk I/O succeeding.
+    ks = KillSwitch(execution_id="exec_1", storage_dir=str(tmp_path))
+    ks.start()
+
+    audit_log_path = str(ks._audit_log_path)
+    real_open = open
+
+    def _broken_open(path, mode="r", *args, **kwargs):
+        if "a" in mode and str(path) == audit_log_path:
+            raise OSError("simulated disk failure")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", _broken_open)
+
+    with pytest.raises(RuntimeError):
+        ks.stop(source=StopSource.OPERATOR, reason="disk is full")
+
+    assert ks.status == ExecutionStatus.STOPPED  # in-memory flip still happened
+
+
 def test_stop_when_cleanup_raises_still_transitions_to_stopped_and_logs_failure(tmp_path):
     def _broken_cleanup():
         raise RuntimeError("cleanup target unreachable")
@@ -335,6 +364,62 @@ def test_recovery_fails_safe_to_stopped_when_the_audit_log_has_a_corrupted_line(
     # read_audit_log() itself must not raise either — it should just skip
     # the unparseable line rather than making the log permanently unreadable.
     assert len(ks2.read_audit_log()) == 1
+
+
+def test_recovery_fails_safe_to_stopped_on_a_genuine_sequence_tie(tmp_path):
+    # Real gap found via independent review: `sequence` is a LOCAL counter
+    # per instance, recovered from "current max in the log" — not a
+    # globally unique counter shared across instances. Two different
+    # KillSwitch instances (e.g. this process's own instance auto-stopping
+    # via CostService, racing an independent `secweave kill` CLI
+    # invocation) can each recover the SAME last-known sequence and
+    # independently compute the SAME next value — exactly the ambiguity
+    # `sequence` was invented to eliminate, recurring one layer up. Picking
+    # via plain max() used to silently break the tie by PHYSICAL FILE
+    # ORDER, correlated with nothing meaningful. Simulated here by directly
+    # writing 2 entries that tie on sequence — a resume and a stop, so the
+    # "which one wins" question actually matters (RUNNING vs STOPPED).
+    execution_id = "exec_sequence_tie"
+    ks1 = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    ks1.start()  # sequence=1
+
+    audit_log_path = ks1._audit_log_path
+    with open(audit_log_path, "a", encoding="utf-8") as f:
+        f.write(
+            '{"event": "resume", "execution_id": "exec_sequence_tie", "sequence": 2, '
+            '"at": "2026-08-17T00:00:00Z", "actor": "owner"}\n'
+        )
+        f.write(
+            '{"event": "stop", "execution_id": "exec_sequence_tie", "sequence": 2, '
+            '"at": "2026-08-17T00:00:01Z", "source": "operator", "reason": "racing stop", '
+            '"cleanup_status": "skipped"}\n'
+        )
+
+    ks2 = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    assert ks2.status == ExecutionStatus.STOPPED  # fail safe on the ambiguous tie, not RUNNING
+    assert ks2._sequence == 2  # still advances past the tied entries, doesn't collide with them again
+
+
+def test_refresh_also_fails_safe_to_stopped_on_a_genuine_sequence_tie(tmp_path):
+    execution_id = "exec_sequence_tie_refresh"
+    ks = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    ks.start()  # sequence=1
+    assert ks.status == ExecutionStatus.RUNNING
+
+    audit_log_path = ks._audit_log_path
+    with open(audit_log_path, "a", encoding="utf-8") as f:
+        f.write(
+            '{"event": "resume", "execution_id": "exec_sequence_tie_refresh", "sequence": 2, '
+            '"at": "2026-08-17T00:00:00Z", "actor": "owner"}\n'
+        )
+        f.write(
+            '{"event": "stop", "execution_id": "exec_sequence_tie_refresh", "sequence": 2, '
+            '"at": "2026-08-17T00:00:01Z", "source": "operator", "reason": "racing stop", '
+            '"cleanup_status": "skipped"}\n'
+        )
+
+    ks.refresh()
+    assert ks.status == ExecutionStatus.STOPPED  # a live instance must also fail safe on refresh()
 
 
 def test_stop_from_prepared_before_start_is_allowed_and_logged(tmp_path):

@@ -13,9 +13,9 @@ from evidence_harness.harness import EvidenceHarness
 from exploit_agent.agent import ExploitAgent
 from hypothesis_engine.engine import HypothesisEngine
 from hypothesis_engine.signal_normalizer.orchestrator import SignalNormalizer
-from shared.cost import CostCapExceededError, CostService
+from shared.cost import CostService
 from shared.id_generator import generate_id
-from shared.kill_switch import AutomaticThresholdReason, ExecutionStoppedError, KillSwitch, StopSource
+from shared.kill_switch import AutomaticThresholdReason, KillSwitch, StopSource
 from shared.models.action import ActionPlanStatus
 from shared.models.entities import Authorization, AuthorizationLayer
 from shared.models.hypothesis import Hypothesis, HypothesisProvenance, HypothesisStatus
@@ -509,6 +509,32 @@ def cmd_execute(args: argparse.Namespace) -> int:
 
     execution_id = args.execution_id or generate_id("exec")
     kill_switch = KillSwitch(execution_id=execution_id, storage_dir=args.storage_dir)
+
+    # Real gap found via independent review: kill_switch.start() used to be
+    # called unconditionally, which crashes uncaught with a raw ValueError
+    # the moment an operator reuses an --execution-id whose PRIOR execute
+    # invocation ever succeeded even once (status would already be RUNNING,
+    # since nothing yet drives it to COMPLETED — see
+    # shared/models/kill_switch.py's ExecutionStatus docstring) or was
+    # STOPPED. Reusing an execution_id across multiple `execute` invocations
+    # is exactly how CostService's own cap is meant to accumulate real
+    # meaning (shared/cost.py: "a caller reusing one execution_id across
+    # more than one plan") — so this must be handled, not crash.
+    if kill_switch.status == ExecutionStatus.PREPARED:
+        kill_switch.start()
+    elif kill_switch.status == ExecutionStatus.STOPPED:
+        print(
+            f"error: execution '{execution_id}' đã STOPPED trước đó — không tự động tiếp tục "
+            "(SPEC §6.4 control #10: không tiếp tục sau stop-work trigger nếu chưa được cho phép "
+            f"chạy lại). Chạy `secweave resume --execution-id {execution_id} --storage-dir "
+            f"{args.storage_dir} --authorization-reference '...'` trước, rồi execute lại.",
+            file=sys.stderr,
+        )
+        return 1
+    # else: RUNNING — a prior `execute` for this execution_id already
+    # started it; continue accumulating against the same KillSwitch/
+    # CostService state rather than re-starting.
+
     cost_service = CostService(execution_id=execution_id, storage_dir=args.storage_dir, cap=args.cap)
     harness = EvidenceHarness(
         execution_id=execution_id,
@@ -518,7 +544,6 @@ def cmd_execute(args: argparse.Namespace) -> int:
         kill_switch=kill_switch,
         cost_service=cost_service,
     )
-    kill_switch.start()
 
     print(f"-> execution_id: {execution_id}")
     print(
@@ -532,7 +557,16 @@ def cmd_execute(args: argparse.Namespace) -> int:
         for check in review.plan_check.checks:
             try:
                 observation = harness.capture(check.action, role=ObservationRole.MAIN, identity=args.identity)
-            except (ExecutionStoppedError, CostCapExceededError) as exc:
+            except RuntimeError as exc:
+                # Real gap found via independent review: catching only
+                # (ExecutionStoppedError, CostCapExceededError) missed a
+                # bare RuntimeError from CostService.record_action()'s own
+                # write-failure path (shared/cost.py) or KillSwitch's
+                # audit-log write failure (shared/kill_switch.py, now
+                # wrapped there too) — both ARE RuntimeError subclasses
+                # already, so catching the base class covers all 3
+                # uniformly instead of missing the 2 that aren't explicitly
+                # named here.
                 stopped_reason = str(exc)
                 print(f"   DỪNG GIỮA CHỪNG: {exc}", file=sys.stderr)
                 break
@@ -586,6 +620,16 @@ def cmd_kill(args: argparse.Namespace) -> int:
             return 1
 
     kill_switch = KillSwitch(execution_id=args.execution_id, storage_dir=args.storage_dir)
+    # Captured BEFORE stop() (which immediately appends its own event) —
+    # real gap found via independent review: a mistyped/never-started
+    # --execution-id silently succeeds (PREPARED is a valid, intentional
+    # state to stop() from — "abort before start()" — so this can't just
+    # be rejected outright), printing output textually IDENTICAL to a real
+    # successful stop. An operator relying on this command for an
+    # unambiguous panic-stop confirmation deserves an explicit signal that
+    # nothing was actually running under this id.
+    had_prior_history = bool(kill_switch.read_audit_log())
+
     try:
         event = kill_switch.stop(
             source=source,
@@ -602,7 +646,31 @@ def cmd_kill(args: argparse.Namespace) -> int:
     if event.cleanup_status is not None:
         print(f"   cleanup (của riêng lệnh kill này, KHÔNG phải cleanup của process đang chạy): "
               f"{event.cleanup_status.value}")
+    if not had_prior_history:
+        print(
+            f"   CẢNH BÁO: execution '{args.execution_id}' KHÔNG có lịch sử nào trước lệnh này "
+            "(chưa từng start()) — kiểm tra lại --execution-id/--storage-dir có đúng không, có thể "
+            "đây là gõ nhầm chứ không phải dừng đúng execution đang chạy.",
+            file=sys.stderr,
+        )
 
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Cho phép 1 execution đã STOPPED quay lại RUNNING — đường DUY NHẤT
+    (SPEC §6.4 control #10) — để hoàn thiện vòng execute -> kill -> resume
+    -> execute lại mà `cmd_execute` giờ yêu cầu tường minh khi gặp STOPPED.
+    """
+    kill_switch = KillSwitch(execution_id=args.execution_id, storage_dir=args.storage_dir)
+    try:
+        kill_switch.resume(actor=args.actor, authorization_reference=args.authorization_reference)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"-> execution '{args.execution_id}': resume")
+    print(f"   status hiện tại: {kill_switch.status.value}")
     return 0
 
 
@@ -758,6 +826,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="BẮT BUỘC nếu --source=automatic_threshold — 1 trong 5 điều kiện SPEC §6.3",
     )
     kill_parser.set_defaults(func=cmd_kill)
+
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="Đưa 1 execution đã STOPPED quay lại RUNNING — đường DUY NHẤT (SPEC §6.4 control #10), "
+        "cần thiết để `execute` lại sau khi bị `kill`",
+    )
+    resume_parser.add_argument("--execution-id", required=True, help="execution_id cần resume")
+    resume_parser.add_argument(
+        "--storage-dir",
+        default=DEFAULT_EVIDENCE_STORAGE_DIR,
+        help="Phải TRÙNG --storage-dir đã dùng khi `execute`/`kill` execution này (mặc định: %(default)s)",
+    )
+    resume_parser.add_argument("--actor", help="Người/hệ thống thực hiện lệnh resume (tuỳ chọn)")
+    resume_parser.add_argument(
+        "--authorization-reference",
+        required=True,
+        help="Mô tả phê duyệt thật đã cho phép resume (vd 'owner re-approved qua email lúc ...') — "
+        "bắt buộc ở mức CLI để không resume() mà không ghi lại lý do thật, dù bản thân "
+        "KillSwitch.resume() cho phép để trống",
+    )
+    resume_parser.set_defaults(func=cmd_resume)
 
     return parser
 

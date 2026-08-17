@@ -166,7 +166,30 @@ class KillSwitch:
             return ExecutionStatus.STOPPED, max_sequence
         if not entries:
             return ExecutionStatus.PREPARED, 0
-        last = max(entries, key=lambda e: e["sequence"])
+        max_sequence = max(e["sequence"] for e in entries)
+        tied = [e for e in entries if e["sequence"] == max_sequence]
+        if len(tied) > 1:
+            # Real gap found via independent review: `sequence` is a LOCAL
+            # counter per instance, recovered from "current max in the log"
+            # at construction/refresh() time — it is NOT a globally unique
+            # counter shared across instances. Two DIFFERENT KillSwitch
+            # instances (e.g. this process's own instance auto-stopping via
+            # CostService, racing an independent `secweave kill` CLI
+            # invocation pointed at the same execution_id/storage_dir) can
+            # each recover the SAME "last known sequence" before either has
+            # written its own next event, and independently compute the
+            # SAME next value — the exact ambiguity `sequence` was invented
+            # to eliminate, just recurring one layer up (at assignment time
+            # across instances, not just at write time within one). Picking
+            # via `max(entries, key=...)` in that case silently broke the
+            # tie by PHYSICAL FILE ORDER (Python's max() keeps the first-
+            # seen maximal element) — correlated with nothing meaningful.
+            # Fail safe the same way a corrupted line already does: treat a
+            # genuine sequence tie as an unresolvable ambiguity and assume
+            # the worst, STOPPED — a kill switch must never silently prefer
+            # RUNNING when it cannot actually tell which transition is real.
+            return ExecutionStatus.STOPPED, max_sequence
+        last = tied[0]
         if last["event"] in (AuditEventType.START.value, AuditEventType.RESUME.value):
             status = ExecutionStatus.RUNNING
         else:
@@ -428,5 +451,30 @@ class KillSwitch:
         # NFS), where O_APPEND atomicity is not always guaranteed — local
         # disk only, matching every other artifact this codebase writes.
         line = event.model_dump_json(exclude_none=True) + "\n"
-        with open(self._audit_log_path, "a", encoding="utf-8") as f:
-            f.write(line)
+        try:
+            with open(self._audit_log_path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError as exc:
+            # Real gap found via independent review: this had ZERO exception
+            # handling — a bare OSError (disk full, permission lost) used to
+            # escape uncaught out of start()/stop()/resume() with no context.
+            # Deliberately NOT the same fix shape as CostService's analogous
+            # gap (write first, advance in-memory state only after success):
+            # by the time THIS is called, self._status has already flipped
+            # (start()/stop()/resume() all update _status INSIDE their own
+            # lock, before ever calling this) — for a kill switch specifically,
+            # that's the correct order regardless of persistence outcome, since
+            # this process's own in-memory `is_stopped` must never be blocked
+            # on a disk write succeeding. The real consequence of a failed
+            # write here is narrower but still real: a DIFFERENT instance
+            # (a restart, a separate `secweave kill`/`resume` invocation)
+            # reconstructing from this log later would have no record this
+            # transition ever happened. Re-raised as a clear RuntimeError so
+            # a caller sees that risk explicitly instead of a bare OSError.
+            raise RuntimeError(
+                f"KillSwitch cho execution '{self._execution_id}': không ghi được audit log cho "
+                f"event '{event.event.value}' — {type(exc).__name__}: {exc}. Trạng thái trong bộ "
+                f"nhớ của instance NÀY vẫn đã chuyển đúng (hiện tại: '{self._status.value}'), nhưng "
+                "một instance KHÁC (restart, `secweave kill`/`resume` riêng) đọc lại log sau này sẽ "
+                "không thấy transition này."
+            ) from exc

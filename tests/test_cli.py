@@ -1223,3 +1223,244 @@ def test_cli_execute_stops_mid_run_when_killed_by_a_separate_process(capsys, mon
     assert len(calls) == 1  # the 2nd action's real request was never sent
     assert "DỪNG GIỮA CHỪNG" in captured.err
     assert "STOPPED" in captured.out or "stopped" in captured.out.lower()
+
+
+def _execute_args(hypothesis_id, db_path, storage_dir, execution_id="exec_reuse_test", **overrides):
+    args = [
+        "execute",
+        "--hypothesis-id",
+        hypothesis_id,
+        "--allowed-action",
+        "GET http://host.docker.internal:3000",
+        "--cap",
+        str(overrides.pop("cap", 10)),
+        "--target-id",
+        "tgt_test",
+        "--target-revision-id",
+        "rev_test",
+        "--execution-id",
+        execution_id,
+        "--storage-dir",
+        storage_dir,
+        "--context-db",
+        db_path,
+    ]
+    return args
+
+
+def test_cli_execute_reusing_a_running_executions_id_does_not_crash(capsys, monkeypatch, tmp_path):
+    # Real HIGH-severity gap found via independent review: kill_switch.
+    # start() used to be called unconditionally — the SECOND `execute`
+    # invocation against an execution_id whose FIRST invocation already
+    # succeeded (leaving it RUNNING — nothing yet drives it to COMPLETED)
+    # crashed uncaught with a raw ValueError, even though reusing an
+    # execution_id across multiple `execute` calls is exactly how
+    # CostService's cap is meant to accumulate real meaning.
+    import httpx
+
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+    storage_dir = str(tmp_path / "evidence")
+
+    exit_code_1 = cli.main(_execute_args(hypothesis_id, db_path, storage_dir, cap=10))
+    assert exit_code_1 == 0
+    capsys.readouterr()
+
+    exit_code_2 = cli.main(_execute_args(hypothesis_id, db_path, storage_dir, cap=10))
+    captured_2 = capsys.readouterr()
+
+    assert exit_code_2 == 0
+    assert "Traceback" not in captured_2.err
+    assert len(calls) == 2  # both invocations' actions were actually sent
+
+
+def test_cli_execute_runtime_cost_cap_actually_refuses_the_real_request_on_reuse(
+    capsys, monkeypatch, tmp_path
+):
+    # Real gap found via independent review: the ORIGINAL test with "cost
+    # cap" in its name only exercised the PLANNING-time check (cap=0 fails
+    # before CostService is ever constructed) — the actual RUNTIME
+    # CostService enforcement path was unreachable through `execute` at
+    # all before execution_id reuse was fixed (see the test above), since
+    # a single invocation's own action count can never exceed its own cap.
+    # This proves the real path: 2 invocations sharing one execution_id,
+    # cap=1 — the 2nd invocation's action must be refused BEFORE a real
+    # request is sent, and the kill-switch must auto-stop.
+    import httpx
+
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+    storage_dir = str(tmp_path / "evidence")
+
+    exit_code_1 = cli.main(_execute_args(hypothesis_id, db_path, storage_dir, cap=1))
+    assert exit_code_1 == 0
+    assert len(calls) == 1
+    capsys.readouterr()
+
+    exit_code_2 = cli.main(_execute_args(hypothesis_id, db_path, storage_dir, cap=1))
+    captured_2 = capsys.readouterr()
+
+    assert exit_code_2 == 1
+    assert len(calls) == 1  # the 2nd invocation's action was refused BEFORE any real request
+    assert "DỪNG GIỮA CHỪNG" in captured_2.err
+    assert "stopped" in captured_2.out.lower()
+
+
+def test_cli_execute_refuses_to_continue_a_stopped_execution(capsys, monkeypatch, tmp_path):
+    import httpx
+
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+    storage_dir = str(tmp_path / "evidence")
+    execution_id = "exec_stopped_test"
+
+    exit_code_1 = cli.main(_execute_args(hypothesis_id, db_path, storage_dir, execution_id=execution_id))
+    assert exit_code_1 == 0
+    capsys.readouterr()
+
+    kill_exit_code = cli.main(
+        ["kill", "--execution-id", execution_id, "--storage-dir", storage_dir, "--source", "operator",
+         "--reason", "test stop"]
+    )
+    assert kill_exit_code == 0
+    capsys.readouterr()
+
+    exit_code_2 = cli.main(_execute_args(hypothesis_id, db_path, storage_dir, execution_id=execution_id))
+    captured_2 = capsys.readouterr()
+
+    assert exit_code_2 == 1
+    assert "resume" in captured_2.err.lower()
+    assert len(calls) == 1  # the 2nd invocation never sent anything
+
+
+def test_cli_resume_allows_execute_to_continue_after_a_kill(capsys, monkeypatch, tmp_path):
+    import httpx
+
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+    storage_dir = str(tmp_path / "evidence")
+    execution_id = "exec_resume_test"
+
+    cli.main(_execute_args(hypothesis_id, db_path, storage_dir, execution_id=execution_id))
+    capsys.readouterr()
+    cli.main(
+        ["kill", "--execution-id", execution_id, "--storage-dir", storage_dir, "--source", "operator",
+         "--reason", "test stop"]
+    )
+    capsys.readouterr()
+
+    resume_exit_code = cli.main(
+        [
+            "resume",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            storage_dir,
+            "--authorization-reference",
+            "owner re-approved via email 2026-08-17",
+        ]
+    )
+    resume_captured = capsys.readouterr()
+    assert resume_exit_code == 0
+    assert "resume" in resume_captured.out.lower()
+
+    exit_code_3 = cli.main(_execute_args(hypothesis_id, db_path, storage_dir, execution_id=execution_id))
+    captured_3 = capsys.readouterr()
+
+    assert exit_code_3 == 0
+    assert "Traceback" not in captured_3.err
+    assert len(calls) == 2  # 1st execute + the resumed execute both actually sent
+
+
+def test_cli_kill_warns_when_execution_id_has_no_prior_history(capsys, tmp_path):
+    # Real gap found via independent review: a mistyped/never-started
+    # --execution-id used to report full, indistinguishable success —
+    # output textually identical to a real successful stop.
+    exit_code = cli.main(
+        [
+            "kill",
+            "--execution-id",
+            "exec_never_started_typo",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--source",
+            "operator",
+            "--reason",
+            "oops, probably a typo",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0  # still succeeds (stopping from PREPARED is legitimate) — but with a warning
+    assert "CẢNH BÁO" in captured.err
+    assert "KHÔNG có lịch sử" in captured.err
+
+
+def test_cli_kill_no_warning_when_execution_actually_had_prior_history(capsys, tmp_path):
+    from shared.kill_switch import KillSwitch
+
+    storage_dir = str(tmp_path / "evidence")
+    ks = KillSwitch(execution_id="exec_real_history", storage_dir=storage_dir)
+    ks.start()
+
+    exit_code = cli.main(
+        [
+            "kill",
+            "--execution-id",
+            "exec_real_history",
+            "--storage-dir",
+            storage_dir,
+            "--source",
+            "operator",
+            "--reason",
+            "real stop",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "CẢNH BÁO" not in captured.err
