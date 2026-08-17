@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import httpx
+from pydantic import ValidationError
 
 from context_store.store import DEFAULT_DB_PATH, SecurityContextStore
 from evidence_harness.harness import EvidenceHarness
@@ -16,7 +17,7 @@ from hypothesis_engine.signal_normalizer.orchestrator import SignalNormalizer
 from shared.cost import CostService
 from shared.id_generator import generate_id
 from shared.kill_switch import AutomaticThresholdReason, KillSwitch, StopSource
-from shared.models.action import ActionPlanStatus
+from shared.models.action import ActionPlanResult, ActionPlanStatus
 from shared.models.entities import Authorization, AuthorizationLayer
 from shared.models.hypothesis import Hypothesis, HypothesisProvenance, HypothesisStatus
 from shared.models.kill_switch import ExecutionStatus
@@ -423,6 +424,69 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_frozen_plan(args: argparse.Namespace) -> Optional[ActionPlanResult]:
+    """Loads a plan PREVIOUSLY produced and reviewed by `secweave plan
+    --format json > file`, instead of asking the LLM to plan again. Real
+    gap found via manual end-to-end testing against a live target (not
+    caught by the earlier independent review, which never tested "run
+    `plan` then `execute` for the SAME hypothesis"): cmd_execute used to
+    ALWAYS call agent.plan() itself, a fresh, non-deterministic LLM call —
+    meaning the plan a human reviewed via `secweave plan` beforehand was
+    NOT necessarily what actually got executed. SPEC §5.1's own step
+    sequence (bước 5 "Plan & dry-run" produces "Action plan trong
+    allowlist" as its output, which bước 6 "Execute" then runs — no LLM
+    call happens between them) assumes the plan flows through unchanged;
+    `--plan-file` restores that property. Deliberately NOT stored in
+    Context Store — SPEC §4.6 explicitly scopes that store to knowledge
+    accumulated ACROSS runs (verified observations, rejected hypotheses,
+    rule versions), not an in-flight execution artifact — a plain file
+    matches how Authorization/the allowlist are already handled (operator-
+    supplied, not persisted) for the very same Gate-3-shaped reason.
+
+    Returns None (error already printed) on any failure. `args.hypothesis_id`
+    is cross-checked against the file's own hypothesis_id so a mismatched
+    file can't be loaded silently.
+    """
+    try:
+        plan_data = json.loads(Path(args.plan_file).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"error: không tìm thấy plan file '{args.plan_file}'", file=sys.stderr)
+        return None
+    except OSError as exc:
+        print(f"error: không đọc được plan file '{args.plan_file}': {exc}", file=sys.stderr)
+        return None
+    except json.JSONDecodeError as exc:
+        print(f"error: plan file '{args.plan_file}' không phải JSON hợp lệ: {exc}", file=sys.stderr)
+        return None
+
+    if not isinstance(plan_data, dict) or plan_data.get("hypothesis_id") != args.hypothesis_id:
+        print(
+            f"error: plan file '{args.plan_file}' được lập cho hypothesis_id "
+            f"'{plan_data.get('hypothesis_id') if isinstance(plan_data, dict) else '?'}', không khớp "
+            f"--hypothesis-id đã truyền ('{args.hypothesis_id}') — có thể đang dùng nhầm file plan.",
+            file=sys.stderr,
+        )
+        return None
+
+    plan_result_data = plan_data.get("plan_result")
+    if not isinstance(plan_result_data, dict):
+        print(f"error: plan file '{args.plan_file}' thiếu field 'plan_result'.", file=sys.stderr)
+        return None
+
+    try:
+        plan_result = ActionPlanResult(**plan_result_data)
+    except ValidationError as exc:
+        print(
+            f"error: plan file '{args.plan_file}' có 'plan_result' không đúng schema ActionPlanResult: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    print(f"-> Dùng lại plan ĐÃ ĐÓNG BĂNG từ '{args.plan_file}' (không gọi LLM lại).")
+    return plan_result
+
+
 def cmd_execute(args: argparse.Namespace) -> int:
     """Thực thi THẬT các action đã approve của 1 plan — nối KillSwitch/
     CostService/EvidenceHarness vào CLI, thứ 3 thành phần này trước đó chỉ
@@ -436,49 +500,73 @@ def cmd_execute(args: argparse.Namespace) -> int:
     .secweave/manual_test/identity_scenario_example.py. decide() vẫn được
     gọi ở cuối để verdict thật ra đúng INCONCLUSIVE khi thiếu 2 nhóm kia,
     thay vì giả vờ có thể kết luận CONFIRMED/NOT_REPRODUCED từ 1 identity.
+
+    `--plan-file`: dùng lại đúng plan đã `secweave plan` duyệt trước đó
+    thay vì gọi LLM lập plan MỚI (xem _load_frozen_plan's docstring cho lý
+    do). Không truyền cờ này vẫn hoạt động như trước — tiện cho test nhanh
+    1 bước — nhưng KHÔNG đảm bảo plan thực thi giống plan đã xem qua
+    `secweave plan` trước đó, vì LLM không xác định.
     """
-    try:
-        context_store = SecurityContextStore(db_path=args.context_db)
-    except sqlite3.Error as exc:
-        print(f"error: không mở được Context Store tại '{args.context_db}': {exc}", file=sys.stderr)
-        return 1
-
-    try:
-        record = context_store.get_hypothesis(args.hypothesis_id)
-    except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        context_store.close()
-
-    if record is None:
+    if args.plan_file:
+        plan_result = _load_frozen_plan(args)
+        if plan_result is None:
+            return 1
+        # review_plan()/check_plan()/check_cost() are pure Policy/Cost logic
+        # (shared/policy.py, shared/cost.py) — none of them ever touch
+        # self._llm_client, so no real LLM client is needed just to call
+        # them. Avoids requiring LLM_API_KEY (or a Claude Code session, in
+        # --llm-mode agent) at all for a run that's replaying an
+        # already-frozen plan and never calls the LLM again.
+        agent = ExploitAgent(llm_client=None)
+    else:
         print(
-            f"error: không tìm thấy hypothesis_id '{args.hypothesis_id}' (chỉ tra được bản ghi "
-            "status=hypothesis, không tra được not_verifiable)",
+            "CẢNH BÁO: không có --plan-file — plan sẽ được LLM lập MỚI ngay bây giờ, có thể KHÁC "
+            "plan đã xem qua `secweave plan` trước đó (LLM không xác định). Dùng --plan-file để đảm "
+            "bảo thực thi ĐÚNG plan đã duyệt.",
             file=sys.stderr,
         )
-        return 1
+        try:
+            context_store = SecurityContextStore(db_path=args.context_db)
+        except sqlite3.Error as exc:
+            print(f"error: không mở được Context Store tại '{args.context_db}': {exc}", file=sys.stderr)
+            return 1
 
-    try:
-        hypothesis = _load_stored_hypothesis(record)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        try:
+            record = context_store.get_hypothesis(args.hypothesis_id)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            context_store.close()
 
-    llm_client = _build_llm_client(
-        args,
-        agent_mode_message="Nhờ agent (Claude Code) đọc file prompt và trả JSON, rồi chờ Enter đúng 1 lần.",
-        api_mode_subject="Hypothesis",
-    )
-    if llm_client is None:
-        return 1
+        if record is None:
+            print(
+                f"error: không tìm thấy hypothesis_id '{args.hypothesis_id}' (chỉ tra được bản ghi "
+                "status=hypothesis, không tra được not_verifiable)",
+                file=sys.stderr,
+            )
+            return 1
 
-    agent = ExploitAgent(llm_client)
-    try:
-        plan_result = agent.plan(hypothesis)
-    except (RuntimeError, httpx.HTTPError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        try:
+            hypothesis = _load_stored_hypothesis(record)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+        llm_client = _build_llm_client(
+            args,
+            agent_mode_message="Nhờ agent (Claude Code) đọc file prompt và trả JSON, rồi chờ Enter đúng 1 lần.",
+            api_mode_subject="Hypothesis",
+        )
+        if llm_client is None:
+            return 1
+
+        agent = ExploitAgent(llm_client)
+        try:
+            plan_result = agent.plan(hypothesis)
+        except (RuntimeError, httpx.HTTPError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     if plan_result.status == ActionPlanStatus.NOT_PLANNABLE:
         print(f"NOT_PLANNABLE — {plan_result.reason}")
@@ -770,6 +858,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     execute_parser.add_argument(
         "--hypothesis-id", required=True, help="hypothesis_id đã lưu trong Context Store (từ `hypothesize`)"
+    )
+    execute_parser.add_argument(
+        "--plan-file",
+        help="Dùng lại ĐÚNG plan đã `secweave plan --format json > file` lập và duyệt trước đó, thay "
+        "vì gọi LLM lập plan MỚI (LLM không xác định — 2 lần gọi có thể ra 2 plan khác nhau cho cùng "
+        "1 hypothesis). Không truyền cờ này thì vẫn lập plan mới như trước, tiện cho test nhanh 1 "
+        "bước nhưng KHÔNG đảm bảo thực thi đúng plan đã xem qua `secweave plan`. Khớp SPEC §5.1: "
+        "'Plan & dry-run' phải feed thẳng plan sang 'Execute', không lập lại giữa chừng.",
     )
     execute_parser.add_argument(
         "--allowed-action",

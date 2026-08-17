@@ -1464,3 +1464,232 @@ def test_cli_kill_no_warning_when_execution_actually_had_prior_history(capsys, t
 
     assert exit_code == 0
     assert "CẢNH BÁO" not in captured.err
+
+
+# ----- `execute --plan-file` — real gap found via manual end-to-end testing
+# against a live target: cmd_execute used to ALWAYS call agent.plan() fresh,
+# a non-deterministic LLM call, so a plan a human reviewed via `secweave
+# plan` beforehand wasn't necessarily what actually got executed. -----
+
+
+def test_cli_execute_with_plan_file_never_calls_the_llm(capsys, monkeypatch, tmp_path):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    # Produce a real plan file via the actual `plan` command first.
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+    plan_exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert plan_exit_code == 0
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(capsys.readouterr().out, encoding="utf-8")
+
+    # Now point OpenAICompatibleLLMClient at something that CRASHES if ever
+    # called — proves --plan-file genuinely never touches the LLM again.
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _RaisingClient)
+
+    import httpx
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "ĐÓNG BĂNG" in captured.out
+    assert len(calls) == 1  # the frozen plan's 1 action was actually sent
+    assert "Traceback" not in captured.err
+
+
+def test_cli_execute_plan_file_rejects_mismatched_hypothesis_id(capsys, monkeypatch, tmp_path):
+    db_path = str(tmp_path / "test.db")
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": "hyp_this_one",
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {"hypothesis_id": "hyp_this_one", "actions": [
+                        {"type": "read_only", "method": "GET", "target": "http://x/y", "description": "d"}
+                    ]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            "hyp_a_different_one",
+            "--plan-file",
+            str(plan_file),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không khớp" in captured.err
+
+
+def test_cli_execute_plan_file_missing_file_fails_cleanly(capsys, tmp_path):
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            "hyp_x",
+            "--plan-file",
+            str(tmp_path / "does_not_exist.json"),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            str(tmp_path / "test.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không tìm thấy plan file" in captured.err
+
+
+def test_cli_execute_plan_file_invalid_json_fails_cleanly(capsys, tmp_path):
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text("not valid json {{{", encoding="utf-8")
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            "hyp_x",
+            "--plan-file",
+            str(plan_file),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            str(tmp_path / "test.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không phải JSON hợp lệ" in captured.err
+
+
+def test_cli_execute_plan_file_not_plannable_status_fails_cleanly(capsys, tmp_path):
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": "hyp_x",
+                "plan_result": {"status": "not_plannable", "plan": None, "reason": "no endpoint"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            "hyp_x",
+            "--plan-file",
+            str(plan_file),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            str(tmp_path / "test.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "NOT_PLANNABLE" in captured.out
+
+
+def test_cli_execute_plan_file_malformed_schema_fails_cleanly(capsys, tmp_path):
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps({"hypothesis_id": "hyp_x", "plan_result": {"status": "planned", "plan": {"actions": []}}}),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            "hyp_x",
+            "--plan-file",
+            str(plan_file),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            str(tmp_path / "test.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không đúng schema" in captured.err
