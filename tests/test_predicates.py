@@ -285,6 +285,25 @@ def test_evaluate_predicates_treats_hash_mismatch_as_insufficient_data(tmp_path)
     assert "Hash không khớp" in reason
 
 
+def test_evaluate_predicates_treats_null_byte_in_evidence_ref_as_insufficient_data_not_a_crash():
+    # Real gap found via independent review: Path.read_bytes() raises
+    # ValueError (not OSError) for a path containing an embedded NUL byte —
+    # `except OSError` alone let this escape uncaught, crashing the whole
+    # Oracle instead of degrading to INSUFFICIENT_DATA like every other
+    # unreadable-artifact case. Not reachable via the current
+    # EvidenceHarness (raw_evidence_ref is always a clean internally-
+    # generated path), but this project's hash-check exists specifically
+    # because stored evidence must be treated as possibly corrupted/
+    # tampered, so the read must fail safe regardless of exception type.
+    observation = _observation(role=ObservationRole.MAIN, raw_evidence_ref="bad\x00path")
+
+    results = evaluate_predicates([observation])
+    by_group = {r.group: r.status for r in results}
+    assert by_group["main"] == PredicateStatus.INSUFFICIENT_DATA
+    reason = next(r.reason for r in results if r.group == ObservationRole.MAIN)
+    assert "Không đọc được raw evidence" in reason
+
+
 def test_evaluate_predicates_treats_missing_raw_evidence_file_as_insufficient_data(tmp_path):
     observation = _observation_with_real_evidence(
         tmp_path, role=ObservationRole.DENIED_CONTROL, access_result=AccessResult.DENIED

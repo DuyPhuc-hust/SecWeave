@@ -28,10 +28,20 @@ def _hash_mismatch_reason(observation: NormalizedObservation) -> Optional[str]:
     runs, so a failure here surfaces as INSUFFICIENT_DATA — real gap found
     via independent review: this check did not exist anywhere in the
     codebase before, so a tampered artifact would sail through unnoticed.
+
+    Catches ValueError alongside OSError — a `raw_evidence_ref` containing
+    an embedded NUL byte (a corrupted or adversarially-crafted stored
+    observation, not something the current EvidenceHarness ever produces
+    itself, but this project's own hash-check exists precisely because
+    stored evidence must be treated as possibly tampered) makes
+    `Path.read_bytes()` raise `ValueError`, not `OSError` — the same
+    recurring "narrow except clause misses a real failure mode" class of
+    gap already fixed once for httpx.InvalidURL and once more for a
+    closed-client RuntimeError elsewhere in this project.
     """
     try:
         raw_bytes = Path(observation.raw_evidence_ref).read_bytes()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return f"Không đọc được raw evidence tại '{observation.raw_evidence_ref}': {exc}"
     recomputed = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
     if recomputed != observation.raw_evidence_hash:
