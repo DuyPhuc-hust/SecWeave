@@ -1,7 +1,7 @@
 import re
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from shared.models.action import ActionSpec, PolicyDecision
 from shared.models.entities import Authorization
@@ -27,6 +27,47 @@ def _path_template_to_regex(template: str) -> re.Pattern:
         for seg in segments
     ]
     return re.compile("".join(regex_parts))
+
+
+_MAX_DECODE_PASSES = 5
+
+
+def _decode_path_safely(path: str) -> Optional[str]:
+    """Percent-decodes a URL path before matching it against an allowlist
+    path template. Real bypass found via independent review: matching the
+    RAW (still percent-encoded) path let a segment like "%2e%2e%2fadmin"
+    satisfy a "{id}" placeholder's `[^/]+` regex (no literal "/" in the raw
+    text) — but httpx sends the raw encoded path unchanged on the wire, and
+    the real target (or any proxy in front of it) may decode+normalize it
+    into "/api/objects/../admin" -> "/api/admin", escaping the allowlisted
+    scope entirely. Returns None (caller must deny) if decoding (up to
+    _MAX_DECODE_PASSES rounds, to also catch double-encoding like
+    "%252e%252e%252fadmin" — a second real bypass an independent review
+    found in the first, single-pass version of this function) reveals a
+    "/" that wasn't literally present in the ORIGINAL raw path (an encoded
+    slash would change the segment structure the template was matched
+    against), a backslash (never legitimate here, and the exact separator
+    a Windows/IIS-style backend would treat as a path boundary — the
+    review's second finding), or a "."/".." segment (never legitimate for
+    a single {id}-style path segment). Denies outright if decoding hasn't
+    stabilized within _MAX_DECODE_PASSES rounds, rather than risk matching
+    against a still-partially-encoded string.
+    """
+    decoded = path
+    for _ in range(_MAX_DECODE_PASSES):
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    else:
+        return None
+    if decoded.count("/") != path.count("/"):
+        return None
+    if "\\" in decoded:
+        return None
+    if any(segment in (".", "..") for segment in decoded.split("/")):
+        return None
+    return decoded
 
 
 _PARAMS_CLAUSE_PREFIX = "params:"
@@ -178,7 +219,10 @@ def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
     if action_url.netloc.lower() != template_url.netloc.lower():
         return False
 
-    return bool(_path_template_to_regex(template_url.path).fullmatch(action_url.path))
+    decoded_path = _decode_path_safely(action_url.path)
+    if decoded_path is None:
+        return False
+    return bool(_path_template_to_regex(template_url.path).fullmatch(decoded_path))
 
 
 def is_allowed(

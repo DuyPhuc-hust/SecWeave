@@ -254,6 +254,90 @@ def test_null_parameter_value_never_satisfies_a_declared_pattern():
     assert decision.allowed is False
 
 
+def test_percent_encoded_traversal_segment_is_denied():
+    # HIGH severity real bug found via independent review: matching the RAW
+    # (still percent-encoded) path let "%2e%2e%2fadmin" satisfy a "{id}"
+    # placeholder's [^/]+ regex (no literal "/" in the raw text) — but
+    # httpx sends the raw encoded path unchanged on the wire, and the real
+    # target/any proxy in front of it may decode+normalize it into
+    # ".../api/objects/../admin" -> ".../api/admin", escaping the
+    # allowlisted scope entirely (same bypass class as the host-escape bug
+    # this module's docstring already calls "equivalent to SSRF", just via
+    # the path instead of the host).
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id}"]
+    )
+    action = _action(target="https://staging.example.com/api/objects/%2e%2e%2fadmin")
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_percent_encoded_slash_inside_an_id_segment_is_denied():
+    # A "%2f" inside what's supposed to be a single {id} segment decodes to
+    # a literal "/" — changing the path's real segment structure from what
+    # the raw-text regex match saw. Must be denied, not silently matched.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id}"]
+    )
+    action = _action(target="https://staging.example.com/api/objects/foo%2fbar")
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_percent_encoded_but_harmless_id_segment_is_still_allowed():
+    # The fix must not deny ordinary percent-encoded characters that decode
+    # to something harmless and still fit in a single path segment (e.g. an
+    # "@" in an email-shaped id) — only "/" and "."/".." segments are denied.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id}"]
+    )
+    action = _action(target="https://staging.example.com/api/objects/us%40er")
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is True
+
+
+def test_double_percent_encoded_traversal_segment_is_denied():
+    # Real bypass found via a second independent review of the fix above:
+    # single-pass unquote() only turns "%252e%252e%252fadmin" into
+    # "%2e%2e%2fadmin" — still not a literal "." /".." /"/" — so the
+    # original fix let a DOUBLE-encoded traversal segment straight through.
+    # A backend that decodes twice (a documented, real technique against
+    # old IIS/nginx configs, many WAFs, and some app frameworks) would
+    # still normalize this into an out-of-scope path.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id}"]
+    )
+    action = _action(target="https://staging.example.com/api/objects/%252e%252e%252Fadmin")
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_backslash_traversal_segment_is_denied():
+    # Real bypass found via the same second review: "..%5cadmin" decodes to
+    # "..\\admin" — not "/"-delimited (so the slash-count guard stays
+    # silent) and not literally ".." either (so the segment-equality check
+    # missed it too). A Windows/IIS-style backend treats "\\" as a path
+    # separator, so this is the same traversal class via a different
+    # separator character.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id}"]
+    )
+    action = _action(target="https://staging.example.com/api/objects/..%5cadmin")
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_double_percent_encoded_but_harmless_id_segment_is_still_allowed():
+    # The multi-pass decode must not deny an ordinary double-encoded
+    # harmless character either.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id}"]
+    )
+    action = _action(target="https://staging.example.com/api/objects/us%2540er")
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is True
+
+
 def test_action_with_query_string_smuggled_directly_in_target_is_denied():
     # Real bypass found via review: the parameters-check above only looks at
     # ActionSpec.parameters — a query string embedded directly in
