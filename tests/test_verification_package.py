@@ -289,6 +289,17 @@ def test_package_rejects_confirmed_verdict_with_an_unsatisfied_group():
         )
 
 
+def test_package_rejects_confirmed_verdict_with_a_required_group_missing_entirely():
+    # Real gap in the check above, found via independent review: it's
+    # vacuously TRUE for a predicate_results list simply missing a required
+    # group — nothing in [MAIN: satisfied] alone can be anything OTHER than
+    # satisfied, so a CONFIRMED package with no positive_control/
+    # denied_control result at all was accepted.
+    only_main = [PredicateResult(group=ObservationRole.MAIN, status=PredicateStatus.SATISFIED, reason="x")]
+    with pytest.raises(ValidationError):
+        VerificationPackage(**_base_package_kwargs(verdict=Verdict.CONFIRMED, predicate_results=only_main))
+
+
 def test_package_allows_inconclusive_verdict_even_when_predicate_results_is_empty():
     # The validator must be ONE-DIRECTIONAL (same reasoning as VerdictResult's
     # own validator) — an empty/incomplete predicate_results with a

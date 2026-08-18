@@ -23,7 +23,14 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from shared.models.action import ActionSpec
-from shared.models.observation import NormalizedObservation, PredicateResult, PredicateStatus, Verdict
+from shared.models.observation import (
+    REQUIRED_PREDICATE_GROUPS,
+    NormalizedObservation,
+    PredicateResult,
+    PredicateStatus,
+    Verdict,
+    predicate_results_cover_all_required_groups,
+)
 
 
 class Environment(str, Enum):
@@ -196,6 +203,29 @@ class VerificationPackage(BaseModel):
             raise ValueError(
                 "verdict=confirmed yêu cầu CẢ 3 nhóm predicate đều satisfied — không được set "
                 "verdict=confirmed khi predicate_results không thực sự chứng minh điều đó."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_predicate_results_cover_all_required_groups(self) -> "VerificationPackage":
+        # Real gap in the check above, found via independent review: it's
+        # vacuously TRUE for a predicate_results list that's simply missing
+        # a required group (e.g. only [MAIN, MAIN, MAIN], no
+        # positive_control/denied_control at all) — nothing in such a list
+        # can be anything OTHER than satisfied. Scoped to CONFIRMED only,
+        # same as the check above and for the same reason: an existing,
+        # deliberate test (test_package_allows_inconclusive_verdict_even_
+        # when_predicate_results_is_empty) establishes that a non-CONFIRMED
+        # package legitimately may have incomplete/empty predicate_results
+        # (e.g. a run that stopped before any observation existed) — only
+        # the CONFIRMED direction is the one SPEC treats as never acceptable.
+        if self.verdict == Verdict.CONFIRMED and not predicate_results_cover_all_required_groups(
+            self.predicate_results
+        ):
+            raise ValueError(
+                f"verdict=confirmed yêu cầu đúng 1 kết quả cho mỗi nhóm bắt buộc "
+                f"{sorted(g.value for g in REQUIRED_PREDICATE_GROUPS)} — nhận được: "
+                f"{sorted(r.group.value for r in self.predicate_results)}."
             )
         return self
 

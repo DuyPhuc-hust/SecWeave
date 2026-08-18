@@ -201,6 +201,28 @@ class PredicateResult(BaseModel):
     reason: str
 
 
+REQUIRED_PREDICATE_GROUPS = frozenset(
+    {ObservationRole.MAIN, ObservationRole.POSITIVE_CONTROL, ObservationRole.DENIED_CONTROL}
+)
+
+
+def predicate_results_cover_all_required_groups(results: "List[PredicateResult]") -> bool:
+    """Real gap found via independent review: VerdictResult/VerificationPackage's
+    own "CONFIRMED requires all groups satisfied" validators only ever checked
+    `all(r.status == SATISFIED for r in results)` — vacuously true for a list
+    that's missing a group entirely (e.g. only MAIN, no positive_control/
+    denied_control at all), since there's nothing in a shorter list to be
+    anything OTHER than satisfied. verdict_oracle/oracle.py::assemble_verdict()
+    already enforces "exactly these 3 groups, no duplicates" for every verdict
+    it produces — this reproduces that same check as an independent model-level
+    backstop for any OTHER code path that builds/reloads these models directly
+    (a refactor, a JSON reload, a hand-built fixture) without going through
+    assemble_verdict().
+    """
+    groups = [r.group for r in results]
+    return set(groups) == REQUIRED_PREDICATE_GROUPS and len(groups) == len(REQUIRED_PREDICATE_GROUPS)
+
+
 class Verdict(str, Enum):
     """SPEC §4.4.2 — exactly 3 possible verdicts. "Không có verdict thứ tư
     ... Nếu một tình huống không xếp được vào ba giá trị trên, đó là dấu
@@ -253,5 +275,36 @@ class VerdictResult(BaseModel):
             raise ValueError(
                 "verdict=confirmed yêu cầu CẢ 3 nhóm predicate đều satisfied — không được set "
                 "verdict=confirmed khi bất kỳ nhóm nào unsatisfied/insufficient_data."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_predicate_results_cover_all_required_groups(self) -> "VerdictResult":
+        # Real gap in the check above, found via independent review:
+        # `all(r.status == SATISFIED for r in results)` is vacuously TRUE
+        # for a list that's simply missing a required group (e.g. only
+        # [MAIN: satisfied], no positive_control/denied_control entries at
+        # all) — nothing in a shorter list can be anything OTHER than
+        # satisfied. assemble_verdict() (verdict_oracle/oracle.py) already
+        # requires exactly these 3 groups, no duplicates, as an input
+        # precondition for EVERY verdict it produces (not only CONFIRMED) —
+        # this reproduces that same invariant here as an independent
+        # model-level backstop, unconditional on verdict value, for any
+        # other code path that builds/reloads this model directly.
+        # Deliberately stricter here than VerificationPackage's equivalent
+        # check (that one is scoped to verdict==CONFIRMED only, since an
+        # incomplete/early-stopped run may legitimately produce a package
+        # with no predicate_results at all — SPEC §4.5's "execution record"
+        # fallback): VerdictResult's own docstring ties it specifically to
+        # assemble_verdict()'s output, which — via evaluate_predicates() —
+        # always produces exactly these 3 groups (even all
+        # INSUFFICIENT_DATA for zero observations), for every verdict it
+        # returns. There is no legitimate VerdictResult with an incomplete
+        # group set, confirmed and unconditional.
+        if not predicate_results_cover_all_required_groups(self.predicate_results):
+            raise ValueError(
+                f"predicate_results phải có đúng 1 kết quả cho mỗi nhóm bắt buộc "
+                f"{sorted(g.value for g in REQUIRED_PREDICATE_GROUPS)} — nhận được: "
+                f"{sorted(r.group.value for r in self.predicate_results)}."
             )
         return self

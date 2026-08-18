@@ -107,6 +107,25 @@ def test_verdict_result_rejects_confirmed_when_a_group_is_not_satisfied():
         VerdictResult(verdict=Verdict.CONFIRMED, reason="x", predicate_results=_all(S, U, S))
 
 
+def test_verdict_result_rejects_confirmed_when_a_required_group_is_missing_entirely():
+    # Real gap in the check above, found via independent review:
+    # all(r.status == SATISFIED for r in results) is vacuously TRUE for a
+    # list that's simply missing a required group — nothing in
+    # [MAIN: satisfied] alone can be anything OTHER than satisfied, so the
+    # original validator let this straight through despite having neither
+    # a positive_control nor a denied_control result at all.
+    from pydantic import ValidationError
+
+    from shared.models.observation import VerdictResult
+
+    with pytest.raises(ValidationError):
+        VerdictResult(
+            verdict=Verdict.CONFIRMED,
+            reason="x",
+            predicate_results=[_result(ObservationRole.MAIN, S)],
+        )
+
+
 def test_verdict_result_allows_inconclusive_even_when_all_groups_satisfied():
     # The validator must be ONE-DIRECTIONAL: assemble_verdict() can
     # legitimately return INCONCLUSIVE while every group is SATISFIED (the
