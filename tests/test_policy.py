@@ -154,6 +154,106 @@ def test_action_with_no_parameters_still_matches_entry_that_has_a_params_clause(
     assert decision.allowed is True
 
 
+def test_action_parameter_value_matching_declared_pattern_is_allowed():
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id} params:userId=^[0-9]+$"]
+    )
+    action = _action(parameters={"userId": "42"})
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is True
+
+
+def test_action_parameter_value_not_matching_declared_pattern_is_denied():
+    # The real gap this closes: checking only the parameter NAME let ANY
+    # value through for an already-allowed key. userId is on the allowlist,
+    # but its value here isn't the caller's own id — a name-only allowlist
+    # entry would have let this through.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id} params:userId=^[0-9]+$"]
+    )
+    action = _action(parameters={"userId": "42 OR 1=1"})
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_action_parameter_key_without_pattern_still_allows_any_value():
+    # Backward compatibility: a bare key (no "=regex") keeps the previous,
+    # name-only behaviour — existing allowlist strings written before this
+    # feature existed must keep working exactly as before.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id} params:userId"]
+    )
+    action = _action(parameters={"userId": "anything at all, no pattern declared"})
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is True
+
+
+def test_action_missing_a_pattern_constrained_parameter_is_still_allowed():
+    # A declared pattern constrains the value IF the key is present — it
+    # does not make the key mandatory (matches the no-params-required
+    # behaviour already established for name-only keys).
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id} params:userId=^[0-9]+$"]
+    )
+    action = _action(parameters={})
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is True
+
+
+def test_malformed_value_pattern_denies_outright():
+    # An invalid regex after "=" is a misconfiguration — fail safe (deny),
+    # same philosophy as test_malformed_params_clause_denies_outright.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id} params:userId=(unclosed"]
+    )
+    decision = is_allowed(_action(parameters={"userId": "42"}), authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_empty_pattern_after_equals_denies_outright():
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id} params:userId="]
+    )
+    decision = is_allowed(_action(parameters={"userId": "42"}), authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_bounded_repetition_quantifier_in_value_pattern_is_not_mangled():
+    # Real bug found via independent review: a naive comma-split cut
+    # "^[0-9]{1,10}$" (the single most natural regex for "N-digit id") into
+    # "^[0-9]{1" (a near-useless truncated pattern that compiles without
+    # error) plus a bogus extra allowlist key "10}$" mapped to "any value
+    # allowed" — corrupting the allowlist silently, no error surfaced.
+    authorization = sample_authorization(
+        allowed_actions=[
+            "GET https://staging.example.com/api/objects/{id} params:userId=^[0-9]{1,10}$"
+        ]
+    )
+    matching = _action(parameters={"userId": "42"})
+    assert is_allowed(matching, authorization, now=NOW).allowed is True
+
+    too_long = _action(parameters={"userId": "12345678901"})
+    assert is_allowed(too_long, authorization, now=NOW).allowed is False
+
+    # The bogus leftover key from the old bug ("10}$") must not exist as a
+    # separately-allowed, unconstrained parameter.
+    smuggled = _action(parameters={"10}$": "anything"})
+    assert is_allowed(smuggled, authorization, now=NOW).allowed is False
+
+
+def test_null_parameter_value_never_satisfies_a_declared_pattern():
+    # str(None) == "None" can satisfy a permissive-looking pattern like
+    # "^[A-Za-z]+$" — an operator declaring a value pattern for a string
+    # field would not expect a JSON null to pass it. A declared pattern is
+    # a promise of real data of a specific shape; null must always fail it,
+    # regardless of how permissive the pattern text is.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id} params:userId=^[A-Za-z]+$"]
+    )
+    decision = is_allowed(_action(parameters={"userId": None}), authorization, now=NOW)
+    assert decision.allowed is False
+
+
 def test_action_with_query_string_smuggled_directly_in_target_is_denied():
     # Real bypass found via review: the parameters-check above only looks at
     # ActionSpec.parameters — a query string embedded directly in

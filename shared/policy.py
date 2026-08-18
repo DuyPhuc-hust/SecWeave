@@ -1,6 +1,6 @@
 import re
 from datetime import datetime, timezone
-from typing import List, Optional, Set
+from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
 from shared.models.action import ActionSpec, PolicyDecision
@@ -32,21 +32,68 @@ def _path_template_to_regex(template: str) -> re.Pattern:
 _PARAMS_CLAUSE_PREFIX = "params:"
 
 
-def _parse_allowed_params(extra_tokens: List[str]) -> Optional[Set[str]]:
+def _split_top_level_commas(text: str) -> List[str]:
+    """Splits on commas that aren't nested inside {}, (), or [] — so a
+    bounded-repetition quantifier like the "2,4" in "^a{2,4}$" (the single
+    most natural way to write "N-digit id") survives intact instead of
+    being cut in half. Real bug found via independent review: a naive
+    text.split(",") silently mangled any key=regex pair using such a
+    quantifier into a near-useless truncated pattern (`^a{2`) AND created a
+    bogus extra allowlist key from the leftover text (`4}$`, mapped to "no
+    value constraint") — corrupting the operator's allowlist without ever
+    raising an error.
+    """
+    parts = []
+    depth = 0
+    current: List[str] = []
+    for ch in text:
+        if ch in "({[":
+            depth += 1
+        elif ch in ")}]":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    return parts
+
+
+def _parse_allowed_params(extra_tokens: List[str]) -> Optional[Dict[str, Optional[re.Pattern]]]:
     """Parses the optional 3rd token of an allowlist entry — `params:a,b,c`
-    — into the set of parameter keys that entry permits. No 3rd token means
-    the entry permits NO parameters at all (empty set), not "anything" — see
-    _matches_allowed_action's docstring for why this default matters.
-    Returns None for anything malformed (extra tokens beyond one, or a token
-    not starting with "params:"), signalling the caller to deny outright
-    rather than guess an interpretation.
+    — into the parameter keys that entry permits, each optionally paired
+    with a value pattern via `key=regex` (e.g. `params:userId=^\\d+$,threshold`).
+    A key with no `=regex` suffix permits any value for that key (previous,
+    name-only behaviour — kept for backward compatibility with existing
+    allowlist strings). No 3rd token means the entry permits NO parameters
+    at all (empty dict), not "anything" — see _matches_allowed_action's
+    docstring for why this default matters.
+    Returns None for anything malformed (extra tokens beyond one, a token
+    not starting with "params:", an empty key/pattern either side of `=`,
+    or a pattern that isn't a valid regex), signalling the caller to deny
+    outright rather than guess an interpretation.
     """
     if not extra_tokens:
-        return set()
+        return {}
     if len(extra_tokens) > 1 or not extra_tokens[0].startswith(_PARAMS_CLAUSE_PREFIX):
         return None
     keys_part = extra_tokens[0][len(_PARAMS_CLAUSE_PREFIX) :]
-    return {key for key in keys_part.split(",") if key}
+    allowed: Dict[str, Optional[re.Pattern]] = {}
+    for raw in _split_top_level_commas(keys_part):
+        if not raw:
+            continue
+        if "=" in raw:
+            key, pattern_text = raw.split("=", 1)
+            if not key or not pattern_text:
+                return None
+            try:
+                allowed[key] = re.compile(pattern_text)
+            except re.error:
+                return None
+        else:
+            allowed[raw] = None
+    return allowed
 
 
 def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
@@ -66,6 +113,17 @@ def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
     # and sent as-is by evidence_harness/harness.py. Omitting the clause
     # means the entry permits an EMPTY parameters dict only — not "anything"
     # — matching this project's deny-by-default default in every other gate.
+    #
+    # A key can optionally be paired with a value pattern, "key=regex" (e.g.
+    # "params:userId=^\d+$"), checked against str(value) with fullmatch.
+    # Real gap found via independent review of the value channel itself:
+    # checking only parameter NAMES still let ANY value through for an
+    # already-allowed key — an LLM-authored plan could put a completely
+    # different identity's id, an injection payload, or control characters
+    # into a parameter whose name happens to be on the allowlist. A
+    # name-only key (no "=regex") keeps the previous behaviour (any value
+    # permitted) — this is opt-in stricter checking, not a breaking change
+    # to existing allowlist strings.
     tokens = allowed_action.split()
     if len(tokens) < 2:
         return False
@@ -75,8 +133,20 @@ def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
         return False
     if action.method.upper() != method.upper():
         return False
-    if not set(action.parameters.keys()) <= allowed_params:
+    if not set(action.parameters.keys()) <= set(allowed_params.keys()):
         return False
+    for key, value_pattern in allowed_params.items():
+        if value_pattern is None or key not in action.parameters:
+            continue
+        raw_value = action.parameters[key]
+        # A JSON null stringifies to the literal text "None", which can
+        # satisfy an otherwise-reasonable pattern like "^[A-Za-z]+$" — a
+        # real footgun an independent review found: an operator declaring
+        # a value pattern for a string field would not expect null to pass
+        # it. A declared pattern is a promise that the value is real data
+        # of a specific shape — null is never that, regardless of pattern.
+        if raw_value is None or not value_pattern.fullmatch(str(raw_value)):
+            return False
 
     action_url = urlsplit(action.target)
     template_url = urlsplit(template)
