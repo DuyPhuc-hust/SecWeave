@@ -1,0 +1,36 @@
+rules:
+  - id: flask-view-missing-auth-check-on-identity-param
+    languages: [python]
+    severity: ERROR
+    message: >
+      This view function takes an identity-like URL parameter (username/user_id/id)
+      but never calls an auth/token validation function anywhere in its body.
+      Any caller can substitute another user's identity in the URL and receive
+      that user's data with no ownership/authorization check. This is a
+      Broken Object Level Authorization (BOLA) / IDOR pattern
+      (CWE-639, OWASP API1:2023 / A01:2021).
+    metadata:
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "API1:2023 - Broken Object Level Authorization"
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: |
+              def $FUNC($ID):
+                  ...
+          - pattern: |
+              def $FUNC(..., $ID, ...):
+                  ...
+      - metavariable-regex:
+          metavariable: $ID
+          regex: (?i)^(username|user_id|userid|account_id|owner_id|id)$
+      - pattern-not: |
+          def $FUNC($ID):
+              ...
+              token_validator(...)
+              ...
+      - pattern-not: |
+          def $FUNC(..., $ID, ...):
+              ...
+              token_validator(...)
+              ...

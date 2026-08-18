@@ -1,0 +1,49 @@
+rules:
+  - id: express-identity-from-url-param-without-session-check
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >
+      An identity-like value (userId/accountId/ownerId) is read from the URL
+      route parameters (req.params) and used to look up data, but this same
+      handler never reads req.session anywhere in its body (including inside
+      conditions). Nothing ties the request back to who is actually
+      authenticated - any caller can put a different user's id in the URL
+      and receive that user's data. Classic Insecure Direct Object Reference
+      (IDOR) (CWE-639, OWASP A01:2021).
+    metadata:
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: |
+              const { $ID } = $REQ.params;
+          - pattern: $REQ.params.$ID
+          - pattern: $REQ.params[$ID]
+      - metavariable-regex:
+          metavariable: $ID
+          regex: (?i)^['"]?(userid|accountid|ownerid)['"]?$
+      - pattern-not-inside: |
+          function $HANDLER(...) {
+            ...
+            <... $REQ.session ...>
+            ...
+          }
+      - pattern-not-inside: |
+          $HANDLER = (...) => {
+            ...
+            <... $REQ.session ...>
+            ...
+          }
+      - pattern-not-inside: |
+          function(...) {
+            ...
+            <... $REQ.session ...>
+            ...
+          }
+      - pattern-not-inside: |
+          (...) => {
+            ...
+            <... $REQ.session ...>
+            ...
+          }
