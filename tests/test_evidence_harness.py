@@ -1200,3 +1200,158 @@ def test_capture_decodes_body_using_declared_charset_not_blind_utf8(tmp_path):
     raw = json.loads(Path(observation.raw_evidence_ref).read_text())
     assert raw["response"]["body_encoding"] == "windows-1252"
     assert raw["response"]["body"] == text
+
+
+def test_capture_writes_an_unverified_context_store_entry_when_wired(tmp_path):
+    # SPEC §4.6 write path, step 1: "Evidence Harness -- ghi quan sát,
+    # trạng thái = unverified --> Context Store". context_store is optional
+    # (same convention as kill_switch/cost_service) — when provided,
+    # capture() must record a real, mechanical (no marker value, no
+    # credential) entry.
+    from context_store.store import SecurityContextStore
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    context_store = SecurityContextStore(db_path=":memory:")
+    harness = EvidenceHarness(
+        execution_id="exec_ctx_test",
+        target_id="tgt_ctx_test",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path),
+        http_client=client,
+        context_store=context_store,
+    )
+
+    harness.capture(_action(), role=ObservationRole.MAIN)
+
+    unverified = context_store.get_unverified_context("tgt_ctx_test")
+    assert len(unverified) == 1
+    assert "granted" in unverified[0]["description"]
+    assert "200" in unverified[0]["description"]
+    # Never returned as trusted context until a human review promotes it.
+    assert context_store.get_verified_context("tgt_ctx_test") == []
+    context_store.close()
+
+
+def test_capture_still_succeeds_when_context_store_write_fails(tmp_path):
+    # Deliberately best-effort: a Context Store hiccup must never make an
+    # otherwise-successful capture() (real evidence already durably
+    # written) look like it failed.
+    from context_store.store import SecurityContextStore
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    context_store = SecurityContextStore(db_path=":memory:")
+    context_store.close()  # any write against it now raises a real error
+
+    harness = EvidenceHarness(
+        execution_id="exec_ctx_fail_test",
+        target_id="tgt_1",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path),
+        http_client=client,
+        context_store=context_store,
+    )
+
+    observation = harness.capture(_action(), role=ObservationRole.MAIN)
+
+    assert observation.access_result == AccessResult.GRANTED
+    assert observation.status_code == 200
+
+
+def test_capture_does_not_leak_a_query_string_value_into_the_context_store(tmp_path):
+    # HIGH severity real bypass found via independent review: action.target
+    # was logged VERBATIM into the Context Store description, including its
+    # own query string — a blind marker or credential embedded as a query
+    # value (a realistic OAST/reset-token pattern) landed unredacted,
+    # readable via get_unverified_context() with only a warning label, not
+    # redaction. SPEC §4.6's "never store" list (blind markers, credentials)
+    # is absolute for this store, not opt-in via sensitive_body_keys.
+    from context_store.store import SecurityContextStore
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    context_store = SecurityContextStore(db_path=":memory:")
+    harness = EvidenceHarness(
+        execution_id="exec_leak_test",
+        target_id="tgt_leak_test",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path),
+        http_client=client,
+        context_store=context_store,
+    )
+    secret_marker = "d3adb33f_super_secret_marker_value"
+    action = _action(
+        target=f"https://target.example.com/api/webhook?callback_token={secret_marker}&reset_token=SECRET123"
+    )
+
+    harness.capture(action, role=ObservationRole.MAIN)
+
+    unverified = context_store.get_unverified_context("tgt_leak_test")
+    assert len(unverified) == 1
+    assert secret_marker not in unverified[0]["description"]
+    assert "SECRET123" not in unverified[0]["description"]
+    # Still useful: the endpoint itself (minus query) is still visible.
+    assert "/api/webhook" in unverified[0]["description"]
+    context_store.close()
+
+
+def test_capture_strips_userinfo_credential_from_the_stored_raw_artifact(tmp_path):
+    # Real gap found via independent review: neither the raw-artifact
+    # redaction (_redact_url_query, key-based) nor the Context Store
+    # redaction touched a URL's userinfo component — a credential passed
+    # as HTTP Basic Auth directly in the URL
+    # (https://admin:S3cr3t@host/...) was stored on disk in the clear.
+    # Unlike query-key redaction, this has no opt-out: userinfo is always
+    # credential-shaped when present.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    harness = EvidenceHarness(
+        execution_id="exec_userinfo_test",
+        target_id="tgt_1",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path),
+        http_client=client,
+    )
+    action = _action(target="https://admin:S3cr3t@target.example.com/api/objects/42")
+
+    observation = harness.capture(action, role=ObservationRole.MAIN)
+
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text())
+    assert "S3cr3t" not in json.dumps(raw)
+    assert "admin:S3cr3t@" not in json.dumps(raw)
+
+
+def test_capture_strips_userinfo_credential_from_the_context_store_description(tmp_path):
+    from context_store.store import SecurityContextStore
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    context_store = SecurityContextStore(db_path=":memory:")
+    harness = EvidenceHarness(
+        execution_id="exec_userinfo_ctx_test",
+        target_id="tgt_userinfo_ctx_test",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path),
+        http_client=client,
+        context_store=context_store,
+    )
+    action = _action(target="https://admin:S3cr3t@target.example.com/api/objects/42")
+
+    harness.capture(action, role=ObservationRole.MAIN)
+
+    unverified = context_store.get_unverified_context("tgt_userinfo_ctx_test")
+    assert len(unverified) == 1
+    assert "S3cr3t" not in unverified[0]["description"]
+    assert "admin:S3cr3t@" not in unverified[0]["description"]
+    context_store.close()

@@ -27,8 +27,9 @@ class HypothesisEngine:
         signal: NormalizedSignal,
         source_snippet: Optional[str] = None,
         verified_context: Optional[List[Dict[str, Any]]] = None,
+        unverified_context: Optional[List[Dict[str, Any]]] = None,
     ) -> HypothesisResult:
-        prompt = self.build_prompt(signal, source_snippet, verified_context)
+        prompt = self.build_prompt(signal, source_snippet, verified_context, unverified_context)
         raw_output = self._llm_client.generate(prompt)
         return self.parse_response(raw_output, signal)
 
@@ -37,6 +38,7 @@ class HypothesisEngine:
         signal: NormalizedSignal,
         source_snippet: Optional[str],
         verified_context: Optional[List[Dict[str, Any]]],
+        unverified_context: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         # Random per-call marker (canary-token pattern), not a fixed string —
         # real gap found via independent review: the Signal itself is safe
@@ -86,6 +88,21 @@ class HypothesisEngine:
             parts.append(f"Source code liên quan:\n{source_snippet}")
         if verified_context:
             parts.append(f"Ngữ cảnh đã verified từ lần chạy trước: {json.dumps(verified_context, ensure_ascii=False)}")
+        if unverified_context:
+            # SPEC §4.6 write-path diagram's dashed arrow: "unverified: chỉ
+            # tra cứu, có nhãn cảnh báo" — this context MAY be looked up,
+            # but must never be presented the same way as verified_context
+            # above (a separate section, explicitly labeled, not merged
+            # into the same list) so the LLM can't mistake "someone
+            # captured this once, nobody's reviewed it yet" for confirmed
+            # fact. Each item also carries its own "warning" field (see
+            # SecurityContextStore.get_unverified_context) — labeled twice,
+            # at the section level and the item level, on purpose.
+            parts.append(
+                "Ngữ cảnh CHƯA XÁC MINH từ lần chạy trước (SPEC §4.6 — chỉ tham khảo, KHÔNG phải bằng "
+                "chứng đã xác nhận, KHÔNG được coi là kết luận khi lập giả thuyết): "
+                f"{json.dumps(unverified_context, ensure_ascii=False)}"
+            )
         return "\n\n".join(parts)
 
     def parse_response(self, raw_output: str, signal: NormalizedSignal) -> HypothesisResult:

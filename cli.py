@@ -31,6 +31,18 @@ from verification_package.assembler import assemble_verification_package
 DEFAULT_EVIDENCE_STORAGE_DIR = ".secweave/evidence"
 
 
+def _open_context_store(db_path: str) -> Optional[SecurityContextStore]:
+    """Opens the Context Store, printing a clean error and returning None
+    on failure — every cmd_* function needing a store repeats this shape
+    (a constructor failure is sqlite3.Error, not the RuntimeError store
+    methods raise, so it needs its own handling)."""
+    try:
+        return SecurityContextStore(db_path=db_path)
+    except sqlite3.Error as exc:
+        print(f"error: không mở được Context Store tại '{db_path}': {exc}", file=sys.stderr)
+        return None
+
+
 def _print_skip_warning(message: str) -> None:
     print(f"CẢNH BÁO: {message}", file=sys.stderr)
 
@@ -105,17 +117,8 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
     source_snippet = None
     if args.source:
         try:
-            # encoding="utf-8" explicit — real gap found by a 2nd
-            # independent review pass verifying this fix: without it,
-            # read_text() defaults to locale.getpreferredencoding(False),
-            # not UTF-8, so on a non-UTF-8-locale environment (e.g. a
-            # minimal container with no locale configured — a realistic
-            # deployment target given this project ingests CI/CD-produced
-            # reports) this could either wrongly reject a genuinely valid
-            # UTF-8 file, or silently decode non-UTF-8 bytes under some
-            # other codec that never raises, feeding corrupted content into
-            # the LLM prompt with the UnicodeDecodeError handler below
-            # never firing at all.
+            # encoding="utf-8" explicit — read_text() otherwise defaults to
+            # the OS locale, which a minimal container may not set to UTF-8.
             source_snippet = Path(args.source).read_text(encoding="utf-8")
         except FileNotFoundError:
             print(f"error: không tìm thấy source file '{args.source}'", file=sys.stderr)
@@ -136,15 +139,21 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
             print(f"error: source file '{args.source}' không phải text UTF-8: {exc}", file=sys.stderr)
             return 1
 
-    try:
-        context_store = SecurityContextStore(db_path=args.context_db)
-    except sqlite3.Error as exc:
-        print(f"error: không mở được Context Store tại '{args.context_db}': {exc}", file=sys.stderr)
+    context_store = _open_context_store(args.context_db)
+    if context_store is None:
         return 1
 
     try:
         verified_context = (
             context_store.get_verified_context(args.target_id) if args.target_id else []
+        )
+        # SPEC §4.6 write-path diagram's dashed arrow: "unverified: chỉ tra
+        # cứu, có nhãn cảnh báo" — a real, sanctioned read pathway, not a
+        # future TODO. build_prompt() labels this separately from
+        # verified_context so the LLM can't mistake "captured once, never
+        # reviewed" for confirmed fact.
+        unverified_context = (
+            context_store.get_unverified_context(args.target_id) if args.target_id else []
         )
     except RuntimeError as exc:
         # Real gap found via independent review: get_verified_context() had
@@ -177,7 +186,7 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
             # individually — build all the prompts first, call
             # generate_many() once, then parse each response.
             prompts = [
-                engine.build_prompt(signal, source_snippet, verified_context)
+                engine.build_prompt(signal, source_snippet, verified_context, unverified_context)
                 for signal in signals
             ]
             try:
@@ -202,7 +211,10 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
             for signal in signals:
                 try:
                     result = engine.generate_hypothesis(
-                        signal, source_snippet=source_snippet, verified_context=verified_context
+                        signal,
+                        source_snippet=source_snippet,
+                        verified_context=verified_context,
+                        unverified_context=unverified_context,
                     )
                     context_store.record_hypothesis(result, signal)
                 except (RuntimeError, httpx.HTTPError) as exc:
@@ -246,16 +258,9 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
 
 
 def _record_for_json(record: dict) -> dict:
-    """Returns a copy of a Context Store row with `location` decoded from
-    its stored JSON-string form into a real nested object — matching the
-    shape `hypothesize --format json` already outputs (straight from the
-    in-memory pydantic model, never double-JSON-encoded). Real gap found
-    via independent review: without this, show-hypothesis's JSON output
-    ran `location` through json.dumps() a SECOND time (it's already a JSON
-    string in the DB — see context_store/store.py's schema), producing a
-    doubly-escaped string instead of a nested object for the exact same
-    logical field — a script consuming both commands' JSON the same way
-    would break on one of them.
+    """Decodes `location` from its stored JSON-string form into a nested
+    object, matching the un-double-encoded shape `hypothesize --format
+    json` already outputs for the same logical field.
     """
     result = dict(record)
     if result.get("location") is not None:
@@ -278,10 +283,8 @@ def _print_hypothesis_record(record: dict) -> None:
 
 
 def cmd_show_hypothesis(args: argparse.Namespace) -> int:
-    try:
-        context_store = SecurityContextStore(db_path=args.context_db)
-    except sqlite3.Error as exc:
-        print(f"error: không mở được Context Store tại '{args.context_db}': {exc}", file=sys.stderr)
+    context_store = _open_context_store(args.context_db)
+    if context_store is None:
         return 1
 
     try:
@@ -337,33 +340,60 @@ def _load_stored_hypothesis(record: dict) -> Hypothesis:
     )
 
 
-def cmd_plan(args: argparse.Namespace) -> int:
+def _load_hypothesis_from_context_store(
+    context_store: SecurityContextStore, hypothesis_id: str
+) -> Optional[Hypothesis]:
+    """Looks up a stored Hypothesis by id, printing a clean error and
+    returning None on any failure (not found, store error, or a schema
+    mismatch while reconstructing it) — shared by `plan` and `execute`
+    (without --plan-file), both of which start from a stored hypothesis_id
+    the same way. Closes `context_store` once the lookup itself is done,
+    before the (network-free) reconstruction step.
+    """
     try:
-        context_store = SecurityContextStore(db_path=args.context_db)
-    except sqlite3.Error as exc:
-        print(f"error: không mở được Context Store tại '{args.context_db}': {exc}", file=sys.stderr)
-        return 1
-
-    try:
-        record = context_store.get_hypothesis(args.hypothesis_id)
+        record = context_store.get_hypothesis(hypothesis_id)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
+        return None
     finally:
         context_store.close()
 
     if record is None:
         print(
-            f"error: không tìm thấy hypothesis_id '{args.hypothesis_id}' (chỉ tra được bản ghi "
+            f"error: không tìm thấy hypothesis_id '{hypothesis_id}' (chỉ tra được bản ghi "
             "status=hypothesis, không tra được not_verifiable)",
             file=sys.stderr,
         )
-        return 1
+        return None
 
     try:
-        hypothesis = _load_stored_hypothesis(record)
+        return _load_stored_hypothesis(record)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return None
+
+
+def _build_local_test_authorization(args: argparse.Namespace) -> Authorization:
+    """Local-test-only Authorization stub built from --allowed-action —
+    never a real Gate 2/3 record. Caller prints its own warning first
+    (what's actually risky differs between `plan`, a dry-run, and
+    `execute`, which sends real requests)."""
+    return Authorization(
+        id=generate_id("auth"),
+        layer=AuthorizationLayer.TARGET_AUTHORIZATION,
+        approved_by="cli-local-test",
+        approved_at=datetime.now(timezone.utc),
+        allowed_actions=args.allowed_action or [],
+    )
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    context_store = _open_context_store(args.context_db)
+    if context_store is None:
+        return 1
+
+    hypothesis = _load_hypothesis_from_context_store(context_store, args.hypothesis_id)
+    if hypothesis is None:
         return 1
 
     llm_client = _build_llm_client(
@@ -390,13 +420,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             "thật lên bất kỳ hệ thống nào.",
             file=sys.stderr,
         )
-        authorization = Authorization(
-            id=generate_id("auth"),
-            layer=AuthorizationLayer.TARGET_AUTHORIZATION,
-            approved_by="cli-local-test",
-            approved_at=datetime.now(timezone.utc),
-            allowed_actions=args.allowed_action or [],
-        )
+        authorization = _build_local_test_authorization(args)
         review = agent.review_plan(plan_result.plan, authorization, cap=args.cap)
 
     if args.format == "json":
@@ -429,34 +453,20 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 def _load_frozen_plan(args: argparse.Namespace) -> Optional[ActionPlanResult]:
     """Loads a plan PREVIOUSLY produced and reviewed by `secweave plan
-    --format json > file`, instead of asking the LLM to plan again. Real
-    gap found via manual end-to-end testing against a live target (not
-    caught by the earlier independent review, which never tested "run
-    `plan` then `execute` for the SAME hypothesis"): cmd_execute used to
-    ALWAYS call agent.plan() itself, a fresh, non-deterministic LLM call —
-    meaning the plan a human reviewed via `secweave plan` beforehand was
-    NOT necessarily what actually got executed. SPEC §5.1's own step
-    sequence (bước 5 "Plan & dry-run" produces "Action plan trong
-    allowlist" as its output, which bước 6 "Execute" then runs — no LLM
-    call happens between them) assumes the plan flows through unchanged;
-    `--plan-file` restores that property. Deliberately NOT stored in
-    Context Store — SPEC §4.6 explicitly scopes that store to knowledge
-    accumulated ACROSS runs (verified observations, rejected hypotheses,
-    rule versions), not an in-flight execution artifact — a plain file
-    matches how Authorization/the allowlist are already handled (operator-
-    supplied, not persisted) for the very same Gate-3-shaped reason.
+    --format json > file`, instead of asking the LLM to plan again — so
+    the plan a human reviewed is guaranteed to be the one that executes
+    (SPEC §5.1: no LLM call between "Plan & dry-run" and "Execute").
+    Deliberately a plain file, not stored in Context Store (SPEC §4.6
+    scopes that store to knowledge accumulated ACROSS runs, not an
+    in-flight execution artifact — same operator-supplied, not-persisted
+    handling as Authorization/the allowlist).
 
     Returns None (error already printed) on any failure. `args.hypothesis_id`
-    is cross-checked against BOTH the file's own top-level hypothesis_id
-    AND the embedded ActionPlan.hypothesis_id — real gap found via
-    independent review: only the top-level one used to be checked, so a
-    hand-edited or corrupted file with the two disagreeing (top-level
-    matches --hypothesis-id, but plan_result.plan.hypothesis_id names a
-    DIFFERENT hypothesis) loaded and executed with zero error, silently
-    attributing another hypothesis's actions to this one. This doesn't
-    check against ground truth in Context Store either (the whole point of
-    --plan-file is to avoid needing that lookup) — it's self-consistency
-    between what the file claims, not proof the hypothesis_id is real.
+    is cross-checked against BOTH the file's top-level hypothesis_id AND the
+    embedded ActionPlan.hypothesis_id, so the two can't silently disagree —
+    this is self-consistency of what the file claims, not proof against
+    Context Store ground truth (the whole point of --plan-file is to skip
+    that lookup).
     """
     try:
         plan_data = json.loads(Path(args.plan_file).read_text(encoding="utf-8"))
@@ -546,10 +556,8 @@ def cmd_execute(args: argparse.Namespace) -> int:
             "bảo thực thi ĐÚNG plan đã duyệt.",
             file=sys.stderr,
         )
-        try:
-            context_store = SecurityContextStore(db_path=args.context_db)
-        except sqlite3.Error as exc:
-            print(f"error: không mở được Context Store tại '{args.context_db}': {exc}", file=sys.stderr)
+        context_store = _open_context_store(args.context_db)
+        if context_store is None:
             return 1
 
         try:
@@ -599,13 +607,7 @@ def cmd_execute(args: argparse.Namespace) -> int:
         "các host trong allowlist — chỉ chạy khi bạn thực sự được phép làm điều đó trên target đó.",
         file=sys.stderr,
     )
-    authorization = Authorization(
-        id=generate_id("auth"),
-        layer=AuthorizationLayer.TARGET_AUTHORIZATION,
-        approved_by="cli-local-test",
-        approved_at=datetime.now(timezone.utc),
-        allowed_actions=args.allowed_action or [],
-    )
+    authorization = _build_local_test_authorization(args)
     review = agent.review_plan(plan_result.plan, authorization, cap=args.cap)
     if not review.approved:
         print("-> Kết quả tổng: BLOCKED — không action nào được thực thi.")
@@ -645,6 +647,14 @@ def cmd_execute(args: argparse.Namespace) -> int:
     # CostService state rather than re-starting.
 
     cost_service = CostService(execution_id=execution_id, storage_dir=args.storage_dir, cap=args.cap)
+    # Separate instance from the one opened above (in the non---plan-file
+    # branch, to fetch a stored hypothesis) — that one is already closed by
+    # this point. This one stays open for the whole execute loop, closed in
+    # the `finally:` below alongside harness.close(), so every capture()
+    # can write its SPEC §4.6 unverified observation as it happens.
+    execution_context_store = _open_context_store(args.context_db)
+    if execution_context_store is None:
+        return 1
     harness = EvidenceHarness(
         execution_id=execution_id,
         target_id=args.target_id,
@@ -652,6 +662,7 @@ def cmd_execute(args: argparse.Namespace) -> int:
         storage_dir=args.storage_dir,
         kill_switch=kill_switch,
         cost_service=cost_service,
+        context_store=execution_context_store,
     )
     harness_storage_dir = Path(args.storage_dir) / execution_id  # matches EvidenceHarness's own layout
 
@@ -685,15 +696,8 @@ def cmd_execute(args: argparse.Namespace) -> int:
         f"'{args.identity}', role=main cho tất cả — xem docstring cmd_execute về giới hạn này)..."
     )
 
-    # Real gap found via independent review: capture() has always accepted
-    # sensitive_body_keys (caller-declared parameter names whose VALUES
-    # never get written into the raw evidence transcript — see its
-    # docstring), but cmd_execute never passed anything through it. Any
-    # action whose ActionSpec.parameters legitimately needs to carry a
-    # secret-shaped value (a password field in a password-reset/IDOR test,
-    # an API key in a query param — both explicitly supported by Policy
-    # Service's params: allowlist syntax) was written to disk in plaintext,
-    # permanently, with no way to mark it sensitive.
+    # Parameter names whose VALUES must never be written to the raw evidence
+    # transcript — see EvidenceHarness.capture()'s docstring.
     sensitive_body_keys = set(args.sensitive_param or [])
     observations = []
     stopped_reason = None
@@ -745,6 +749,7 @@ def cmd_execute(args: argparse.Namespace) -> int:
             )
     finally:
         harness.close()
+        execution_context_store.close()
 
     print(f"-> Kill-switch status cuối: {kill_switch.status.value}")
     print(f"-> Cost: {cost_service.executed_action_count}/{cost_service.cap}")
@@ -994,6 +999,27 @@ def cmd_review_package(args: argparse.Namespace) -> int:
         print(f"error: không gắn được human_review_record vào package: {exc}", file=sys.stderr)
         return 1
 
+    if decision == ReviewDecision.RELEASE:
+        # SPEC §4.6 write path, step 2: "Human Review -- phát hành package
+        # -> chuyển verified --> Context Store." Only reachable here because
+        # decision=release + checked_raw_artifact=true was already enforced
+        # above (HumanReviewRecord's own validator) — promotion never runs
+        # for a reject/retest decision, matching the diagram's own arrow
+        # (only a released package promotes anything).
+        promotion_context_store = _open_context_store(args.context_db)
+        if promotion_context_store is None:
+            return 1
+        try:
+            promoted = promotion_context_store.promote_execution_to_verified(
+                execution_id=package.execution_id, package_id=package.package_id
+            )
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            promotion_context_store.close()
+        print(f"-> Đã promote {promoted} observation sang verified trong Context Store.", file=sys.stderr)
+
     if args.format == "json":
         print(package.model_dump_json(indent=2))
     else:
@@ -1001,6 +1027,30 @@ def cmd_review_package(args: argparse.Namespace) -> int:
         print(f"decision: {package.human_review_record.decision.value} — {package.human_review_record.reason}")
         missing = package.missing_fields_for_release()
         print(f"is_release_ready: {package.is_release_ready}" + (f" (thiếu: {missing})" if missing else ""))
+    return 0
+
+
+def cmd_mark_stale(args: argparse.Namespace) -> int:
+    """SPEC §4.6's staleness principle: khi 1 target/revision có thay đổi
+    mà không xác định được chính xác phạm vi ảnh hưởng, đánh dấu CŨ RỘNG
+    HƠN toàn bộ context đã lưu cho target đó (cả verified lẫn unverified)
+    thay vì giữ lại dữ kiện có khả năng sai — "thà phân tích lại thừa còn
+    hơn xây giả thuyết trên nền cũ". Đây là quyết định của con người/
+    operator (biết target đã đổi revision), không phải thứ hệ thống tự
+    phát hiện được — không có cách nào để code tự động biết "phạm vi ảnh
+    hưởng không xác định được" nghĩa là gì cho 1 target cụ thể.
+    """
+    context_store = _open_context_store(args.context_db)
+    if context_store is None:
+        return 1
+    try:
+        marked = context_store.mark_stale(args.target_id, args.reason)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        context_store.close()
+    print(f"-> Đã đánh dấu cũ {marked} bản ghi (verified + unverified) cho target_id '{args.target_id}'.")
     return 0
 
 
@@ -1101,6 +1151,10 @@ def _add_context_db_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_format_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--format", default="table", choices=["table", "json"])
+
+
 def _add_llm_mode_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--llm-mode",
@@ -1122,7 +1176,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Chuẩn hoá 1 report thô (Semgrep/Trivy/OWASP ZAP) thành NormalizedSignal",
     )
     _add_report_args(normalize_parser)
-    normalize_parser.add_argument("--format", default="table", choices=["table", "json"])
+    _add_format_arg(normalize_parser)
     normalize_parser.set_defaults(func=cmd_normalize)
 
     hypothesize_parser = subparsers.add_parser(
@@ -1133,7 +1187,7 @@ def build_parser() -> argparse.ArgumentParser:
     hypothesize_parser.add_argument("--source", help="Đường dẫn file source code liên quan (tuỳ chọn)")
     hypothesize_parser.add_argument("--target-id", help="target_id để tra verified context (tuỳ chọn)")
     _add_llm_mode_arg(hypothesize_parser)
-    hypothesize_parser.add_argument("--format", default="table", choices=["table", "json"])
+    _add_format_arg(hypothesize_parser)
     _add_context_db_arg(hypothesize_parser)
     hypothesize_parser.set_defaults(func=cmd_hypothesize)
 
@@ -1159,7 +1213,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--cap", type=int, default=10, help="Cap số hành động dự kiến tối đa trong plan (mặc định: %(default)s)"
     )
     _add_llm_mode_arg(plan_parser)
-    plan_parser.add_argument("--format", default="table", choices=["table", "json"])
+    _add_format_arg(plan_parser)
     _add_context_db_arg(plan_parser)
     plan_parser.set_defaults(func=cmd_plan)
 
@@ -1175,7 +1229,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--signal-id",
         help="Tra tất cả bản ghi (kể cả not_verifiable) sinh ra từ 1 signal_id",
     )
-    show_hypothesis_parser.add_argument("--format", default="table", choices=["table", "json"])
+    _add_format_arg(show_hypothesis_parser)
     _add_context_db_arg(show_hypothesis_parser)
     show_hypothesis_parser.set_defaults(func=cmd_show_hypothesis)
 
@@ -1319,7 +1373,7 @@ def build_parser() -> argparse.ArgumentParser:
     assemble_package_parser.add_argument(
         "--next-action", required=True, help="Bước tiếp theo đề xuất (trường #18 SPEC §7) — bắt buộc"
     )
-    assemble_package_parser.add_argument("--format", default="table", choices=["table", "json"])
+    _add_format_arg(assemble_package_parser)
     assemble_package_parser.set_defaults(func=cmd_assemble_package)
 
     review_package_parser = subparsers.add_parser(
@@ -1346,8 +1400,21 @@ def build_parser() -> argparse.ArgumentParser:
     review_package_parser.add_argument(
         "--retest-reference", help="Tham chiếu tới lượt retest (nếu decision=retest) — tuỳ chọn"
     )
-    review_package_parser.add_argument("--format", default="table", choices=["table", "json"])
+    _add_format_arg(review_package_parser)
+    _add_context_db_arg(review_package_parser)
     review_package_parser.set_defaults(func=cmd_review_package)
+
+    mark_stale_parser = subparsers.add_parser(
+        "mark-stale",
+        help="SPEC §4.6 — đánh dấu cũ toàn bộ context đã lưu (verified + unverified) cho 1 target_id, "
+        "vd sau khi biết revision đã đổi nhưng chưa xác định được phạm vi ảnh hưởng chính xác",
+    )
+    mark_stale_parser.add_argument("--target-id", required=True, help="target_id cần đánh dấu cũ")
+    mark_stale_parser.add_argument(
+        "--reason", required=True, help="Lý do đánh dấu cũ (SPEC §4.6: 'lý do một mẩu ngữ cảnh bị đánh dấu là cũ')"
+    )
+    _add_context_db_arg(mark_stale_parser)
+    mark_stale_parser.set_defaults(func=cmd_mark_stale)
 
     return parser
 

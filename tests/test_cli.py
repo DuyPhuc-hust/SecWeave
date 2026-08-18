@@ -2265,7 +2265,13 @@ def test_cli_review_package_release_requires_checked_raw_artifact_flag(capsys, m
 
 
 def test_cli_review_package_release_with_checked_raw_artifact_succeeds(capsys, monkeypatch, tmp_path):
-    package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path)
+    from context_store.store import SecurityContextStore
+
+    execution_id = "exec_release_promote_test"
+    # Must match _assemble_a_real_package's own db_path — execute() already
+    # wrote this execution's unverified observations there.
+    context_db = str(tmp_path / "test.db")
+    package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path, execution_id=execution_id)
 
     exit_code = cli.main(
         [
@@ -2279,6 +2285,8 @@ def test_cli_review_package_release_with_checked_raw_artifact_succeeds(capsys, m
             "--reason",
             "Cross-checked obs_1 against its raw transcript, matches.",
             "--checked-raw-artifact",
+            "--context-db",
+            context_db,
             "--format",
             "json",
         ]
@@ -2292,6 +2300,14 @@ def test_cli_review_package_release_with_checked_raw_artifact_succeeds(capsys, m
     assert reviewed_package["human_review_record"]["reviewer"] == "phuc@ntq.local"
     # The command must never have touched the verdict itself.
     assert reviewed_package["verdict"] == "inconclusive"
+
+    # SPEC §4.6 write path, step 2: releasing must promote this execution's
+    # unverified observations to verified in the Context Store.
+    store = SecurityContextStore(db_path=context_db)
+    assert store.get_unverified_context("tgt_test") == []
+    verified = store.get_verified_context("tgt_test")
+    assert len(verified) == 1
+    store.close()
 
 
 def test_cli_review_package_reject_does_not_require_checked_raw_artifact(capsys, monkeypatch, tmp_path):
@@ -2451,3 +2467,94 @@ def test_cli_review_package_warns_when_overwriting_a_prior_review(capsys, monkey
     assert second_exit == 0
     assert "GHI ĐÈ" in captured.err
     assert "reviewerA" in captured.err
+
+
+def test_cli_mark_stale_excludes_target_from_both_read_paths(capsys, tmp_path):
+    from context_store.store import SecurityContextStore
+
+    context_db = str(tmp_path / "context.db")
+    store = SecurityContextStore(db_path=context_db)
+    store.record_unverified_observation("tgt_1", "exec_1", "some observation")
+    store.promote_execution_to_verified("exec_1", "pkg_1")
+    store.close()
+
+    exit_code = cli.main(
+        [
+            "mark-stale",
+            "--target-id",
+            "tgt_1",
+            "--reason",
+            "revision changed, scope of impact unclear",
+            "--context-db",
+            context_db,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "1" in captured.out
+
+    store = SecurityContextStore(db_path=context_db)
+    assert store.get_verified_context("tgt_1") == []
+    store.close()
+
+
+def test_cli_mark_stale_fails_cleanly_when_context_db_cannot_open(capsys, tmp_path):
+    blocking_file = tmp_path / "not_a_dir"
+    blocking_file.write_text("i am a file")
+    context_db = str(blocking_file / "context.db")
+
+    exit_code = cli.main(
+        ["mark-stale", "--target-id", "tgt_1", "--reason", "x", "--context-db", context_db]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "error" in captured.err
+
+
+def test_full_pipeline_writes_unverified_then_promotes_to_verified_on_release(capsys, monkeypatch, tmp_path):
+    # End-to-end SPEC §4.6 write path: execute() captures a real observation
+    # -> Context Store holds it as unverified only -> review-package
+    # --decision release promotes it -> get_verified_context() finally
+    # returns it, ready to feed a future hypothesize() call for this
+    # target_id.
+    from context_store.store import SecurityContextStore
+
+    execution_id = "exec_full_ctx_pipeline"
+    context_db = str(tmp_path / "test.db")
+
+    package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path, execution_id=execution_id)
+
+    # After execute() but before any review: unverified only.
+    store = SecurityContextStore(db_path=context_db)
+    assert store.get_verified_context("tgt_test") == []
+    unverified = store.get_unverified_context("tgt_test")
+    assert len(unverified) == 1
+    assert "CHƯA XÁC MINH" in unverified[0]["warning"]
+    store.close()
+
+    exit_code = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(package_file),
+            "--reviewer",
+            "phuc@ntq.local",
+            "--decision",
+            "release",
+            "--reason",
+            "Cross-checked the raw evidence, matches the normalized observation.",
+            "--checked-raw-artifact",
+            "--context-db",
+            context_db,
+        ]
+    )
+    assert exit_code == 0
+
+    # After release: promoted to verified, no longer unverified.
+    store = SecurityContextStore(db_path=context_db)
+    assert store.get_unverified_context("tgt_test") == []
+    verified = store.get_verified_context("tgt_test")
+    assert len(verified) == 1
+    store.close()

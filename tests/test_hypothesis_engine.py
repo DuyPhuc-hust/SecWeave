@@ -333,3 +333,30 @@ def test_source_snippet_cannot_forge_the_real_data_delimiter():
     # instructions from data — the forged text lands inside the data half.
     _, data = prompt.split(real_delimiters[0], 1)
     assert "FAKE INSTRUCTION" in data
+
+
+def test_build_prompt_labels_unverified_context_separately_from_verified():
+    # SPEC §4.6 write-path diagram's dashed arrow: "unverified: chỉ tra
+    # cứu, có nhãn cảnh báo" — must be a visibly separate section from
+    # verified_context, not merged into the same trusted-looking list.
+    engine = HypothesisEngine(FakeLLMClient(responses=["{}"]))
+    prompt = engine.build_prompt(
+        _semgrep_signal(),
+        source_snippet=None,
+        verified_context=[{"id": "obs_verified_1", "description": "confirmed IDOR"}],
+        unverified_context=[{"id": "obs_unverified_1", "description": "maybe something", "warning": "CHƯA XÁC MINH"}],
+    )
+
+    assert "obs_verified_1" in prompt
+    assert "obs_unverified_1" in prompt
+    assert "CHƯA XÁC MINH" in prompt
+    # The two must not appear in the same JSON blob (would let the LLM
+    # conflate "confirmed" with "captured once, unreviewed").
+    verified_section = prompt.split("Ngữ cảnh đã verified")[1].split("Ngữ cảnh CHƯA XÁC MINH")[0]
+    assert "obs_unverified_1" not in verified_section
+
+
+def test_build_prompt_omits_unverified_section_when_none_given():
+    engine = HypothesisEngine(FakeLLMClient(responses=["{}"]))
+    prompt = engine.build_prompt(_semgrep_signal(), source_snippet=None, verified_context=None)
+    assert "CHƯA XÁC MINH" not in prompt

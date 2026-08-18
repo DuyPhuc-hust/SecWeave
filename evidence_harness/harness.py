@@ -77,6 +77,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
+from context_store.store import SecurityContextStore
 from shared.cost import CostCapExceededError, CostService
 from shared.id_generator import generate_id
 from shared.kill_switch import AutomaticThresholdReason, ExecutionStoppedError, KillSwitch, StopSource
@@ -133,6 +134,20 @@ def _redact_body(body: Any, sensitive_keys: Optional[Set[str]]) -> Any:
     return {key: (_REDACTED_PLACEHOLDER if key in sensitive_keys else value) for key, value in body.items()}
 
 
+def _strip_userinfo(netloc: str) -> str:
+    """Drops a `user:pass@` prefix from a URL's netloc, unconditionally —
+    real gap found via independent review: `_redact_url_query` below (and
+    the Context Store's query-string strip in capture()) only ever touched
+    the QUERY component, so a credential passed as HTTP Basic Auth embedded
+    directly in the URL (`https://admin:S3cr3t@target.example.com/...`) was
+    never redacted at all, in either sink. Unlike query-key redaction
+    (opt-in, via caller-declared sensitive_keys), userinfo is ALWAYS
+    credential-shaped when present — there's no legitimate case where a
+    URL's userinfo component should be persisted, so this has no opt-out.
+    """
+    return netloc.rsplit("@", 1)[-1] if "@" in netloc else netloc
+
+
 def _redact_url_query(url: str, sensitive_keys: Optional[Set[str]]) -> str:
     """Redacts the VALUES of any query-string parameter whose key is in
     `sensitive_keys`, directly in a URL string. Real gap found via review:
@@ -148,9 +163,15 @@ def _redact_url_query(url: str, sensitive_keys: Optional[Set[str]]) -> str:
     depth for any caller that reaches capture() directly, not the primary
     control.
     """
+    parts = urlsplit(url)
+    userinfo_free_netloc = _strip_userinfo(parts.netloc)
+    if userinfo_free_netloc != parts.netloc:
+        # Userinfo present — always rewritten (see _strip_userinfo), even
+        # if no query-key redaction is otherwise needed below.
+        url = urlunsplit((parts.scheme, userinfo_free_netloc, parts.path, parts.query, parts.fragment))
+        parts = urlsplit(url)
     if not sensitive_keys:
         return url
-    parts = urlsplit(url)
     if not parts.query:
         return url
     pairs = parse_qsl(parts.query, keep_blank_values=True)
@@ -176,16 +197,12 @@ def _redact_url_query(url: str, sensitive_keys: Optional[Set[str]]) -> str:
 
 def _charset_from_headers(headers: Dict[str, str]) -> Optional[str]:
     """Extracts a declared charset from a Content-Type header value, e.g.
-    "text/html; charset=windows-1252" -> "windows-1252", or None if absent.
-    Real gap found via a 2nd independent review pass: _decode_response_body
-    used to always try UTF-8 first with no regard for what the response
-    itself declared — a body genuinely encoded as e.g. windows-1252 that
-    HAPPENS to also be valid (but wrong) UTF-8 would be silently
-    misdecoded with no signal anything was off, a real regression from
-    httpx's own charset-aware `.text`. Reads the header directly rather
-    than relying on httpx's internal encoding-detection state, since this
-    module reads the body itself via manual chunked iteration (for the
-    size cap) rather than through httpx's normal buffered-read path.
+    "text/html; charset=windows-1252" -> "windows-1252", or None if absent
+    — fed into _decode_response_body (see its docstring for why this
+    matters). Reads the header directly rather than relying on httpx's
+    internal encoding-detection state, since this module reads the body
+    itself via manual chunked iteration (for the size cap) rather than
+    through httpx's normal buffered-read path.
     """
     content_type = headers.get("content-type") or headers.get("Content-Type")
     if not content_type:
@@ -308,6 +325,7 @@ class EvidenceHarness:
         http_client_factory: Optional[Callable[[], httpx.Client]] = None,
         kill_switch: Optional[KillSwitch] = None,
         cost_service: Optional[CostService] = None,
+        context_store: Optional[SecurityContextStore] = None,
     ) -> None:
         self._execution_id = execution_id
         self._target_id = target_id
@@ -323,6 +341,13 @@ class EvidenceHarness:
         # docstring and shared/cost.py. None means no runtime cost cap is
         # enforced at all (capture() never refuses on that basis).
         self._cost_service = cost_service
+        # SPEC §4.6's write-path diagram: "Evidence Harness -- ghi quan sát,
+        # trạng thái = unverified --> Context Store." Same "not owned/
+        # created here" convention as kill_switch/cost_service — None means
+        # capture() simply doesn't record anything to the Context Store
+        # (no error, just no bookkeeping), matching how the other two
+        # optional collaborators degrade when absent.
+        self._context_store = context_store
         # `http_client`: one SHARED instance/jar for EVERY identity — ONLY
         # for tests that genuinely don't care about identity isolation
         # (testing something else entirely, e.g. a single-identity capture()
@@ -495,11 +520,7 @@ class EvidenceHarness:
         the wire, with no artifact anywhere recording that consumption).
 
         Raises RuntimeError if this harness instance has already been
-        close()'d — real gap found via review: reusing an identity whose
-        client was already closed used to crash with an uncaught
-        httpx-internal RuntimeError, not caught by the except clause below
-        (same failure class as the httpx.InvalidURL bug fixed earlier, via
-        a different exception type).
+        close()'d — see `self._closed`'s own comment in __init__.
         """
         if self._closed:
             raise RuntimeError(
@@ -689,7 +710,8 @@ class EvidenceHarness:
             # regardless of truncation.
             response_contains_marker = None
 
-        return NormalizedObservation(
+        access_result = _classify_access_result(status_code)
+        observation = NormalizedObservation(
             observation_id=observation_id,
             action_ref=action.action_id,
             role=role,
@@ -702,11 +724,49 @@ class EvidenceHarness:
             raw_evidence_size_bytes=len(raw_bytes),
             raw_evidence_hash=raw_evidence_hash,
             raw_evidence_ref=str(artifact_path),
-            access_result=_classify_access_result(status_code),
+            access_result=access_result,
             status_code=status_code,
             response_contains_marker=response_contains_marker,
             request_contains_marker=_contains_marker(request_text, marker),
         )
+
+        if self._context_store is not None:
+            # SPEC §4.6 write path, step 1. Deliberately best-effort: losing
+            # this bookkeeping row is not remotely as severe as losing the
+            # real evidence above (raw_bytes is already durably written by
+            # this point), so a Context Store hiccup (e.g. disk full, DB
+            # locked) must never make an otherwise-successful capture()
+            # look like it failed to the caller. Description is a MECHANICAL
+            # summary only (action + access_result/status_code) — no marker
+            # value, no credential, no response body — matching this
+            # module's "không diễn giải, không kết luận" principle and
+            # SPEC §4.6's explicit "never store" list.
+            #
+            # Strips the query string AND any userinfo UNCONDITIONALLY,
+            # regardless of caller-declared sensitive_body_keys — unlike the
+            # raw artifact, this store's "never store" list is absolute
+            # (a blind marker has no query-param "key name" an operator
+            # would think to declare). Known residual gap: a marker/secret
+            # embedded in the URL PATH itself would still leak — this
+            # codebase's own blind-marker usage plants markers in body/query
+            # content, not path segments, so this covers the realistic case.
+            target_url_parts = urlsplit(action.target)
+            target_without_query = urlunsplit(
+                target_url_parts._replace(netloc=_strip_userinfo(target_url_parts.netloc), query="", fragment="")
+            )
+            try:
+                self._context_store.record_unverified_observation(
+                    target_id=self._target_id,
+                    execution_id=self._execution_id,
+                    description=(
+                        f"[{role.value}] {action.method} {target_without_query} -> "
+                        f"access_result={access_result.value}, status_code={status_code}"
+                    ),
+                )
+            except RuntimeError:
+                pass
+
+        return observation
 
     def _rewrite_artifact_response_body(
         self, observation: NormalizedObservation, raw: Dict[str, Any], new_body: str
