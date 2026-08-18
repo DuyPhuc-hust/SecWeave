@@ -112,6 +112,24 @@ def test_cost_service_recovers_count_from_existing_audit_log_after_restart(tmp_p
     assert decision.executed_action_count == 3  # continues from where service1 left off
 
 
+def test_cost_service_refuses_to_reopen_an_execution_id_with_a_different_cap(tmp_path):
+    # Real gap found via independent review: `cap` was never itself
+    # persisted/cross-checked — only the executed-action count was
+    # recovered across a restart. An operator (or a wrapper script bug)
+    # reusing the same execution_id with a HIGHER --cap on a later
+    # invocation used to silently widen the true budget past what was
+    # originally reviewed/approved for this execution.
+    service1 = CostService(execution_id="exec_cap_durability", storage_dir=str(tmp_path), cap=1)
+    service1.record_action("act_1")
+
+    with pytest.raises(RuntimeError):
+        CostService(execution_id="exec_cap_durability", storage_dir=str(tmp_path), cap=100)
+
+    # Reopening with the SAME cap must still work exactly as before.
+    service2 = CostService(execution_id="exec_cap_durability", storage_dir=str(tmp_path), cap=1)
+    assert service2.executed_action_count == 1
+
+
 def test_cost_service_tolerates_a_corrupted_trailing_line_by_counting_it_conservatively(tmp_path):
     # Same "fail safe = assume the worst" reasoning as KillSwitch's own
     # corrupted-line recovery (shared/kill_switch.py), applied to a counter

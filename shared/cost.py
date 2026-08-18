@@ -87,6 +87,20 @@ class CostService:
     split across a lock/no-lock boundary the way KillSwitch's `sequence`
     trick requires — nothing here can make one caller's write land out of
     true logical order, so that whole class of bug does not apply.
+
+    Scope boundary, stated plainly (same limitation KillSwitch's own
+    docstring already discloses — found missing here via independent
+    review): `self._lock` is a plain in-process `threading.Lock`, providing
+    mutual exclusion only between calls made through the SAME instance,
+    never across two different instances (even in the same process, let
+    alone two OS processes pointed at the same storage_dir). Two instances
+    can each recover the same count, both see `count < cap`, and both
+    record an action — jointly exceeding cap by more than 1. Every call
+    site in this codebase constructs exactly one CostService per
+    execution_id within a single process, matching this constraint; true
+    cross-process concurrent safety (an OS-level file lock, or an external
+    coordination store) is a bigger mechanism this MVP increment does not
+    attempt.
     """
 
     def __init__(self, execution_id: str, storage_dir: str, cap: int) -> None:
@@ -96,18 +110,36 @@ class CostService:
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._audit_log_path = self._storage_dir / "cost_audit_log.jsonl"
         self._lock = threading.Lock()
-        self._count = self._recover_count_from_audit_log()
+        self._count, recorded_cap = self._recover_count_from_audit_log()
+        # Real gap found via independent review: `cap` was never itself
+        # persisted or cross-checked — only the executed-action COUNT was
+        # recovered across a restart, so a later invocation reusing the
+        # same execution_id (the intended way cost accumulates "real
+        # meaning" across cmd_execute calls — see cli.py) could pass a
+        # DIFFERENT --cap and immediately get a widened effective budget,
+        # silently undermining SPEC §6.4 control #9's "never exceed the
+        # hard cap" as a durable per-execution property. Fails safe/closed:
+        # refuses to proceed rather than silently pick either value. A log
+        # with no recorded cap yet (first run, or a log from before this
+        # field existed) has nothing to conflict with, so it's accepted.
+        if recorded_cap is not None and recorded_cap != cap:
+            raise RuntimeError(
+                f"CostService cho execution '{execution_id}': cap trước đó đã ghi nhận là "
+                f"{recorded_cap}, nhưng lần khởi tạo này truyền cap={cap} — không cho phép đổi cap "
+                "giữa chừng cho cùng 1 execution_id. Dùng execution_id mới nếu thực sự cần cap khác."
+            )
 
-    def _recover_count_from_audit_log(self) -> int:
+    def _recover_count_from_audit_log(self):
         if not self._audit_log_path.exists():
-            return 0
+            return 0, None
         lines = self._audit_log_path.read_text(encoding="utf-8").splitlines()
         count = 0
+        recorded_cap = None
         for line in lines:
             if not line:
                 continue
             try:
-                json.loads(line)
+                entry = json.loads(line)
             except json.JSONDecodeError:
                 # A crash mid-write can only tear the LAST line (normal
                 # appends are a single atomic write() — see record_action()).
@@ -119,9 +151,11 @@ class CostService:
                 # as KillSwitch's own corrupted-line recovery, just applied
                 # to a counter (count it) rather than a status (assume
                 # STOPPED).
-                pass
+                entry = None
+            if entry is not None and "cap" in entry:
+                recorded_cap = entry["cap"]
             count += 1
-        return count
+        return count, recorded_cap
 
     @property
     def cap(self) -> int:
@@ -187,6 +221,7 @@ class CostService:
                     "action_ref": action_ref,
                     "sequence": new_count,
                     "at": datetime.now(timezone.utc).isoformat(),
+                    "cap": self._cap,
                 }
                 line = json.dumps(entry) + "\n"
                 try:
