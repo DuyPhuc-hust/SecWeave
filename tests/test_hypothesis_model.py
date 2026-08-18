@@ -56,6 +56,16 @@ def test_hypothesis_result_hypothesis_status_requires_hypothesis():
         HypothesisResult(status=HypothesisStatus.HYPOTHESIS)
 
 
+def test_hypothesis_result_not_verifiable_forbids_a_hypothesis():
+    # Real gap found via independent review: the same one-directional
+    # validator bug already fixed in ActionPlanResult/PlanCheckResult/
+    # CostDecision/PlanReviewResult — this sibling model was missing its
+    # own converse check, so status=not_verifiable + a real hypothesis
+    # attached used to construct without error.
+    with pytest.raises(ValidationError):
+        HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, hypothesis=_hypothesis(), reason="x")
+
+
 def test_hypothesis_result_not_verifiable_valid():
     result = HypothesisResult(
         status=HypothesisStatus.NOT_VERIFIABLE,

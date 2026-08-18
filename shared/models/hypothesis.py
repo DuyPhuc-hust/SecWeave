@@ -44,4 +44,14 @@ class HypothesisResult(BaseModel):
             raise ValueError("status=hypothesis requires a hypothesis")
         if self.status == HypothesisStatus.NOT_VERIFIABLE and not self.reason:
             raise ValueError("status=not_verifiable requires a reason")
+        # Real gap found via independent review: the same one-directional
+        # pattern already fixed in ActionPlanResult (NOT_PLANNABLE forbids a
+        # plan), PlanCheckResult, CostDecision, and PlanReviewResult — this
+        # sibling model was missing its own converse check. Without it,
+        # HypothesisResult(status=not_verifiable, hypothesis=<a real
+        # Hypothesis>, reason="x") constructs without error: an ambiguous
+        # "not verifiable, but here's a hypothesis anyway" result a
+        # downstream reader could wrongly trust as a real hypothesis.
+        if self.status == HypothesisStatus.NOT_VERIFIABLE and self.hypothesis is not None:
+            raise ValueError("status=not_verifiable không được kèm theo hypothesis")
         return self
