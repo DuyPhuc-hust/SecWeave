@@ -1906,3 +1906,548 @@ def test_cli_execute_plan_file_malformed_schema_fails_cleanly(capsys, tmp_path):
 
     assert exit_code == 1
     assert "không đúng schema" in captured.err
+
+
+def test_cli_assemble_package_builds_a_real_package_from_a_real_execute_run(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: assemble_verification_package()
+    # was fully built/tested but had no CLI entrypoint at all — this closes
+    # it, reading back exactly what a real `execute` run persists
+    # (observations.jsonl/actions.json/execution_status.json), no
+    # --plan-file needed at assembly time.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_assemble_test"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {"type": "read_only", "method": "GET", "target": "http://host.docker.internal:3000", "description": "d"}
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    execute_exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert execute_exit_code == 0
+    capsys.readouterr()  # discard execute's own output
+
+    exit_code = cli.main(
+        [
+            "assemble-package",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--environment",
+            "sandbox",
+            "--authorization-reference",
+            "auth_local_test_1",
+            "--scenario",
+            "X-Content-Type-Options header missing on GET /",
+            "--limitations",
+            "Chỉ có role=main, thiếu positive/denied control.",
+            "--next-action",
+            "Không cần thêm — quan sát trực tiếp, không cần predicate 3 nhóm.",
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    package = json.loads(captured.out)
+    assert package["target_id"] == "tgt_test"
+    assert package["revision"] == "rev_test"
+    assert package["environment"] == "sandbox"
+    assert package["authorization_reference"] == "auth_local_test_1"
+    assert package["execution_id"] == execution_id
+    assert len(package["normalized_observations"]) == 1
+    assert len(package["action_record"]) == 1
+    assert package["verdict"] == "inconclusive"  # only role=main, no controls
+
+
+def test_cli_assemble_package_fails_cleanly_when_execution_was_never_run(capsys, tmp_path):
+    exit_code = cli.main(
+        [
+            "assemble-package",
+            "--execution-id",
+            "exec_never_ran",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--environment",
+            "sandbox",
+            "--authorization-reference",
+            "auth_1",
+            "--scenario",
+            "x",
+            "--limitations",
+            "x",
+            "--next-action",
+            "x",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không tìm thấy" in captured.err
+
+
+def test_cli_assemble_package_works_after_execute_is_called_twice_with_different_plans(
+    capsys, monkeypatch, tmp_path
+):
+    # Real gap found via independent review: actions.json was written by
+    # OVERWRITING (not merging), while observations.jsonl already
+    # accumulates across multiple `execute` calls reusing one execution_id
+    # (a supported pattern elsewhere — kill-switch RUNNING-continuation,
+    # CostService cap accumulation). A 2nd `execute` call with a DIFFERENT
+    # plan permanently lost the 1st call's ActionSpec from actions.json,
+    # making `assemble-package` unconditionally fail afterward.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_two_plans_test"
+    storage_dir = tmp_path / "evidence"
+
+    def _plan_file(path, target):
+        path.write_text(
+            json.dumps(
+                {
+                    "hypothesis_id": hypothesis_id,
+                    "plan_result": {
+                        "status": "planned",
+                        "plan": {
+                            "hypothesis_id": hypothesis_id,
+                            "actions": [{"type": "read_only", "method": "GET", "target": target, "description": "d"}],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    plan_a = tmp_path / "plan_a.json"
+    _plan_file(plan_a, "http://host.docker.internal:3000/a")
+    plan_b = tmp_path / "plan_b.json"
+    _plan_file(plan_b, "http://host.docker.internal:3000/b")
+
+    for plan_file in (plan_a, plan_b):
+        exit_code = cli.main(
+            [
+                "execute",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--allowed-action",
+                "GET http://host.docker.internal:3000/a",
+                "--allowed-action",
+                "GET http://host.docker.internal:3000/b",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        assert exit_code == 0
+        capsys.readouterr()
+
+    actions_on_disk = json.loads((storage_dir / execution_id / "actions.json").read_text(encoding="utf-8"))
+    assert len(actions_on_disk) == 2  # both plans' actions kept, not just the 2nd call's
+
+    exit_code = cli.main(
+        [
+            "assemble-package",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--environment",
+            "sandbox",
+            "--authorization-reference",
+            "auth_1",
+            "--scenario",
+            "s",
+            "--limitations",
+            "l",
+            "--next-action",
+            "n",
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    package = json.loads(captured.out)
+    assert len(package["action_record"]) == 2
+    assert len(package["normalized_observations"]) == 2
+
+
+def _assemble_a_real_package(capsys, monkeypatch, tmp_path, execution_id="exec_review_test"):
+    """Shared setup: run a real execute -> assemble-package, return the
+    package JSON string and the storage dir, for review-package tests."""
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {"type": "read_only", "method": "GET", "target": "http://host.docker.internal:3000", "description": "d"}
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    assert (
+        cli.main(
+            [
+                "execute",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--allowed-action",
+                "GET http://host.docker.internal:3000",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert (
+        cli.main(
+            [
+                "assemble-package",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--environment",
+                "sandbox",
+                "--authorization-reference",
+                "auth_1",
+                "--scenario",
+                "s",
+                "--limitations",
+                "l",
+                "--next-action",
+                "n",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    package_json = capsys.readouterr().out
+    package_file = tmp_path / "package.json"
+    package_file.write_text(package_json, encoding="utf-8")
+    return package_file
+
+
+def test_cli_review_package_release_requires_checked_raw_artifact_flag(capsys, monkeypatch, tmp_path):
+    # SPEC §4.5: releasing requires having personally cross-checked >=1 raw
+    # artifact — the CLI must refuse a release decision without this flag,
+    # not silently accept a rubber-stamp.
+    package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path)
+
+    exit_code = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(package_file),
+            "--reviewer",
+            "phuc@ntq.local",
+            "--decision",
+            "release",
+            "--reason",
+            "Looks good.",
+            # deliberately no --checked-raw-artifact
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "checked_raw_artifact" in captured.err
+
+
+def test_cli_review_package_release_with_checked_raw_artifact_succeeds(capsys, monkeypatch, tmp_path):
+    package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path)
+
+    exit_code = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(package_file),
+            "--reviewer",
+            "phuc@ntq.local",
+            "--decision",
+            "release",
+            "--reason",
+            "Cross-checked obs_1 against its raw transcript, matches.",
+            "--checked-raw-artifact",
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    reviewed_package = json.loads(captured.out)
+    assert reviewed_package["human_review_record"]["decision"] == "release"
+    assert reviewed_package["human_review_record"]["checked_raw_artifact"] is True
+    assert reviewed_package["human_review_record"]["reviewer"] == "phuc@ntq.local"
+    # The command must never have touched the verdict itself.
+    assert reviewed_package["verdict"] == "inconclusive"
+
+
+def test_cli_review_package_reject_does_not_require_checked_raw_artifact(capsys, monkeypatch, tmp_path):
+    # Rejecting/retesting a package is not "releasing" it — SPEC's hard
+    # cross-check requirement is specifically about deciding to RELEASE.
+    package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path)
+
+    exit_code = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(package_file),
+            "--reviewer",
+            "phuc@ntq.local",
+            "--decision",
+            "reject",
+            "--reason",
+            "Verdict is inconclusive, not enough evidence to ship.",
+        ]
+    )
+    assert exit_code == 0
+
+
+def test_cli_review_package_fails_cleanly_for_a_missing_package_file(capsys, tmp_path):
+    exit_code = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(tmp_path / "does_not_exist.json"),
+            "--reviewer",
+            "phuc@ntq.local",
+            "--decision",
+            "reject",
+            "--reason",
+            "x",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "không tìm thấy" in captured.err
+
+
+def test_cli_review_package_rejects_a_hand_tampered_verdict(capsys, monkeypatch, tmp_path):
+    # HIGH severity real bypass found via independent review: a package
+    # file hand-edited to declare verdict=confirmed + matching (but
+    # fabricated) predicate_results — while normalized_observations was
+    # left untouched, still showing no real satisfying evidence — passed
+    # every existing validator (they only check the package is INTERNALLY
+    # consistent, never that predicate_results actually reflects the
+    # observations it claims to summarize) and came out with a legitimate-
+    # looking, decision=release human_review_record attached.
+    package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path)
+    package_data = json.loads(package_file.read_text(encoding="utf-8"))
+    assert package_data["verdict"] == "inconclusive"  # sanity: real run, no controls captured
+
+    package_data["verdict"] = "confirmed"
+    package_data["verdict_reason"] = "FABRICATED"
+    package_data["predicate_results"] = [
+        {"group": "main", "status": "satisfied", "reason": "FABRICATED"},
+        {"group": "positive_control", "status": "satisfied", "reason": "FABRICATED"},
+        {"group": "denied_control", "status": "satisfied", "reason": "FABRICATED"},
+    ]
+    tampered_file = tmp_path / "tampered_package.json"
+    tampered_file.write_text(json.dumps(package_data), encoding="utf-8")
+
+    exit_code = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(tampered_file),
+            "--reviewer",
+            "phuc@ntq.local",
+            "--decision",
+            "release",
+            "--reason",
+            "test",
+            "--checked-raw-artifact",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "sửa tay" in captured.err
+
+
+def test_cli_review_package_rejects_retest_reference_with_non_retest_decision(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: --retest-reference could be
+    # attached to ANY decision (e.g. release), producing a package that's
+    # simultaneously is_release_ready=True and carries a retest_reference —
+    # contradicting field #19's own semantics ("absent until retests have
+    # run").
+    package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path)
+
+    exit_code = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(package_file),
+            "--reviewer",
+            "phuc@ntq.local",
+            "--decision",
+            "release",
+            "--reason",
+            "test",
+            "--checked-raw-artifact",
+            "--retest-reference",
+            "retest_123",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "retest" in captured.err
+
+
+def test_cli_review_package_warns_when_overwriting_a_prior_review(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: overwriting an existing
+    # human_review_record (e.g. a prior REJECT) left zero trace it ever
+    # existed. Not blocked (a legitimate re-review workflow exists), but
+    # must be surfaced loudly.
+    package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path)
+
+    first_exit = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(package_file),
+            "--reviewer",
+            "reviewerA",
+            "--decision",
+            "reject",
+            "--reason",
+            "not enough evidence",
+            "--format",
+            "json",
+        ]
+    )
+    assert first_exit == 0
+    package_file.write_text(capsys.readouterr().out, encoding="utf-8")
+
+    second_exit = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(package_file),
+            "--reviewer",
+            "reviewerB",
+            "--decision",
+            "reject",
+            "--reason",
+            "still not enough",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert second_exit == 0
+    assert "GHI ĐÈ" in captured.err
+    assert "reviewerA" in captured.err

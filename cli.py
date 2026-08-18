@@ -17,13 +17,16 @@ from hypothesis_engine.signal_normalizer.orchestrator import SignalNormalizer
 from shared.cost import CostService
 from shared.id_generator import generate_id
 from shared.kill_switch import AutomaticThresholdReason, KillSwitch, StopSource
-from shared.models.action import ActionPlanResult, ActionPlanStatus
+from shared.models.action import ActionPlanResult, ActionPlanStatus, ActionSpec
 from shared.models.entities import Authorization, AuthorizationLayer
 from shared.models.hypothesis import Hypothesis, HypothesisProvenance, HypothesisStatus
 from shared.models.kill_switch import ExecutionStatus
-from shared.models.observation import ObservationRole
+from shared.models.observation import NormalizedObservation, ObservationRole
 from shared.models.signal import NormalizedSignal, SignalCoverage
+from shared.models.verification_package import Environment, ReviewDecision, VerificationPackage
 from verdict_oracle.oracle import decide
+from verdict_oracle.predicates import evaluate_predicates
+from verification_package.assembler import assemble_verification_package
 
 DEFAULT_EVIDENCE_STORAGE_DIR = ".secweave/evidence"
 
@@ -652,6 +655,30 @@ def cmd_execute(args: argparse.Namespace) -> int:
     )
     harness_storage_dir = Path(args.storage_dir) / execution_id  # matches EvidenceHarness's own layout
 
+    # Persisted so a later, separate `secweave assemble-package` invocation
+    # can reconstruct VerificationPackage's `actions` input (SPEC §7 field
+    # #9) without needing the original --plan-file to still be lying
+    # around. MERGED with whatever's already on disk (by action_id), not
+    # overwritten — real gap found via independent review: reusing one
+    # execution_id across multiple `execute` calls with DIFFERENT plans is
+    # an explicitly supported pattern elsewhere in this codebase (kill-
+    # switch RUNNING-continuation branch, CostService cap accumulation —
+    # see this function's own comment above on kill_switch.status), and
+    # observations.jsonl already accumulates across such calls. Overwriting
+    # actions.json with only THIS invocation's actions permanently and
+    # unrecoverably broke `assemble-package` for exactly that pattern — an
+    # earlier call's ActionSpec, still referenced by an earlier
+    # observation's action_ref, would vanish from the file entirely.
+    actions_path = harness_storage_dir / "actions.json"
+    existing_actions_raw = json.loads(actions_path.read_text(encoding="utf-8")) if actions_path.exists() else []
+    existing_action_ids = {item["action_id"] for item in existing_actions_raw}
+    merged_actions_raw = existing_actions_raw + [
+        action.model_dump(mode="json")
+        for action in plan_result.plan.actions
+        if action.action_id not in existing_action_ids
+    ]
+    actions_path.write_text(json.dumps(merged_actions_raw, indent=2), encoding="utf-8")
+
     print(f"-> execution_id: {execution_id}")
     print(
         f"-> Đang thực thi {len(plan_result.plan.actions)} action đã approve (identity="
@@ -722,13 +749,259 @@ def cmd_execute(args: argparse.Namespace) -> int:
     print(f"-> Kill-switch status cuối: {kill_switch.status.value}")
     print(f"-> Cost: {cost_service.executed_action_count}/{cost_service.cap}")
 
+    # Real gap found via independent review: this was only ever a local
+    # variable used for THIS invocation's own decide() call, never
+    # persisted — a later, separate `secweave assemble-package` invocation
+    # had no way to know whether the execution it's assembling a package
+    # for actually COMPLETED or was STOPPED partway (a distinction
+    # decide()/assemble_verdict() treat as safety-critical: SPEC §3.4 only
+    # allows CONFIRMED/NOT_REPRODUCED when COMPLETED). Persisted
+    # unconditionally (not just when this invocation captured new
+    # observations) so it always reflects this invocation's real outcome,
+    # even across multiple `execute` calls reusing one execution_id.
+    execution_status = ExecutionStatus.STOPPED if stopped_reason else ExecutionStatus.COMPLETED
+    (harness_storage_dir / "execution_status.json").write_text(
+        json.dumps({"execution_status": execution_status.value}), encoding="utf-8"
+    )
+
     if observations:
-        execution_status = ExecutionStatus.STOPPED if stopped_reason else ExecutionStatus.COMPLETED
         result = decide(observations, execution_status=execution_status)
         print(f"-> Verdict: {result.verdict.value}")
         print(f"   {result.reason}")
 
     return 1 if stopped_reason else 0
+
+
+def cmd_assemble_package(args: argparse.Namespace) -> int:
+    """Lắp `VerificationPackage` (SPEC §7) từ artifact thật của 1 lượt
+    `execute` đã chạy — tách riêng khỏi `execute` có chủ đích (real gap
+    tìm được qua review: trước lệnh này, `assemble_verification_package()`
+    đã build/test đầy đủ nhưng chỉ gọi được qua Python API, không có CLI
+    nào cả). Đọc lại 3 artifact `execute` đã lưu (`observations.jsonl`,
+    `actions.json`, `execution_status.json`) trong cùng thư mục
+    execution — không cần `--plan-file` gốc vẫn còn tồn tại.
+
+    4 field bắt buộc (`--scenario`, `--limitations`, `--next-action`,
+    `--authorization-reference`) là phán đoán của con người, không tự sinh
+    được — cố tình KHÔNG có giá trị mặc định nào, khớp lý do
+    `assemble_verification_package()` giữ các field này tách khỏi
+    execution hot path.
+    """
+    execution_dir = Path(args.storage_dir) / args.execution_id
+
+    observations_path = execution_dir / "observations.jsonl"
+    actions_path = execution_dir / "actions.json"
+    status_path = execution_dir / "execution_status.json"
+    for path, hint in (
+        (observations_path, "chưa có observation nào — execution này đã thực sự chạy `execute` chưa?"),
+        (actions_path, "thiếu file action — chỉ `execute` mới tự sinh file này."),
+        (status_path, "thiếu execution_status — chỉ `execute` mới tự sinh file này."),
+    ):
+        if not path.exists():
+            print(f"error: không tìm thấy '{path}' — {hint}", file=sys.stderr)
+            return 1
+
+    try:
+        observations = [
+            NormalizedObservation(**json.loads(line))
+            for line in observations_path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        actions = [ActionSpec(**item) for item in json.loads(actions_path.read_text(encoding="utf-8"))]
+        execution_status = ExecutionStatus(json.loads(status_path.read_text(encoding="utf-8"))["execution_status"])
+    except (json.JSONDecodeError, ValidationError, ValueError, OSError) as exc:
+        print(f"error: không đọc được artifact của execution '{args.execution_id}': {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        environment = Environment(args.environment)
+    except ValueError:
+        valid = ", ".join(e.value for e in Environment)
+        print(f"error: --environment không hợp lệ '{args.environment}' — chỉ chấp nhận: {valid}", file=sys.stderr)
+        return 1
+
+    print(
+        "CẢNH BÁO: authorization dùng để lắp package dưới đây CHỈ dựng tạm từ --authorization-reference "
+        "cho test cục bộ — KHÔNG phải hồ sơ Gate 2/3 thật đã duyệt.",
+        file=sys.stderr,
+    )
+    authorization = Authorization(
+        id=args.authorization_reference,
+        layer=AuthorizationLayer.TARGET_AUTHORIZATION,
+        approved_by="cli-local-test",
+        approved_at=datetime.now(timezone.utc),
+        target_id=args.target_id,
+        target_revision_id=args.target_revision_id,
+    )
+
+    try:
+        package = assemble_verification_package(
+            target_id=args.target_id,
+            environment=environment,
+            revision=args.target_revision_id,
+            authorization=authorization,
+            scenario=args.scenario,
+            execution_id=args.execution_id,
+            actions=actions,
+            observations=observations,
+            execution_status=execution_status,
+            limitations=args.limitations,
+            next_action=args.next_action,
+        )
+    except (ValueError, ValidationError) as exc:
+        print(f"error: không lắp được Verification Package: {exc}", file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        print(package.model_dump_json(indent=2))
+    else:
+        print(f"package_id: {package.package_id}")
+        print(f"verdict: {package.verdict.value} — {package.verdict_reason}")
+        print(f"identities: {', '.join(package.identities)}")
+        print(f"action_record: {len(package.action_record)} action(s)")
+        missing = package.missing_fields_for_release()
+        print(f"is_release_ready: {package.is_release_ready}" + (f" (thiếu: {missing})" if missing else ""))
+    return 0
+
+
+def cmd_review_package(args: argparse.Namespace) -> int:
+    """Gate 4 — Human Review Loop tối thiểu (SPEC §4.5). Đọc lại 1
+    VerificationPackage đã lắp (`secweave assemble-package --format json`),
+    gắn `HumanReviewRecord` do người review cung cấp, in lại package đã
+    cập nhật. Đây là bản tối thiểu — chưa có UI, chưa tự động hoá gì cả,
+    đúng chủ đích: SPEC bắt buộc con người tự tay đối chiếu raw artifact,
+    không phải thứ CLI có thể làm thay.
+
+    Ràng buộc cứng của SPEC §4.5 được giữ bằng THIẾT KẾ ở phần lớn field
+    (không flag nào cho sửa `raw_evidence_references`/`artifact_hashes`/
+    `normalized_observations`/`action_record` — chỉ đọc lại nguyên trạng từ
+    file). Nhưng `predicate_results`/`verdict` chính chúng lại NẰM SẴN
+    trong file — review độc lập tìm ra: 1 file JSON bị sửa tay (fabricate
+    `verdict`+`predicate_results` khớp nhau về logic nội bộ, nhưng không
+    khớp với `normalized_observations` thật) vẫn qua được mọi validator
+    hiện có, vì các validator chỉ kiểm NỘI BỘ package tự nhất quán, không
+    đối chiếu lại với observation thật. Sửa bằng cách tính lại
+    `evaluate_predicates()` trên đúng `normalized_observations` trong file
+    rồi so với `predicate_results` đã khai — lệch là từ chối, không hỏi gì
+    thêm.
+    """
+    package_path = Path(args.package_file)
+    try:
+        package_data = json.loads(package_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"error: không tìm thấy package file '{package_path}'", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as exc:
+        print(f"error: '{package_path}' không phải JSON hợp lệ: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        decision = ReviewDecision(args.decision)
+    except ValueError:
+        valid = ", ".join(d.value for d in ReviewDecision)
+        print(f"error: --decision không hợp lệ '{args.decision}' — chỉ chấp nhận: {valid}", file=sys.stderr)
+        return 1
+
+    if args.retest_reference and decision != ReviewDecision.RETEST:
+        # Real gap found via independent review: --retest-reference could be
+        # set together with ANY decision (vd release), tạo ra 1 package vừa
+        # is_release_ready=True vừa mang retest_reference — mâu thuẫn với
+        # đúng ý nghĩa field #19 ("absent until retests have run").
+        print(
+            "error: --retest-reference chỉ hợp lệ cùng --decision retest "
+            f"(đang dùng --decision {decision.value}).",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        observations_for_check = [NormalizedObservation(**o) for o in package_data.get("normalized_observations", [])]
+        declared_results = {
+            (r["group"], r["status"]) for r in package_data.get("predicate_results", [])
+        }
+        recomputed_results = {
+            (r.group.value, r.status.value) for r in evaluate_predicates(observations_for_check)
+        }
+    except (ValidationError, KeyError, TypeError) as exc:
+        print(f"error: không đọc được normalized_observations/predicate_results trong file: {exc}", file=sys.stderr)
+        return 1
+    if declared_results != recomputed_results:
+        # Real bypass found via independent review: without this check, a
+        # hand-edited package file with a fabricated verdict=confirmed +
+        # matching (but fake) predicate_results — while normalized_
+        # observations was left untouched, still showing no real satisfying
+        # evidence — passed every existing validator (they only check
+        # INTERNAL consistency, e.g. "CONFIRMED requires all 3 groups
+        # satisfied," never that predicate_results actually reflects the
+        # observations it claims to summarize) and came out the other end
+        # with a legitimate-looking, decision=release human_review_record
+        # attached. Recomputing from the package's OWN normalized_
+        # observations and refusing on any mismatch closes this — a real
+        # assemble-package run always produces a package where these agree,
+        # so this never fires for output that wasn't hand-tampered with.
+        print(
+            "error: predicate_results trong file KHÔNG khớp với normalized_observations thật — "
+            "package này có dấu hiệu bị sửa tay sau khi `assemble-package` chạy, từ chối review.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # SPEC §4.5 bước 1: "Đối chiếu ít nhất một raw artifact với normalized
+    # observation" — CLI không tự làm thay được (đây đúng là việc chỉ con
+    # người mới làm được), nhưng in sẵn danh sách ra để reviewer thực sự có
+    # thứ để đối chiếu ngay trên màn hình, thay vì chỉ tin lời khai
+    # --checked-raw-artifact.
+    raw_refs = package_data.get("raw_evidence_references", [])
+    print(f"-> {len(raw_refs)} raw evidence reference cần đối chiếu trước khi quyết định:", file=sys.stderr)
+    for ref in raw_refs:
+        print(f"     {ref}", file=sys.stderr)
+
+    existing_review = package_data.get("human_review_record")
+    if existing_review:
+        # Real gap found via independent review: overwriting silently left
+        # zero trace that a PRIOR reviewer's decision (e.g. a reject) ever
+        # existed. Not blocked outright (a legitimate re-review after a
+        # rejected package gets fixed and reassembled is a real workflow),
+        # but surfaced loudly so an operator watching the terminal/log sees
+        # exactly what's being replaced.
+        print(
+            f"CẢNH BÁO: đang GHI ĐÈ 1 human_review_record đã có — reviewer trước: "
+            f"'{existing_review.get('reviewer')}', decision trước: '{existing_review.get('decision')}', "
+            f"lý do trước: '{existing_review.get('reason')}'.",
+            file=sys.stderr,
+        )
+
+    review_record = {
+        "reviewer": args.reviewer,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "decision": decision.value,
+        "reason": args.reason,
+        "checked_raw_artifact": args.checked_raw_artifact,
+    }
+    package_data["human_review_record"] = review_record
+    if args.retest_reference:
+        package_data["retest_reference"] = args.retest_reference
+
+    try:
+        # Rebuilding the WHOLE object (not a partial model_copy(update=...),
+        # which does not re-run validators) so every validator — including
+        # HumanReviewRecord's own decision=release/checked_raw_artifact
+        # check and VerificationPackage's predicate-completeness checks —
+        # runs again against the fully updated data, not just the new field
+        # in isolation.
+        package = VerificationPackage(**package_data)
+    except ValidationError as exc:
+        print(f"error: không gắn được human_review_record vào package: {exc}", file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        print(package.model_dump_json(indent=2))
+    else:
+        print(f"package_id: {package.package_id}")
+        print(f"decision: {package.human_review_record.decision.value} — {package.human_review_record.reason}")
+        missing = package.missing_fields_for_release()
+        print(f"is_release_ready: {package.is_release_ready}" + (f" (thiếu: {missing})" if missing else ""))
+    return 0
 
 
 def cmd_kill(args: argparse.Namespace) -> int:
@@ -1007,6 +1280,74 @@ def build_parser() -> argparse.ArgumentParser:
         "KillSwitch.resume() cho phép để trống",
     )
     resume_parser.set_defaults(func=cmd_resume)
+
+    assemble_package_parser = subparsers.add_parser(
+        "assemble-package",
+        help="Lắp Verification Package (SPEC §7) từ artifact thật của 1 lượt `execute` đã chạy — đọc "
+        "lại observations.jsonl/actions.json/execution_status.json, không cần --plan-file gốc",
+    )
+    assemble_package_parser.add_argument("--execution-id", required=True, help="execution_id đã `execute`")
+    assemble_package_parser.add_argument(
+        "--storage-dir",
+        default=DEFAULT_EVIDENCE_STORAGE_DIR,
+        help="Phải TRÙNG --storage-dir đã dùng khi `execute` execution này (mặc định: %(default)s)",
+    )
+    assemble_package_parser.add_argument("--target-id", required=True, help="target_id — trường #2 SPEC §7")
+    assemble_package_parser.add_argument(
+        "--target-revision-id", required=True, help="Dùng làm revision — trường #4 SPEC §7"
+    )
+    assemble_package_parser.add_argument(
+        "--environment",
+        required=True,
+        choices=[e.value for e in Environment],
+        help="Trường #3 SPEC §7 — target không bao giờ được là production (NX-GO-02)",
+    )
+    assemble_package_parser.add_argument(
+        "--authorization-reference",
+        required=True,
+        help="Mô tả phê duyệt thật đã cho phép lượt chạy này (trường #5 SPEC §7) — bắt buộc, không có "
+        "giá trị mặc định, vì đây là phán đoán của con người không tự sinh được",
+    )
+    assemble_package_parser.add_argument(
+        "--scenario", required=True, help="Mô tả kịch bản đã kiểm chứng (trường #6 SPEC §7) — bắt buộc"
+    )
+    assemble_package_parser.add_argument(
+        "--limitations",
+        required=True,
+        help="Giới hạn thật của lượt chạy này (trường #17 SPEC §7, 'nên đọc đầu tiên') — bắt buộc",
+    )
+    assemble_package_parser.add_argument(
+        "--next-action", required=True, help="Bước tiếp theo đề xuất (trường #18 SPEC §7) — bắt buộc"
+    )
+    assemble_package_parser.add_argument("--format", default="table", choices=["table", "json"])
+    assemble_package_parser.set_defaults(func=cmd_assemble_package)
+
+    review_package_parser = subparsers.add_parser(
+        "review-package",
+        help="Gate 4 — Human Review Loop tối thiểu (SPEC §4.5): gắn quyết định review của con người "
+        "vào 1 Verification Package đã lắp qua `assemble-package`",
+    )
+    review_package_parser.add_argument(
+        "--package-file", required=True, help="File JSON của package đã lắp (`assemble-package --format json`)"
+    )
+    review_package_parser.add_argument("--reviewer", required=True, help="Tên/định danh người review")
+    review_package_parser.add_argument(
+        "--decision", required=True, choices=[d.value for d in ReviewDecision], help="Quyết định của người review"
+    )
+    review_package_parser.add_argument(
+        "--reason", required=True, help="Lý do cho quyết định — bắt buộc kể cả khi release"
+    )
+    review_package_parser.add_argument(
+        "--checked-raw-artifact",
+        action="store_true",
+        help="Xác nhận ĐÃ tự tay đối chiếu ít nhất 1 raw evidence reference (in ra ở stderr) với "
+        "normalized observation tương ứng (SPEC §4.5) — decision=release bắt buộc phải có cờ này",
+    )
+    review_package_parser.add_argument(
+        "--retest-reference", help="Tham chiếu tới lượt retest (nếu decision=retest) — tuỳ chọn"
+    )
+    review_package_parser.add_argument("--format", default="table", choices=["table", "json"])
+    review_package_parser.set_defaults(func=cmd_review_package)
 
     return parser
 

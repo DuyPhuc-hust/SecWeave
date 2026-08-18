@@ -142,25 +142,43 @@ def test_package_release_ready_ignores_decision_content_was_a_real_bug_now_fixed
     assert any("decision" in m for m in package.missing_fields_for_release())
 
 
-def test_package_release_ready_requires_checked_raw_artifact_true():
-    # Real gap found via independent review: a reviewer setting
-    # decision=RELEASE without ever actually cross-checking a raw artifact
-    # (SPEC §4.5's own requirement for what counts as a real review) still
-    # reported is_release_ready=True.
-    package = VerificationPackage(
-        **_base_package_kwargs(
-            human_review_record=HumanReviewRecord(
-                reviewer="reviewer@secweave.local",
-                reviewed_at=datetime(2026, 8, 18, tzinfo=timezone.utc),
-                decision=ReviewDecision.RELEASE,
-                reason="Looks fine.",
-                checked_raw_artifact=False,
-            ),
-            retest_reference="retest_run_1",
+def test_human_review_record_rejects_release_without_checked_raw_artifact():
+    # Real gap found via independent review, hardened further alongside
+    # `secweave review-package`: a reviewer setting decision=RELEASE without
+    # ever actually cross-checking a raw artifact (SPEC §4.5's own
+    # requirement for what counts as a real review) used to construct
+    # without error — VerificationPackage.missing_fields_for_release()
+    # caught it at the OUTER model, but HumanReviewRecord itself had no
+    # independent check, matching this project's established pattern that
+    # every safety-critical model should validate its own invariant, not
+    # rely solely on an outer caller having done so.
+    with pytest.raises(ValidationError):
+        HumanReviewRecord(
+            reviewer="reviewer@secweave.local",
+            reviewed_at=datetime(2026, 8, 18, tzinfo=timezone.utc),
+            decision=ReviewDecision.RELEASE,
+            reason="Looks fine.",
+            checked_raw_artifact=False,
         )
+
+
+def test_package_construction_itself_rejects_an_invalid_review_record():
+    # Confirms VerificationPackage's own construction path enforces this
+    # too (pydantic re-validates a nested model instance embedded into an
+    # outer model here, so the contradiction can't slip through even via
+    # a pre-built HumanReviewRecord) — not just HumanReviewRecord in
+    # isolation.
+    invalid_record = HumanReviewRecord.model_construct(
+        reviewer="reviewer@secweave.local",
+        reviewed_at=datetime(2026, 8, 18, tzinfo=timezone.utc),
+        decision=ReviewDecision.RELEASE,
+        reason="Looks fine.",
+        checked_raw_artifact=False,
     )
-    assert package.is_release_ready is False
-    assert any("checked_raw_artifact" in m for m in package.missing_fields_for_release())
+    with pytest.raises(ValidationError):
+        VerificationPackage(
+            **_base_package_kwargs(human_review_record=invalid_record, retest_reference="retest_run_1")
+        )
 
 
 def test_package_with_both_fields_is_release_ready():
@@ -178,6 +196,16 @@ def test_package_with_both_fields_is_release_ready():
     )
     assert package.missing_fields_for_release() == []
     assert package.is_release_ready is True
+
+
+def test_package_rejects_empty_scenario():
+    # Real gap found via independent review: scenario (SPEC field #6) was
+    # the only one of the 4 required-judgment text fields missing
+    # min_length=1 — an empty scenario silently passed through, including
+    # via `secweave assemble-package`'s --scenario flag (itself required
+    # with no CLI-level emptiness check either, relying on this model).
+    with pytest.raises(ValidationError):
+        VerificationPackage(**_base_package_kwargs(scenario=""))
 
 
 def test_package_rejects_empty_limitations():

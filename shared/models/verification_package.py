@@ -74,6 +74,29 @@ class HumanReviewRecord(BaseModel):
             )
         return value
 
+    @model_validator(mode="after")
+    def _check_release_requires_checked_raw_artifact(self) -> "HumanReviewRecord":
+        # Defense-in-depth, added alongside `secweave review-package`:
+        # VerificationPackage.missing_fields_for_release() already checks
+        # this at the OUTER model (decision must be RELEASE AND
+        # checked_raw_artifact must be True for is_release_ready), so this
+        # isn't closing a live bypass today — but HumanReviewRecord is a
+        # standalone model that could be constructed/reused outside a full
+        # VerificationPackage in the future, and this project's established
+        # pattern is that every safety-critical model validates its own
+        # invariant independently rather than relying solely on an outer
+        # caller to have done so (see VerdictResult/VerificationPackage's
+        # own predicate-completeness checks for the same reasoning).
+        # SPEC §4.5: releasing requires having personally cross-checked
+        # >=1 raw artifact — a decision=RELEASE record that never set this
+        # is a contradiction in terms, not a valid record of what happened.
+        if self.decision == ReviewDecision.RELEASE and not self.checked_raw_artifact:
+            raise ValueError(
+                "decision=release yêu cầu checked_raw_artifact=true — SPEC §4.5: người review phải "
+                "tự tay đối chiếu ít nhất 1 raw artifact trước khi phát hành, không chỉ đọc tóm tắt."
+            )
+        return self
+
 
 class VerificationPackage(BaseModel):
     """SPEC §7's 19 fields, verbatim order. Field numbers in comments match
@@ -86,7 +109,13 @@ class VerificationPackage(BaseModel):
     environment: Environment  # 3. Environment
     revision: str  # 4. Revision (target_revision_id)
     authorization_reference: str  # 5. Authorization reference
-    scenario: str  # 6. Scenario
+    # Real gap found via independent review: this required-judgment field
+    # was missing the min_length=1 constraint its siblings (verdict_reason/
+    # limitations/next_action, below) all have — an empty scenario silently
+    # passed straight through, including via `secweave assemble-package`'s
+    # --scenario flag (itself deliberately required with no CLI-level
+    # emptiness check either, relying on this model to be the real gate).
+    scenario: str = Field(min_length=1)  # 6. Scenario
     identities: List[str] = Field(min_length=1)  # 7. Identity (plural — a real run needs >=2 to have
     # a meaningful positive_control/denied_control pair; SPEC names this
     # field singular but this codebase's own Evidence Harness already
