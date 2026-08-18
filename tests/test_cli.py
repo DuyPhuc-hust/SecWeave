@@ -1538,6 +1538,156 @@ def test_cli_execute_with_plan_file_never_calls_the_llm(capsys, monkeypatch, tmp
     assert "Traceback" not in captured.err
 
 
+def test_cli_execute_sensitive_param_redacts_value_from_the_stored_transcript(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: capture() has always accepted
+    # sensitive_body_keys (caller-declared parameter names whose VALUES
+    # never get written to the raw evidence transcript), but cmd_execute
+    # never passed anything through it — a secret-shaped value in
+    # ActionSpec.parameters (a password field, an API key) landed in the
+    # on-disk artifact in plaintext, permanently, with no way to mark it.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_sensitive_test"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/login",
+                                "description": "d",
+                                "parameters": {"username": "tester", "password": "supersecret123"},
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/login params:username,password",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+            "--sensitive-param",
+            "password",
+        ]
+    )
+    assert exit_code == 0
+
+    transcripts = list((storage_dir / execution_id).glob("obs_*.json"))
+    assert len(transcripts) == 1
+    stored = transcripts[0].read_text(encoding="utf-8")
+    assert "supersecret123" not in stored
+    assert "tester" in stored  # non-sensitive fields still stored in the clear
+
+
+def test_cli_execute_persists_structured_observations_alongside_the_raw_transcript(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: capture() returns a structured
+    # NormalizedObservation, but cmd_execute only ever used it in-memory
+    # (for decide()) and never persisted it — only the raw transcript
+    # landed on disk, in a shape missing execution_id/target_id/
+    # target_revision_id/channel/raw_evidence_hash/access_result. That left
+    # no path to reconstruct observations for a later VerificationPackage
+    # assembly. observations.jsonl closes that gap.
+    from shared.models.observation import NormalizedObservation
+
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_persist_test"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {"type": "read_only", "method": "GET", "target": "http://host.docker.internal:3000", "description": "d"}
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+
+    log_path = storage_dir / execution_id / "observations.jsonl"
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    observation = NormalizedObservation(**json.loads(lines[0]))
+    assert observation.execution_id == execution_id
+    assert observation.target_id == "tgt_test"
+    assert observation.target_revision_id == "rev_test"
+    assert observation.status_code == 200
+
+
 def test_cli_execute_plan_file_rejects_mismatched_hypothesis_id(capsys, monkeypatch, tmp_path):
     db_path = str(tmp_path / "test.db")
     plan_file = tmp_path / "plan.json"

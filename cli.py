@@ -650,6 +650,7 @@ def cmd_execute(args: argparse.Namespace) -> int:
         kill_switch=kill_switch,
         cost_service=cost_service,
     )
+    harness_storage_dir = Path(args.storage_dir) / execution_id  # matches EvidenceHarness's own layout
 
     print(f"-> execution_id: {execution_id}")
     print(
@@ -657,12 +658,27 @@ def cmd_execute(args: argparse.Namespace) -> int:
         f"'{args.identity}', role=main cho tất cả — xem docstring cmd_execute về giới hạn này)..."
     )
 
+    # Real gap found via independent review: capture() has always accepted
+    # sensitive_body_keys (caller-declared parameter names whose VALUES
+    # never get written into the raw evidence transcript — see its
+    # docstring), but cmd_execute never passed anything through it. Any
+    # action whose ActionSpec.parameters legitimately needs to carry a
+    # secret-shaped value (a password field in a password-reset/IDOR test,
+    # an API key in a query param — both explicitly supported by Policy
+    # Service's params: allowlist syntax) was written to disk in plaintext,
+    # permanently, with no way to mark it sensitive.
+    sensitive_body_keys = set(args.sensitive_param or [])
     observations = []
     stopped_reason = None
     try:
         for check in review.plan_check.checks:
             try:
-                observation = harness.capture(check.action, role=ObservationRole.MAIN, identity=args.identity)
+                observation = harness.capture(
+                    check.action,
+                    role=ObservationRole.MAIN,
+                    identity=args.identity,
+                    sensitive_body_keys=sensitive_body_keys,
+                )
             except RuntimeError as exc:
                 # Real gap found via independent review: catching only
                 # (ExecutionStoppedError, CostCapExceededError) missed a
@@ -677,6 +693,25 @@ def cmd_execute(args: argparse.Namespace) -> int:
                 print(f"   DỪNG GIỮA CHỪNG: {exc}", file=sys.stderr)
                 break
             observations.append(observation)
+            # Real gap found via independent review: capture() returns a
+            # structured NormalizedObservation, but cmd_execute previously
+            # only ever used it in-memory (for decide(), below) and never
+            # persisted it — only the raw request/response transcript
+            # landed on disk (evidence_harness/harness.py), in a shape
+            # that's missing execution_id/target_id/target_revision_id/
+            # channel/raw_evidence_hash/access_result. That left NO path
+            # (via CLI or by reading files back) to reconstruct the
+            # observations needed to assemble a VerificationPackage after
+            # the fact — only hand re-deriving every field from the raw
+            # transcript, error-prone and undocumented. Appended one JSON
+            # object per line (not a single JSON array rewritten each time)
+            # so a crash/kill mid-loop loses at most the one in-flight
+            # write, matching the same append-only philosophy as the
+            # kill-switch/cost audit logs, and so multiple `execute`
+            # invocations reusing one execution_id accumulate here too.
+            observations_log_path = harness_storage_dir / "observations.jsonl"
+            with open(observations_log_path, "a", encoding="utf-8") as f:
+                f.write(observation.model_dump_json() + "\n")
             print(
                 f"   [{observation.access_result.value}] {check.action.method} {check.action.target} "
                 f"(HTTP {observation.status_code})"
@@ -912,6 +947,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     execute_parser.add_argument(
         "--identity", default="anonymous", help="Identity dùng để gửi mọi action (mặc định: %(default)s)"
+    )
+    execute_parser.add_argument(
+        "--sensitive-param",
+        action="append",
+        help="Tên field trong ActionSpec.parameters (hoặc query string cùng tên trong target) mà GIÁ "
+        "TRỊ không được ghi ra đĩa trong transcript bằng chứng — lặp lại flag để khai nhiều field "
+        "(vd --sensitive-param password --sensitive-param api_key). Chỉ ảnh hưởng bản ghi lưu lại, "
+        "không ảnh hưởng request thật đã gửi. Không truyền = không field nào được coi là nhạy cảm "
+        "ngoài header Authorization/Cookie/Set-Cookie (luôn redact sẵn).",
     )
     _add_llm_mode_arg(execute_parser)
     _add_context_db_arg(execute_parser)
