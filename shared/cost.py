@@ -88,19 +88,11 @@ class CostService:
     trick requires — nothing here can make one caller's write land out of
     true logical order, so that whole class of bug does not apply.
 
-    Scope boundary, stated plainly (same limitation KillSwitch's own
-    docstring already discloses — found missing here via independent
-    review): `self._lock` is a plain in-process `threading.Lock`, providing
-    mutual exclusion only between calls made through the SAME instance,
-    never across two different instances (even in the same process, let
-    alone two OS processes pointed at the same storage_dir). Two instances
-    can each recover the same count, both see `count < cap`, and both
-    record an action — jointly exceeding cap by more than 1. Every call
-    site in this codebase constructs exactly one CostService per
-    execution_id within a single process, matching this constraint; true
-    cross-process concurrent safety (an OS-level file lock, or an external
-    coordination store) is a bigger mechanism this MVP increment does not
-    attempt.
+    Scope boundary: same cross-instance limitation as KillSwitch (see its
+    own docstring) — two CostService instances can each recover the same
+    count, both see `count < cap`, and both record an action, jointly
+    exceeding cap by more than 1. Every call site here constructs exactly
+    one CostService per execution_id within a single process.
     """
 
     def __init__(self, execution_id: str, storage_dir: str, cap: int) -> None:

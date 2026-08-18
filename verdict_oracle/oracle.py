@@ -98,11 +98,7 @@ def assemble_verdict(results: List[PredicateResult], execution_status: Execution
     dict-comprehension-silently-keeps-last-duplicate bug elsewhere).
 
     `execution_status` is REQUIRED, not optional/defaulted — see this
-    module's docstring for why a silent default would risk quietly
-    reintroducing the exact bug this parameter was added to close. Only
-    `ExecutionStatus.COMPLETED` can produce CONFIRMED/NOT_REPRODUCED; every
-    other status forces INCONCLUSIVE regardless of what the predicates say
-    (SPEC §3.4).
+    module's docstring for why (SPEC §3.4).
     """
     groups_present = [r.group for r in results]
     if set(groups_present) != _REQUIRED_GROUPS or len(groups_present) != len(_REQUIRED_GROUPS):

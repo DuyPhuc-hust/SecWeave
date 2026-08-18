@@ -237,17 +237,13 @@ class VerificationPackage(BaseModel):
 
     @model_validator(mode="after")
     def _check_predicate_results_cover_all_required_groups(self) -> "VerificationPackage":
-        # Real gap in the check above, found via independent review: it's
-        # vacuously TRUE for a predicate_results list that's simply missing
-        # a required group (e.g. only [MAIN, MAIN, MAIN], no
-        # positive_control/denied_control at all) — nothing in such a list
-        # can be anything OTHER than satisfied. Scoped to CONFIRMED only,
-        # same as the check above and for the same reason: an existing,
+        # See predicate_results_cover_all_required_groups()'s docstring for
+        # why this check exists. Scoped to CONFIRMED only (unlike
+        # VerdictResult's unconditional version) because an existing,
         # deliberate test (test_package_allows_inconclusive_verdict_even_
         # when_predicate_results_is_empty) establishes that a non-CONFIRMED
-        # package legitimately may have incomplete/empty predicate_results
-        # (e.g. a run that stopped before any observation existed) — only
-        # the CONFIRMED direction is the one SPEC treats as never acceptable.
+        # package may legitimately have incomplete/empty predicate_results
+        # (e.g. a run stopped before any observation existed).
         if self.verdict == Verdict.CONFIRMED and not predicate_results_cover_all_required_groups(
             self.predicate_results
         ):

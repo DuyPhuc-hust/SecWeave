@@ -280,27 +280,13 @@ class VerdictResult(BaseModel):
 
     @model_validator(mode="after")
     def _check_predicate_results_cover_all_required_groups(self) -> "VerdictResult":
-        # Real gap in the check above, found via independent review:
-        # `all(r.status == SATISFIED for r in results)` is vacuously TRUE
-        # for a list that's simply missing a required group (e.g. only
-        # [MAIN: satisfied], no positive_control/denied_control entries at
-        # all) — nothing in a shorter list can be anything OTHER than
-        # satisfied. assemble_verdict() (verdict_oracle/oracle.py) already
-        # requires exactly these 3 groups, no duplicates, as an input
-        # precondition for EVERY verdict it produces (not only CONFIRMED) —
-        # this reproduces that same invariant here as an independent
-        # model-level backstop, unconditional on verdict value, for any
-        # other code path that builds/reloads this model directly.
-        # Deliberately stricter here than VerificationPackage's equivalent
-        # check (that one is scoped to verdict==CONFIRMED only, since an
-        # incomplete/early-stopped run may legitimately produce a package
-        # with no predicate_results at all — SPEC §4.5's "execution record"
-        # fallback): VerdictResult's own docstring ties it specifically to
-        # assemble_verdict()'s output, which — via evaluate_predicates() —
-        # always produces exactly these 3 groups (even all
-        # INSUFFICIENT_DATA for zero observations), for every verdict it
-        # returns. There is no legitimate VerdictResult with an incomplete
-        # group set, confirmed and unconditional.
+        # See predicate_results_cover_all_required_groups()'s docstring for
+        # why this check exists. Unconditional here (unlike
+        # VerificationPackage's equivalent, scoped to verdict==CONFIRMED
+        # only) because this model's own docstring ties it specifically to
+        # assemble_verdict()'s output, which always produces exactly these
+        # 3 groups for every verdict — there is no legitimate VerdictResult
+        # with an incomplete group set.
         if not predicate_results_cover_all_required_groups(self.predicate_results):
             raise ValueError(
                 f"predicate_results phải có đúng 1 kết quả cho mỗi nhóm bắt buộc "

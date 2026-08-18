@@ -9,16 +9,10 @@ project has fixed more than once elsewhere — e.g. PlanReviewResult
 combining plan_check/cost_check instead of trusting a separately-passed
 `approved` bool).
 
-Scope, stated plainly: this does NOT build SPEC §4.5's alternate
-"execution record" artifact (for when a package genuinely cannot be
-formed at all — see the empty-observations check below, which raises a
-clear error for exactly that case rather than attempting to build one).
-decide() never raises for an INCOMPLETE-but-non-empty observation set —
-evaluate_predicates() fills in INSUFFICIENT_DATA for any of the 3 required
-groups with no matching observation, which assemble_verdict() turns into a
-graceful INCONCLUSIVE verdict — so assembling a package from a partial run
-(at least 1 real observation) still succeeds here, just with an unhelpful
-verdict and (ideally) a `limitations` string that says so.
+Scope: does NOT build SPEC §4.5's alternate "execution record" artifact
+(see the empty-observations check below for that case). A partial run
+(at least 1 real observation) still succeeds — decide() never raises for
+an incomplete-but-non-empty set, just returns an unhelpful verdict.
 """
 
 from typing import List

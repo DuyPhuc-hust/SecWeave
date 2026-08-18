@@ -222,13 +222,11 @@ class KillSwitch:
 
         Only ever moves forward: adopts the disk-recovered state ONLY if
         its `sequence` is strictly greater than what this instance already
-        has. This matters even for a single-instance/single-process caller
-        — without it, a `refresh()` call racing a concurrent `stop()` on
-        THIS SAME instance could read a stale/incomplete view mid-write and
-        regress `_status` backward. Comparing by `sequence` (assigned
-        atomically under `self._lock` at transition time — see this
-        module's docstring) rather than trusting whatever the read
-        happened to see keeps this safe regardless of timing.
+        has (see this module's docstring for why `sequence`, not physical
+        file order, is the safe comparison). This matters even for a
+        single-instance/single-process caller — without it, a `refresh()`
+        call racing a concurrent `stop()` on THIS SAME instance could read
+        a stale/incomplete view mid-write and regress `_status` backward.
         """
         recovered_status, recovered_sequence = self._recover_from_audit_log()
         with self._lock:
