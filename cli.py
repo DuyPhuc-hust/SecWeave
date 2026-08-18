@@ -31,23 +31,32 @@ from verification_package.assembler import assemble_verification_package
 DEFAULT_EVIDENCE_STORAGE_DIR = ".secweave/evidence"
 
 
-def _open_context_store(db_path: str) -> Optional[SecurityContextStore]:
-    """Opens the Context Store, printing a clean error and returning None
-    on failure — every cmd_* function needing a store repeats this shape
-    (a constructor failure is sqlite3.Error, not the RuntimeError store
+class CliError(Exception):
+    """Raised by business-logic helpers/orchestration functions for a
+    user-facing error condition. Every cmd_* function catches this at its
+    boundary, prints `error: {message}` to stderr, and returns 1 — the
+    single place presentation (printing, exit codes) meets business logic,
+    so the logic itself stays callable/testable directly (construct
+    inputs, assert on a return value or a raised CliError) without going
+    through argparse or capturing stdout."""
+
+
+def _open_context_store(db_path: str) -> SecurityContextStore:
+    """Opens the Context Store, raising CliError with a clean message on
+    failure — every cmd_* function needing a store hits this shape (a
+    constructor failure is sqlite3.Error, not the RuntimeError store
     methods raise, so it needs its own handling)."""
     try:
         return SecurityContextStore(db_path=db_path)
     except sqlite3.Error as exc:
-        print(f"error: không mở được Context Store tại '{db_path}': {exc}", file=sys.stderr)
-        return None
+        raise CliError(f"không mở được Context Store tại '{db_path}': {exc}") from exc
 
 
 def _print_skip_warning(message: str) -> None:
     print(f"CẢNH BÁO: {message}", file=sys.stderr)
 
 
-def _load_signals(args: argparse.Namespace) -> Optional[List[NormalizedSignal]]:
+def _load_signals(args: argparse.Namespace) -> List[NormalizedSignal]:
     normalizer = SignalNormalizer()
     try:
         return normalizer.normalize_file(
@@ -58,16 +67,16 @@ def _load_signals(args: argparse.Namespace) -> Optional[List[NormalizedSignal]]:
             on_skip=_print_skip_warning,
         )
     except FileNotFoundError:
-        print(f"error: không tìm thấy file '{args.signal}'", file=sys.stderr)
-        return None
+        raise CliError(f"không tìm thấy file '{args.signal}'")
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return None
+        raise CliError(str(exc)) from exc
 
 
 def cmd_normalize(args: argparse.Namespace) -> int:
-    signals = _load_signals(args)
-    if signals is None:
+    try:
+        signals = _load_signals(args)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
     if args.format == "json":
@@ -86,8 +95,9 @@ def cmd_normalize(args: argparse.Namespace) -> int:
 
 def _build_llm_client(args: argparse.Namespace, agent_mode_message: str, api_mode_subject: str):
     """Builds an LLM client according to --llm-mode, printing the matching
-    warning. Returns None (error already printed to stderr) if construction
-    fails in api mode (missing env var)."""
+    warning (a safety disclosure, not error handling — always fires on
+    success). Raises CliError if construction fails in api mode (missing
+    env var)."""
     if args.llm_mode == "agent":
         from hypothesis_engine.llm_client.agent_bridge_client import AgentBridgeLLMClient
 
@@ -100,8 +110,7 @@ def _build_llm_client(args: argparse.Namespace, agent_mode_message: str, api_mod
     try:
         llm_client = OpenAICompatibleLLMClient()
     except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return None
+        raise CliError(str(exc)) from exc
     print(
         f"CẢNH BÁO: sắp gửi {api_mode_subject} tới LLM thật (model={llm_client.model}).",
         file=sys.stderr,
@@ -110,9 +119,15 @@ def _build_llm_client(args: argparse.Namespace, agent_mode_message: str, api_mod
 
 
 def cmd_hypothesize(args: argparse.Namespace) -> int:
-    signals = _load_signals(args)
-    if signals is None:
+    try:
+        return _run_hypothesize(args)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
+
+
+def _run_hypothesize(args: argparse.Namespace) -> int:
+    signals = _load_signals(args)
 
     source_snippet = None
     if args.source:
@@ -121,8 +136,7 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
             # the OS locale, which a minimal container may not set to UTF-8.
             source_snippet = Path(args.source).read_text(encoding="utf-8")
         except FileNotFoundError:
-            print(f"error: không tìm thấy source file '{args.source}'", file=sys.stderr)
-            return 1
+            raise CliError(f"không tìm thấy source file '{args.source}'")
         except OSError as exc:
             # Real gap found via independent review: only FileNotFoundError
             # was caught — realistic misuse like --source pointing at a
@@ -130,18 +144,14 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
             # (PermissionError) crashed with a raw traceback instead of
             # this command's otherwise-clean failure path. Both are OSError
             # subclasses, caught together here.
-            print(f"error: không đọc được source file '{args.source}': {exc}", file=sys.stderr)
-            return 1
+            raise CliError(f"không đọc được source file '{args.source}': {exc}") from exc
         except UnicodeDecodeError as exc:
             # A binary/non-UTF8 file is equally realistic --source misuse
             # (e.g. accidentally pointing at a compiled artifact) and isn't
             # an OSError, so needs its own clean handling.
-            print(f"error: source file '{args.source}' không phải text UTF-8: {exc}", file=sys.stderr)
-            return 1
+            raise CliError(f"source file '{args.source}' không phải text UTF-8: {exc}") from exc
 
     context_store = _open_context_store(args.context_db)
-    if context_store is None:
-        return 1
 
     try:
         verified_context = (
@@ -160,9 +170,8 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
         # no exception handling at all — a real sqlite failure here (e.g.
         # lock contention) used to escape uncaught and dump a raw
         # traceback instead of this clean error.
-        print(f"error: {exc}", file=sys.stderr)
         context_store.close()
-        return 1
+        raise CliError(str(exc)) from exc
 
     results: List[tuple] = []
     failure: Optional[str] = None
@@ -175,8 +184,6 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
             ),
             api_mode_subject="NormalizedSignal (và source code nếu có)",
         )
-        if llm_client is None:
-            return 1
 
         engine = HypothesisEngine(llm_client)
 
@@ -282,11 +289,8 @@ def _print_hypothesis_record(record: dict) -> None:
     print(f"reason              : {record['reason']}")
 
 
-def cmd_show_hypothesis(args: argparse.Namespace) -> int:
+def _load_hypothesis_records(args: argparse.Namespace) -> List[dict]:
     context_store = _open_context_store(args.context_db)
-    if context_store is None:
-        return 1
-
     try:
         if args.hypothesis_id:
             record = context_store.get_hypothesis(args.hypothesis_id)
@@ -297,14 +301,21 @@ def cmd_show_hypothesis(args: argparse.Namespace) -> int:
             # be looked up by signal_id, it has no hypothesis_id to query by.
             records = context_store.get_hypotheses_by_signal_id(args.signal_id)
     except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        raise CliError(str(exc)) from exc
     finally:
         context_store.close()
 
     if not records:
         key = f"hypothesis_id '{args.hypothesis_id}'" if args.hypothesis_id else f"signal_id '{args.signal_id}'"
-        print(f"error: không tìm thấy bản ghi nào cho {key}", file=sys.stderr)
+        raise CliError(f"không tìm thấy bản ghi nào cho {key}")
+    return records
+
+
+def cmd_show_hypothesis(args: argparse.Namespace) -> int:
+    try:
+        records = _load_hypothesis_records(args)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
     if args.format == "json":
@@ -340,37 +351,31 @@ def _load_stored_hypothesis(record: dict) -> Hypothesis:
     )
 
 
-def _load_hypothesis_from_context_store(
-    context_store: SecurityContextStore, hypothesis_id: str
-) -> Optional[Hypothesis]:
-    """Looks up a stored Hypothesis by id, printing a clean error and
-    returning None on any failure (not found, store error, or a schema
-    mismatch while reconstructing it) — shared by `plan` and `execute`
-    (without --plan-file), both of which start from a stored hypothesis_id
-    the same way. Closes `context_store` once the lookup itself is done,
-    before the (network-free) reconstruction step.
+def _load_hypothesis_from_context_store(context_store: SecurityContextStore, hypothesis_id: str) -> Hypothesis:
+    """Looks up a stored Hypothesis by id, raising CliError on any failure
+    (not found, store error, or a schema mismatch while reconstructing
+    it) — shared by `plan` and `execute` (without --plan-file), both of
+    which start from a stored hypothesis_id the same way. Closes
+    `context_store` once the lookup itself is done, before the
+    (network-free) reconstruction step.
     """
     try:
         record = context_store.get_hypothesis(hypothesis_id)
     except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return None
+        raise CliError(str(exc)) from exc
     finally:
         context_store.close()
 
     if record is None:
-        print(
-            f"error: không tìm thấy hypothesis_id '{hypothesis_id}' (chỉ tra được bản ghi "
-            "status=hypothesis, không tra được not_verifiable)",
-            file=sys.stderr,
+        raise CliError(
+            f"không tìm thấy hypothesis_id '{hypothesis_id}' (chỉ tra được bản ghi "
+            "status=hypothesis, không tra được not_verifiable)"
         )
-        return None
 
     try:
         return _load_stored_hypothesis(record)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return None
+        raise CliError(str(exc)) from exc
 
 
 def _build_local_test_authorization(args: argparse.Namespace) -> Authorization:
@@ -388,29 +393,29 @@ def _build_local_test_authorization(args: argparse.Namespace) -> Authorization:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    context_store = _open_context_store(args.context_db)
-    if context_store is None:
+    try:
+        return _run_plan(args)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
+
+def _run_plan(args: argparse.Namespace) -> int:
+    context_store = _open_context_store(args.context_db)
     hypothesis = _load_hypothesis_from_context_store(context_store, args.hypothesis_id)
-    if hypothesis is None:
-        return 1
 
     llm_client = _build_llm_client(
         args,
         agent_mode_message="Nhờ agent (Claude Code) đọc file prompt và trả JSON, rồi chờ Enter đúng 1 lần.",
         api_mode_subject="Hypothesis",
     )
-    if llm_client is None:
-        return 1
 
     agent = ExploitAgent(llm_client)
 
     try:
         plan_result = agent.plan(hypothesis)
     except (RuntimeError, httpx.HTTPError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        raise CliError(str(exc)) from exc
 
     review = None
     if plan_result.status == ActionPlanStatus.PLANNED:
@@ -451,7 +456,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_frozen_plan(args: argparse.Namespace) -> Optional[ActionPlanResult]:
+def _load_frozen_plan(args: argparse.Namespace) -> ActionPlanResult:
     """Loads a plan PREVIOUSLY produced and reviewed by `secweave plan
     --format json > file`, instead of asking the LLM to plan again — so
     the plan a human reviewed is guaranteed to be the one that executes
@@ -461,58 +466,47 @@ def _load_frozen_plan(args: argparse.Namespace) -> Optional[ActionPlanResult]:
     in-flight execution artifact — same operator-supplied, not-persisted
     handling as Authorization/the allowlist).
 
-    Returns None (error already printed) on any failure. `args.hypothesis_id`
-    is cross-checked against BOTH the file's top-level hypothesis_id AND the
-    embedded ActionPlan.hypothesis_id, so the two can't silently disagree —
-    this is self-consistency of what the file claims, not proof against
-    Context Store ground truth (the whole point of --plan-file is to skip
-    that lookup).
+    Raises CliError on any failure. `args.hypothesis_id` is cross-checked
+    against BOTH the file's top-level hypothesis_id AND the embedded
+    ActionPlan.hypothesis_id, so the two can't silently disagree — this is
+    self-consistency of what the file claims, not proof against Context
+    Store ground truth (the whole point of --plan-file is to skip that
+    lookup).
     """
     try:
         plan_data = json.loads(Path(args.plan_file).read_text(encoding="utf-8"))
     except FileNotFoundError:
-        print(f"error: không tìm thấy plan file '{args.plan_file}'", file=sys.stderr)
-        return None
+        raise CliError(f"không tìm thấy plan file '{args.plan_file}'")
     except OSError as exc:
-        print(f"error: không đọc được plan file '{args.plan_file}': {exc}", file=sys.stderr)
-        return None
+        raise CliError(f"không đọc được plan file '{args.plan_file}': {exc}") from exc
     except json.JSONDecodeError as exc:
-        print(f"error: plan file '{args.plan_file}' không phải JSON hợp lệ: {exc}", file=sys.stderr)
-        return None
+        raise CliError(f"plan file '{args.plan_file}' không phải JSON hợp lệ: {exc}") from exc
 
     if not isinstance(plan_data, dict) or plan_data.get("hypothesis_id") != args.hypothesis_id:
-        print(
-            f"error: plan file '{args.plan_file}' được lập cho hypothesis_id "
+        raise CliError(
+            f"plan file '{args.plan_file}' được lập cho hypothesis_id "
             f"'{plan_data.get('hypothesis_id') if isinstance(plan_data, dict) else '?'}', không khớp "
-            f"--hypothesis-id đã truyền ('{args.hypothesis_id}') — có thể đang dùng nhầm file plan.",
-            file=sys.stderr,
+            f"--hypothesis-id đã truyền ('{args.hypothesis_id}') — có thể đang dùng nhầm file plan."
         )
-        return None
 
     plan_result_data = plan_data.get("plan_result")
     if not isinstance(plan_result_data, dict):
-        print(f"error: plan file '{args.plan_file}' thiếu field 'plan_result'.", file=sys.stderr)
-        return None
+        raise CliError(f"plan file '{args.plan_file}' thiếu field 'plan_result'.")
 
     try:
         plan_result = ActionPlanResult(**plan_result_data)
     except ValidationError as exc:
-        print(
-            f"error: plan file '{args.plan_file}' có 'plan_result' không đúng schema ActionPlanResult: "
-            f"{exc}",
-            file=sys.stderr,
-        )
-        return None
+        raise CliError(
+            f"plan file '{args.plan_file}' có 'plan_result' không đúng schema ActionPlanResult: {exc}"
+        ) from exc
 
     if plan_result.plan is not None and plan_result.plan.hypothesis_id != args.hypothesis_id:
-        print(
-            f"error: plan file '{args.plan_file}': plan_result.plan.hypothesis_id "
+        raise CliError(
+            f"plan file '{args.plan_file}': plan_result.plan.hypothesis_id "
             f"('{plan_result.plan.hypothesis_id}') không khớp --hypothesis-id đã truyền "
             f"('{args.hypothesis_id}') — dù hypothesis_id ở cấp ngoài của file khớp, ActionPlan bên "
-            "trong lại thuộc về 1 hypothesis khác. Có thể file đã bị sửa tay hoặc ghép nhầm.",
-            file=sys.stderr,
+            "trong lại thuộc về 1 hypothesis khác. Có thể file đã bị sửa tay hoặc ghép nhầm."
         )
-        return None
 
     print(f"-> Dùng lại plan ĐÃ ĐÓNG BĂNG từ '{args.plan_file}' (không gọi LLM lại).")
     return plan_result
@@ -538,10 +532,16 @@ def cmd_execute(args: argparse.Namespace) -> int:
     1 bước — nhưng KHÔNG đảm bảo plan thực thi giống plan đã xem qua
     `secweave plan` trước đó, vì LLM không xác định.
     """
+    try:
+        return _run_execute(args)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_execute(args: argparse.Namespace) -> int:
     if args.plan_file:
         plan_result = _load_frozen_plan(args)
-        if plan_result is None:
-            return 1
         # review_plan()/check_plan()/check_cost() are pure Policy/Cost logic
         # (shared/policy.py, shared/cost.py) — none of them ever touch
         # self._llm_client, so no real LLM client is needed just to call
@@ -557,45 +557,36 @@ def cmd_execute(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         context_store = _open_context_store(args.context_db)
-        if context_store is None:
-            return 1
 
         try:
             record = context_store.get_hypothesis(args.hypothesis_id)
         except RuntimeError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+            raise CliError(str(exc)) from exc
         finally:
             context_store.close()
 
         if record is None:
-            print(
-                f"error: không tìm thấy hypothesis_id '{args.hypothesis_id}' (chỉ tra được bản ghi "
-                "status=hypothesis, không tra được not_verifiable)",
-                file=sys.stderr,
+            raise CliError(
+                f"không tìm thấy hypothesis_id '{args.hypothesis_id}' (chỉ tra được bản ghi "
+                "status=hypothesis, không tra được not_verifiable)"
             )
-            return 1
 
         try:
             hypothesis = _load_stored_hypothesis(record)
         except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+            raise CliError(str(exc)) from exc
 
         llm_client = _build_llm_client(
             args,
             agent_mode_message="Nhờ agent (Claude Code) đọc file prompt và trả JSON, rồi chờ Enter đúng 1 lần.",
             api_mode_subject="Hypothesis",
         )
-        if llm_client is None:
-            return 1
 
         agent = ExploitAgent(llm_client)
         try:
             plan_result = agent.plan(hypothesis)
         except (RuntimeError, httpx.HTTPError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+            raise CliError(str(exc)) from exc
 
     if plan_result.status == ActionPlanStatus.NOT_PLANNABLE:
         print(f"NOT_PLANNABLE — {plan_result.reason}")
@@ -634,14 +625,12 @@ def cmd_execute(args: argparse.Namespace) -> int:
     if kill_switch.status == ExecutionStatus.PREPARED:
         kill_switch.start()
     elif kill_switch.status == ExecutionStatus.STOPPED:
-        print(
-            f"error: execution '{execution_id}' đã STOPPED trước đó — không tự động tiếp tục "
+        raise CliError(
+            f"execution '{execution_id}' đã STOPPED trước đó — không tự động tiếp tục "
             "(SPEC §6.4 control #10: không tiếp tục sau stop-work trigger nếu chưa được cho phép "
             f"chạy lại). Chạy `secweave resume --execution-id {execution_id} --storage-dir "
-            f"{args.storage_dir} --authorization-reference '...'` trước, rồi execute lại.",
-            file=sys.stderr,
+            f"{args.storage_dir} --authorization-reference '...'` trước, rồi execute lại."
         )
-        return 1
     # else: RUNNING — a prior `execute` for this execution_id already
     # started it; continue accumulating against the same KillSwitch/
     # CostService state rather than re-starting.
@@ -653,8 +642,6 @@ def cmd_execute(args: argparse.Namespace) -> int:
     # the `finally:` below alongside harness.close(), so every capture()
     # can write its SPEC §4.6 unverified observation as it happens.
     execution_context_store = _open_context_store(args.context_db)
-    if execution_context_store is None:
-        return 1
     harness = EvidenceHarness(
         execution_id=execution_id,
         target_id=args.target_id,
@@ -792,6 +779,14 @@ def cmd_assemble_package(args: argparse.Namespace) -> int:
     `assemble_verification_package()` giữ các field này tách khỏi
     execution hot path.
     """
+    try:
+        return _run_assemble_package(args)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_assemble_package(args: argparse.Namespace) -> int:
     execution_dir = Path(args.storage_dir) / args.execution_id
 
     observations_path = execution_dir / "observations.jsonl"
@@ -803,8 +798,7 @@ def cmd_assemble_package(args: argparse.Namespace) -> int:
         (status_path, "thiếu execution_status — chỉ `execute` mới tự sinh file này."),
     ):
         if not path.exists():
-            print(f"error: không tìm thấy '{path}' — {hint}", file=sys.stderr)
-            return 1
+            raise CliError(f"không tìm thấy '{path}' — {hint}")
 
     try:
         observations = [
@@ -815,15 +809,13 @@ def cmd_assemble_package(args: argparse.Namespace) -> int:
         actions = [ActionSpec(**item) for item in json.loads(actions_path.read_text(encoding="utf-8"))]
         execution_status = ExecutionStatus(json.loads(status_path.read_text(encoding="utf-8"))["execution_status"])
     except (json.JSONDecodeError, ValidationError, ValueError, OSError) as exc:
-        print(f"error: không đọc được artifact của execution '{args.execution_id}': {exc}", file=sys.stderr)
-        return 1
+        raise CliError(f"không đọc được artifact của execution '{args.execution_id}': {exc}") from exc
 
     try:
         environment = Environment(args.environment)
     except ValueError:
         valid = ", ".join(e.value for e in Environment)
-        print(f"error: --environment không hợp lệ '{args.environment}' — chỉ chấp nhận: {valid}", file=sys.stderr)
-        return 1
+        raise CliError(f"--environment không hợp lệ '{args.environment}' — chỉ chấp nhận: {valid}")
 
     print(
         "CẢNH BÁO: authorization dùng để lắp package dưới đây CHỈ dựng tạm từ --authorization-reference "
@@ -854,8 +846,7 @@ def cmd_assemble_package(args: argparse.Namespace) -> int:
             next_action=args.next_action,
         )
     except (ValueError, ValidationError) as exc:
-        print(f"error: không lắp được Verification Package: {exc}", file=sys.stderr)
-        return 1
+        raise CliError(f"không lắp được Verification Package: {exc}") from exc
 
     if args.format == "json":
         print(package.model_dump_json(indent=2))
@@ -890,34 +881,36 @@ def cmd_review_package(args: argparse.Namespace) -> int:
     rồi so với `predicate_results` đã khai — lệch là từ chối, không hỏi gì
     thêm.
     """
+    try:
+        return _run_review_package(args)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_review_package(args: argparse.Namespace) -> int:
     package_path = Path(args.package_file)
     try:
         package_data = json.loads(package_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        print(f"error: không tìm thấy package file '{package_path}'", file=sys.stderr)
-        return 1
+        raise CliError(f"không tìm thấy package file '{package_path}'")
     except json.JSONDecodeError as exc:
-        print(f"error: '{package_path}' không phải JSON hợp lệ: {exc}", file=sys.stderr)
-        return 1
+        raise CliError(f"'{package_path}' không phải JSON hợp lệ: {exc}") from exc
 
     try:
         decision = ReviewDecision(args.decision)
     except ValueError:
         valid = ", ".join(d.value for d in ReviewDecision)
-        print(f"error: --decision không hợp lệ '{args.decision}' — chỉ chấp nhận: {valid}", file=sys.stderr)
-        return 1
+        raise CliError(f"--decision không hợp lệ '{args.decision}' — chỉ chấp nhận: {valid}")
 
     if args.retest_reference and decision != ReviewDecision.RETEST:
         # Real gap found via independent review: --retest-reference could be
         # set together with ANY decision (vd release), tạo ra 1 package vừa
         # is_release_ready=True vừa mang retest_reference — mâu thuẫn với
         # đúng ý nghĩa field #19 ("absent until retests have run").
-        print(
-            "error: --retest-reference chỉ hợp lệ cùng --decision retest "
-            f"(đang dùng --decision {decision.value}).",
-            file=sys.stderr,
+        raise CliError(
+            f"--retest-reference chỉ hợp lệ cùng --decision retest (đang dùng --decision {decision.value})."
         )
-        return 1
 
     try:
         observations_for_check = [NormalizedObservation(**o) for o in package_data.get("normalized_observations", [])]
@@ -928,8 +921,7 @@ def cmd_review_package(args: argparse.Namespace) -> int:
             (r.group.value, r.status.value) for r in evaluate_predicates(observations_for_check)
         }
     except (ValidationError, KeyError, TypeError) as exc:
-        print(f"error: không đọc được normalized_observations/predicate_results trong file: {exc}", file=sys.stderr)
-        return 1
+        raise CliError(f"không đọc được normalized_observations/predicate_results trong file: {exc}") from exc
     if declared_results != recomputed_results:
         # Real bypass found via independent review: without this check, a
         # hand-edited package file with a fabricated verdict=confirmed +
@@ -944,12 +936,10 @@ def cmd_review_package(args: argparse.Namespace) -> int:
         # observations and refusing on any mismatch closes this — a real
         # assemble-package run always produces a package where these agree,
         # so this never fires for output that wasn't hand-tampered with.
-        print(
-            "error: predicate_results trong file KHÔNG khớp với normalized_observations thật — "
-            "package này có dấu hiệu bị sửa tay sau khi `assemble-package` chạy, từ chối review.",
-            file=sys.stderr,
+        raise CliError(
+            "predicate_results trong file KHÔNG khớp với normalized_observations thật — package này có "
+            "dấu hiệu bị sửa tay sau khi `assemble-package` chạy, từ chối review."
         )
-        return 1
 
     # SPEC §4.5 bước 1: "Đối chiếu ít nhất một raw artifact với normalized
     # observation" — CLI không tự làm thay được (đây đúng là việc chỉ con
@@ -996,8 +986,7 @@ def cmd_review_package(args: argparse.Namespace) -> int:
         # in isolation.
         package = VerificationPackage(**package_data)
     except ValidationError as exc:
-        print(f"error: không gắn được human_review_record vào package: {exc}", file=sys.stderr)
-        return 1
+        raise CliError(f"không gắn được human_review_record vào package: {exc}") from exc
 
     if decision == ReviewDecision.RELEASE:
         # SPEC §4.6 write path, step 2: "Human Review -- phát hành package
@@ -1007,15 +996,12 @@ def cmd_review_package(args: argparse.Namespace) -> int:
         # for a reject/retest decision, matching the diagram's own arrow
         # (only a released package promotes anything).
         promotion_context_store = _open_context_store(args.context_db)
-        if promotion_context_store is None:
-            return 1
         try:
             promoted = promotion_context_store.promote_execution_to_verified(
                 execution_id=package.execution_id, package_id=package.package_id
             )
         except RuntimeError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+            raise CliError(str(exc)) from exc
         finally:
             promotion_context_store.close()
         print(f"-> Đã promote {promoted} observation sang verified trong Context Store.", file=sys.stderr)
@@ -1040,16 +1026,17 @@ def cmd_mark_stale(args: argparse.Namespace) -> int:
     phát hiện được — không có cách nào để code tự động biết "phạm vi ảnh
     hưởng không xác định được" nghĩa là gì cho 1 target cụ thể.
     """
-    context_store = _open_context_store(args.context_db)
-    if context_store is None:
-        return 1
     try:
-        marked = context_store.mark_stale(args.target_id, args.reason)
-    except RuntimeError as exc:
+        context_store = _open_context_store(args.context_db)
+        try:
+            marked = context_store.mark_stale(args.target_id, args.reason)
+        except RuntimeError as exc:
+            raise CliError(str(exc)) from exc
+        finally:
+            context_store.close()
+    except CliError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    finally:
-        context_store.close()
     print(f"-> Đã đánh dấu cũ {marked} bản ghi (verified + unverified) cho target_id '{args.target_id}'.")
     return 0
 
@@ -1064,11 +1051,18 @@ def cmd_kill(args: argparse.Namespace) -> int:
     KillSwitch.refresh() nhận ra dòng log mới do lệnh này ghi).
     """
     try:
+        return _run_kill(args)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_kill(args: argparse.Namespace) -> int:
+    try:
         source = StopSource(args.source)
     except ValueError:
         valid = ", ".join(s.value for s in StopSource)
-        print(f"error: --source không hợp lệ '{args.source}' — chỉ chấp nhận: {valid}", file=sys.stderr)
-        return 1
+        raise CliError(f"--source không hợp lệ '{args.source}' — chỉ chấp nhận: {valid}")
 
     automatic_threshold_reason = None
     if args.automatic_threshold_reason:
@@ -1076,12 +1070,10 @@ def cmd_kill(args: argparse.Namespace) -> int:
             automatic_threshold_reason = AutomaticThresholdReason(args.automatic_threshold_reason)
         except ValueError:
             valid = ", ".join(r.value for r in AutomaticThresholdReason)
-            print(
-                f"error: --automatic-threshold-reason không hợp lệ "
-                f"'{args.automatic_threshold_reason}' — chỉ chấp nhận: {valid}",
-                file=sys.stderr,
+            raise CliError(
+                f"--automatic-threshold-reason không hợp lệ '{args.automatic_threshold_reason}' — chỉ "
+                f"chấp nhận: {valid}"
             )
-            return 1
 
     kill_switch = KillSwitch(execution_id=args.execution_id, storage_dir=args.storage_dir)
     # Captured BEFORE stop() (which immediately appends its own event) —
@@ -1102,8 +1094,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
             automatic_threshold_reason=automatic_threshold_reason,
         )
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        raise CliError(str(exc)) from exc
 
     print(f"-> execution '{args.execution_id}': {event.event.value}")
     print(f"   status hiện tại: {kill_switch.status.value}")
@@ -1126,12 +1117,19 @@ def cmd_resume(args: argparse.Namespace) -> int:
     (SPEC §6.4 control #10) — để hoàn thiện vòng execute -> kill -> resume
     -> execute lại mà `cmd_execute` giờ yêu cầu tường minh khi gặp STOPPED.
     """
+    try:
+        return _run_resume(args)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_resume(args: argparse.Namespace) -> int:
     kill_switch = KillSwitch(execution_id=args.execution_id, storage_dir=args.storage_dir)
     try:
         kill_switch.resume(actor=args.actor, authorization_reference=args.authorization_reference)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        raise CliError(str(exc)) from exc
 
     print(f"-> execution '{args.execution_id}': resume")
     print(f"   status hiện tại: {kill_switch.status.value}")
