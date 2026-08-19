@@ -13,6 +13,7 @@ from shared.models.action import (
     PlanReviewResult,
     PolicyDecision,
 )
+from shared.models.observation import ObservationRole
 
 
 def _action() -> ActionSpec:
@@ -21,6 +22,38 @@ def _action() -> ActionSpec:
 
 def _check(allowed: bool) -> ActionCheckResult:
     return ActionCheckResult(action=_action(), decision=PolicyDecision(allowed=allowed, reason="r"))
+
+
+# ----- ActionSpec.role: 3-role scenario tagging (2026-08-19) -----
+
+
+def test_action_spec_role_defaults_to_main():
+    # Every plan built before this field existed had no way to say "this
+    # action serves as the positive_control/denied_control" — the default
+    # must keep meaning exactly that ordinary single-role behavior for any
+    # existing/omitted-role plan, not silently change what already worked.
+    assert _action().role == ObservationRole.MAIN
+
+
+@pytest.mark.parametrize(
+    "role", [ObservationRole.MAIN, ObservationRole.POSITIVE_CONTROL, ObservationRole.DENIED_CONTROL, ObservationRole.SETUP]
+)
+def test_action_spec_accepts_every_observation_role(role):
+    action = ActionSpec(
+        type=ActionType.READ_ONLY, method="GET", target="https://x.example.com/a", description="d", role=role
+    )
+    assert action.role == role
+
+
+def test_action_spec_rejects_a_role_string_outside_the_4_valid_values():
+    with pytest.raises(ValidationError):
+        ActionSpec(
+            type=ActionType.READ_ONLY,
+            method="GET",
+            target="https://x.example.com/a",
+            description="d",
+            role="not_a_real_role",
+        )
 
 
 # ----- ActionPlanResult: real gap found via independent review — the

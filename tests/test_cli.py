@@ -1689,6 +1689,88 @@ def test_cli_execute_persists_structured_observations_alongside_the_raw_transcri
     assert observation.status_code == 200
 
 
+def test_cli_execute_captures_each_action_with_its_own_plan_assigned_role(capsys, monkeypatch, tmp_path):
+    # Real gap closed 2026-08-19: cmd_execute used to hardcode role=main for
+    # EVERY action regardless of what the plan said — a 3-role scenario
+    # (main/positive_control/denied_control) tagged by Exploit Agent would
+    # have every one of its observations silently mislabeled as main. This
+    # asserts the plan's own per-action `role` now flows through untouched.
+    from shared.models.observation import NormalizedObservation
+
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_role_tagging_test"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000",
+                                "description": "Positive control: the owner reads their own resource.",
+                                "role": "positive_control",
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000",
+                                "description": "Denied control: an unrelated identity is correctly denied.",
+                                "role": "denied_control",
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+
+    log_path = storage_dir / execution_id / "observations.jsonl"
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    observations = [NormalizedObservation(**json.loads(line)) for line in lines]
+    assert [o.role.value for o in observations] == ["positive_control", "denied_control"]
+
+
 def test_cli_execute_plan_file_rejects_mismatched_hypothesis_id(capsys, monkeypatch, tmp_path):
     db_path = str(tmp_path / "test.db")
     plan_file = tmp_path / "plan.json"

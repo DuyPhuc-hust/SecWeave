@@ -22,7 +22,7 @@ from shared.models.action import ActionPlanResult, ActionPlanStatus, ActionSpec
 from shared.models.entities import Authorization, AuthorizationLayer
 from shared.models.hypothesis import Hypothesis, HypothesisProvenance, HypothesisStatus
 from shared.models.kill_switch import ExecutionStatus
-from shared.models.observation import NormalizedObservation, ObservationRole
+from shared.models.observation import NormalizedObservation
 from shared.models.signal import NormalizedSignal, SignalCoverage
 from shared.models.verification_package import Environment, ReviewDecision, VerificationPackage
 from verdict_oracle.oracle import decide
@@ -533,14 +533,22 @@ def cmd_execute(args: argparse.Namespace) -> int:
     CostService/EvidenceHarness vào CLI, thứ 3 thành phần này trước đó chỉ
     chạy được qua script thủ công (.secweave/manual_test/*.py), chưa từng
     có entrypoint CLI/API thật nào (real gap tìm được qua review toàn dự
-    án). Mỗi action approve được capture với role=MAIN — SCOPE THẬT: lệnh
-    này không tự dựng được kịch bản 3-role (main/positive_control/
-    denied_control), vì ActionSpec chưa có field nào đánh dấu 1 action
-    đóng vai trò gì (gap đã biết, xem shared/models/observation.py) — muốn
-    kịch bản đủ 3 role vẫn cần script tự viết như
+    án). Mỗi action được capture với đúng `action.role` mà Exploit Agent đã
+    gắn cho nó khi lập plan (ActionSpec.role, mặc định main nếu plan không
+    tự gắn role nào khác) — không còn hardcode role=main cho mọi action như
+    trước (2026-08-19: đóng phần "role tagging" của gap 3-role).
+
+    SCOPE THẬT còn lại: mọi action vẫn dùng CHUNG 1 identity (`--identity`)
+    dù role có khác nhau — 1 kịch bản 3-role đúng nghĩa (positive_control
+    đọc bằng chính danh tính chủ sở hữu, denied_control đọc bằng danh tính
+    khác) cần nhiều identity/session thật trong CÙNG 1 lượt chạy, và cần tự
+    seed blind marker (EvidenceHarness.generate_marker(), chưa wire vào
+    lệnh này) để "main" có thể SATISFIED thay vì luôn INSUFFICIENT_DATA —
+    cả 2 phần đó vẫn cần script tự viết như
     .secweave/manual_test/identity_scenario_example.py. decide() vẫn được
-    gọi ở cuối để verdict thật ra đúng INCONCLUSIVE khi thiếu 2 nhóm kia,
-    thay vì giả vờ có thể kết luận CONFIRMED/NOT_REPRODUCED từ 1 identity.
+    gọi ở cuối để verdict thật ra đúng INCONCLUSIVE khi thiếu nhóm predicate
+    nào đó, thay vì giả vờ có thể kết luận CONFIRMED/NOT_REPRODUCED từ 1
+    identity/role.
 
     `--plan-file`: dùng lại đúng plan đã `secweave plan` duyệt trước đó
     thay vì gọi LLM lập plan MỚI (xem _load_frozen_plan's docstring cho lý
@@ -679,7 +687,8 @@ def _run_execute(args: argparse.Namespace) -> int:
     print(f"-> execution_id: {execution_id}")
     print(
         f"-> Đang thực thi {len(plan_result.plan.actions)} action đã approve (identity="
-        f"'{args.identity}', role=main cho tất cả — xem docstring cmd_execute về giới hạn này)..."
+        f"'{args.identity}' cho tất cả — mỗi action tự mang role riêng do Exploit Agent gắn, "
+        "mặc định main nếu plan không tự gắn role nào khác)..."
     )
 
     # Parameter names whose VALUES must never be written to the raw evidence
@@ -692,7 +701,7 @@ def _run_execute(args: argparse.Namespace) -> int:
             try:
                 observation = harness.capture(
                     check.action,
-                    role=ObservationRole.MAIN,
+                    role=check.action.role,
                     identity=args.identity,
                     sensitive_body_keys=sensitive_body_keys,
                 )

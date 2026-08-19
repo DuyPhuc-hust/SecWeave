@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, model_validator
 
 from shared.id_generator import generate_id
+from shared.models.observation import ObservationRole
 
 
 class ActionType(str, Enum):
@@ -40,6 +41,16 @@ class ActionSpec(BaseModel):
     target: str
     description: str
     parameters: Dict[str, Any] = Field(default_factory=dict)
+
+    # Which of the 3 required predicate groups (SPEC §4.4.1) this action is
+    # meant to serve as evidence for, or SETUP if it's neither (e.g. a login
+    # / bait-data-seeding step) — assigned when the plan is designed, same
+    # reasoning as ObservationRole's own docstring. Defaults to MAIN so every
+    # existing single-role plan (the only kind Exploit Agent could produce
+    # before this field existed) keeps meaning exactly what it always did —
+    # this field only lets a plan OPT INTO tagging a real 3-role scenario,
+    # it never changes behavior for a plan that doesn't use it.
+    role: ObservationRole = ObservationRole.MAIN
 
 
 class ActionPlan(BaseModel):
