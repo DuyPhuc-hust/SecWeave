@@ -56,6 +56,24 @@ def test_action_spec_rejects_a_role_string_outside_the_4_valid_values():
         )
 
 
+# ----- ActionSpec.step_id: resource-ID-chaining tagging (2026-08-19) -----
+
+
+def test_action_spec_step_id_defaults_to_none():
+    assert _action().step_id is None
+
+
+def test_action_spec_accepts_a_step_id():
+    action = ActionSpec(
+        type=ActionType.TEST_DATA_CREATION,
+        method="POST",
+        target="https://x.example.com/notes",
+        description="d",
+        step_id="seed_note",
+    )
+    assert action.step_id == "seed_note"
+
+
 # ----- ActionPlanResult: real gap found via independent review — the
 # consistency validator only checked PLANNED-requires-plan and
 # NOT_PLANNABLE-requires-reason, never the reverse: NOT_PLANNABLE must NOT

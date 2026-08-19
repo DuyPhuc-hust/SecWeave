@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from shared.models.kill_switch import ExecutionStatus
 from shared.models.observation import BLIND_MARKER_PLACEHOLDER, NormalizedObservation, ObservationRole
 from shared.models.signal import NormalizedSignal, SignalCoverage
 from shared.models.verification_package import Environment, ReviewDecision, VerificationPackage
+from shared.policy import is_allowed
 from verdict_oracle.oracle import decide
 from verdict_oracle.predicates import evaluate_predicates
 from verification_package.assembler import assemble_verification_package
@@ -681,6 +683,116 @@ def _substitute_blind_marker(action: ActionSpec, marker: str) -> ActionSpec:
     return substituted
 
 
+# Resource-ID-chaining (2026-08-19): lets a LATER action reference a REAL
+# value from an EARLIER action's own response within the same plan — e.g.
+# a server-assigned resource ID that doesn't exist until the earlier
+# action actually ran. Exploit Agent's prompt teaches the LLM to tag the
+# earlier action with a `step_id` and embed this exact placeholder syntax
+# in a later action's target/parameters; the LLM never guesses the real
+# value (SPEC's same "no fabricated runtime facts" principle the blind-
+# marker mechanism above already enforces for a different value).
+_FROM_STEP_PATTERN = re.compile(r"\{\{FROM_STEP:([A-Za-z0-9_-]+):([^{}]+)\}\}")
+
+
+def _resolve_json_path(data: Any, path: str) -> Any:
+    """Same dotted-path convention as EvidenceHarness.login()'s own
+    token_json_path (numeric segments index into a list) — one syntax to
+    learn across both features. Raises KeyError/TypeError/IndexError on a
+    bad path, left uncaught here so callers can add their own context."""
+    value = data
+    for part in path.split("."):
+        value = value[int(part)] if isinstance(value, list) else value[part]
+    return value
+
+
+def _load_step_response_body(observation: NormalizedObservation) -> Any:
+    """Reads back the REAL captured response body for an action tagged
+    with step_id, so a later action can reference it. Raises ValueError
+    if the raw evidence has no response body at all, or the body isn't
+    JSON — a step_id was declared for a reason, so failing loudly now
+    (rather than deferring to whatever later action tries to reference
+    it) surfaces the real problem at the point it actually happened."""
+    raw = json.loads(Path(observation.raw_evidence_ref).read_text(encoding="utf-8"))
+    body = raw.get("response", {}).get("body")
+    if body is None:
+        raise ValueError(f"observation '{observation.observation_id}' (step_id) không có response body.")
+    return json.loads(body)
+
+
+def _lookup_from_step(step_id: str, path: str, step_responses: Dict[str, Any]) -> Any:
+    if step_id not in step_responses:
+        raise CliError(
+            f"action tham chiếu '{{{{FROM_STEP:{step_id}:{path}}}}}' nhưng step_id='{step_id}' chưa "
+            "chạy (hoặc không tồn tại) tính đến thời điểm này trong plan — FROM_STEP chỉ được tham "
+            "chiếu action đứng TRƯỚC trong cùng plan, không tham chiếu ngược hay tự tham chiếu."
+        )
+    try:
+        return _resolve_json_path(step_responses[step_id], path)
+    except (KeyError, TypeError, IndexError, ValueError) as exc:
+        raise CliError(
+            f"'{{{{FROM_STEP:{step_id}:{path}}}}}': không trích được giá trị từ response thật của step "
+            f"'{step_id}' — {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _resolve_from_step_in_string(text: str, step_responses: Dict[str, Any]) -> str:
+    """For target/description (always plain strings) — every match is
+    stringified and interpolated into the surrounding text. Real gap
+    found via independent review: a resolved value that's itself a
+    dict/list (a json_path pointing at a nested object rather than a
+    scalar) used to be silently `str()`-ed into the URL/description —
+    Python's dict repr embedded literally in a URL is nonsense, not
+    something a plan author could have meant. Rejected explicitly instead
+    of producing a garbled request (harness.capture() DOES already catch
+    an invalid URL and record a failed observation rather than crashing,
+    but failing here is clearer and doesn't waste a real HTTP attempt/cost
+    slot on a request that could never have been meaningful).
+    """
+
+    def _sub(match: re.Match) -> str:
+        resolved = _lookup_from_step(match.group(1), match.group(2), step_responses)
+        if isinstance(resolved, (dict, list)):
+            raise CliError(
+                f"'{{{{FROM_STEP:{match.group(1)}:{match.group(2)}}}}}' trong target/description trỏ "
+                f"tới 1 object/list ({type(resolved).__name__}), không phải giá trị đơn (string/số/bool) "
+                "— không thể nhúng thẳng vào URL hay mô tả dạng text."
+            )
+        return str(resolved)
+
+    return _FROM_STEP_PATTERN.sub(_sub, text)
+
+
+def _resolve_from_step_in_value(value: Any, step_responses: Dict[str, Any]) -> Any:
+    """For `parameters` (arbitrary JSON) — a value that's EXACTLY one
+    placeholder (nothing else around it) resolves to the referenced
+    value's OWN type (e.g. a real int stays an int, useful when a target
+    API expects a numeric ID in the JSON body, not a stringified one);
+    a placeholder embedded inside a larger string is stringified and
+    interpolated, same as target/description."""
+    if isinstance(value, dict):
+        return {key: _resolve_from_step_in_value(v, step_responses) for key, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_from_step_in_value(v, step_responses) for v in value]
+    if not isinstance(value, str):
+        return value
+    exact = _FROM_STEP_PATTERN.fullmatch(value)
+    if exact:
+        return _lookup_from_step(exact.group(1), exact.group(2), step_responses)
+    return _resolve_from_step_in_string(value, step_responses)
+
+
+def _resolve_from_step_references(action: ActionSpec, step_responses: Dict[str, Any]) -> ActionSpec:
+    """Called on every action right before it executes (a no-op if it has
+    no FROM_STEP reference anywhere — the regex simply never matches)."""
+    return action.model_copy(
+        update={
+            "target": _resolve_from_step_in_string(action.target, step_responses),
+            "description": _resolve_from_step_in_string(action.description, step_responses),
+            "parameters": _resolve_from_step_in_value(action.parameters, step_responses),
+        }
+    )
+
+
 def cmd_execute(args: argparse.Namespace) -> int:
     """Thực thi THẬT các action đã approve của 1 plan — nối KillSwitch/
     CostService/EvidenceHarness vào CLI, thứ 3 thành phần này trước đó chỉ
@@ -720,6 +832,22 @@ def cmd_execute(args: argparse.Namespace) -> int:
     gọi ở cuối để verdict thật ra đúng INCONCLUSIVE khi thiếu nhóm
     predicate nào đó, thay vì giả vờ có thể kết luận CONFIRMED/
     NOT_REPRODUCED khi thiếu bằng chứng.
+
+    2026-08-19 (tiếp): thêm resource-ID-chaining — `{{FROM_STEP:<step_id>:
+    <json_path>}}` trong target/parameters của 1 action được tự resolve
+    bằng giá trị THẬT trích từ response thật của action `step_id` đã chạy
+    TRƯỚC nó trong cùng plan (vd 1 note vừa tạo, server tự cấp ID, action
+    sau cần đọc lại đúng note đó). Khác blind marker (resolve 1 lần, trước
+    review_plan()) — cái này BẮT BUỘC resolve XEN KẼ trong vòng lặp capture
+    chính, vì giá trị thật chỉ tồn tại sau khi action nguồn đã thực sự
+    chạy; Policy Service vẫn kiểm được plan chưa resolve vì cú pháp
+    `{param}` trong allowlist vốn đã khớp bất kỳ text nào ở 1 path segment,
+    kể cả text `{{FROM_STEP:...}}` chưa resolve. `actions.json` được ghi
+    lại LẦN 2 cho từng action ngay khi nó chạy xong, đè lên bản chưa
+    resolve đã ghi lúc đầu (đổi `_persist_actions()` sang "action_id trùng
+    thì bản mới thắng"). Tham chiếu tới step_id chưa chạy (chưa tới lượt,
+    hoặc gõ sai) → `CliError` sạch, không silently gửi text placeholder
+    tới target thật.
 
     `--plan-file`: dùng lại đúng plan đã `secweave plan` duyệt trước đó
     thay vì gọi LLM lập plan MỚI (xem _load_frozen_plan's docstring cho lý
@@ -880,23 +1008,35 @@ def _run_execute(args: argparse.Namespace) -> int:
         # invocation can reconstruct VerificationPackage's `actions` input
         # (SPEC §7 field #9) without needing the original --plan-file to
         # still be lying around. MERGED with whatever's already on disk (by
-        # action_id), not overwritten — real gap found via independent
-        # review: reusing one execution_id across multiple `execute` calls
-        # with DIFFERENT plans is an explicitly supported pattern elsewhere
-        # in this codebase (kill-switch RUNNING-continuation branch,
-        # CostService cap accumulation — see this function's own comment
-        # above on kill_switch.status), and observations.jsonl already
-        # accumulates across such calls. Overwriting actions.json with only
-        # THIS invocation's actions permanently and unrecoverably broke
-        # `assemble-package` for exactly that pattern — an earlier call's
-        # ActionSpec, still referenced by an earlier observation's
-        # action_ref, would vanish from the file entirely.
+        # action_id), not overwritten wholesale — real gap found via
+        # independent review: reusing one execution_id across multiple
+        # `execute` calls with DIFFERENT plans is an explicitly supported
+        # pattern elsewhere in this codebase (kill-switch RUNNING-
+        # continuation branch, CostService cap accumulation — see this
+        # function's own comment above on kill_switch.status), and
+        # observations.jsonl already accumulates across such calls.
+        # Overwriting actions.json with only THIS invocation's actions
+        # permanently and unrecoverably broke `assemble-package` for
+        # exactly that pattern — an earlier call's ActionSpec, still
+        # referenced by an earlier observation's action_ref, would vanish
+        # from the file entirely.
+        #
+        # A matching action_id WRITES OVER the existing entry (not
+        # skipped) — needed for resource-ID-chaining: the same action_id
+        # gets persisted TWICE within one invocation, once upfront still
+        # carrying its unresolved {{FROM_STEP:...}} text (in case a run
+        # stops before reaching it), then again with the REAL resolved
+        # value right as it's captured — the resolved version must win.
+        # Harmless for the cross-invocation case this was built for too:
+        # the same auto-generated action_id reappearing across 2 different
+        # `execute` calls only happens by re-using the exact same
+        # --plan-file, so the "newer" content is never a genuinely
+        # different action being confused for an old one.
         existing_actions_raw = json.loads(actions_path.read_text(encoding="utf-8")) if actions_path.exists() else []
-        existing_action_ids = {item["action_id"] for item in existing_actions_raw}
-        merged_actions_raw = existing_actions_raw + [
-            action.model_dump(mode="json") for action in new_actions if action.action_id not in existing_action_ids
-        ]
-        actions_path.write_text(json.dumps(merged_actions_raw, indent=2), encoding="utf-8")
+        by_action_id = {item["action_id"]: item for item in existing_actions_raw}
+        for action in new_actions:
+            by_action_id[action.action_id] = action.model_dump(mode="json")
+        actions_path.write_text(json.dumps(list(by_action_id.values()), indent=2), encoding="utf-8")
 
     _persist_actions(plan_result.plan.actions)
 
@@ -917,6 +1057,11 @@ def _run_execute(args: argparse.Namespace) -> int:
     sensitive_body_keys = set(args.sensitive_param or [])
     observations = []
     stopped_reason = None
+    # Resource-ID-chaining: step_id -> that action's REAL parsed response
+    # body, populated as each step_id-tagged action actually executes (see
+    # _resolve_from_step_references). Empty for the overwhelming majority
+    # of plans that never use {{FROM_STEP:...}} at all.
+    step_responses: Dict[str, Any] = {}
 
     def _persist_observation(observation: NormalizedObservation) -> None:
         # Real gap found via independent review: capture() returns a
@@ -1021,12 +1166,43 @@ def _run_execute(args: argparse.Namespace) -> int:
 
         if stopped_reason is None:
             for check in review.plan_check.checks:
+                # Resource-ID-chaining: resolves any {{FROM_STEP:...}}
+                # reference against REAL responses of already-executed
+                # steps in THIS run — a no-op for the overwhelming
+                # majority of actions that never use it. Raises CliError
+                # (via _lookup_from_step) if the referenced step_id hasn't
+                # run yet/doesn't exist, or its response can't be
+                # traversed to the requested json path.
+                resolved_action = _resolve_from_step_references(check.action, step_responses)
+                # Real gap found via independent review: review_plan() above
+                # only ever checked the UNRESOLVED plan against the
+                # allowlist — a {{FROM_STEP:...}} placeholder has no "/" in
+                # it, so it always satisfies an `{id}`-style path template's
+                # `[^/]+` regex regardless of what the runtime-resolved
+                # value turns out to be. Since that value comes from a
+                # REAL, possibly attacker-influenced response (exactly the
+                # kind of data an IDOR-style plan reads), a resolved value
+                # like "42/../../admin/settings" could turn one path
+                # segment into several, escaping the reviewed scope with
+                # zero enforcement — a real, exploitable bypass, same class
+                # already fixed once for percent-encoded path traversal.
+                # Re-checking the ACTUALLY-RESOLVED action here — right
+                # before it's sent, with the exact bytes that will go out —
+                # closes it: deny-by-default applies to what's really sent,
+                # not just to what the plan looked like on paper.
+                resolved_decision = is_allowed(resolved_action, authorization)
+                if not resolved_decision.allowed:
+                    raise CliError(
+                        f"action_id='{resolved_action.action_id}' sau khi resolve FROM_STEP không còn "
+                        f"khớp allowlist: {resolved_decision.reason} — giá trị thật lấy từ response "
+                        "runtime đã vượt phạm vi plan đã duyệt, từ chối gửi request thật."
+                    )
                 try:
                     observation = harness.capture(
-                        check.action,
-                        role=check.action.role,
+                        resolved_action,
+                        role=resolved_action.role,
                         marker=marker_value,
-                        identity=role_identity.get(check.action.role, args.identity),
+                        identity=role_identity.get(resolved_action.role, args.identity),
                         sensitive_body_keys=sensitive_body_keys,
                     )
                 except RuntimeError as exc:
@@ -1043,8 +1219,36 @@ def _run_execute(args: argparse.Namespace) -> int:
                     print(f"   DỪNG GIỮA CHỪNG: {exc}", file=sys.stderr)
                     break
                 _persist_observation(observation)
+                # Persisted again here (action_id unchanged, only target/
+                # description/parameters may differ) so actions.json ends
+                # up holding the REAL resolved values, not the unresolved
+                # {{FROM_STEP:...}} text from the upfront _persist_actions
+                # call above — same reasoning as the blind-marker
+                # substitution's own actions.json handling.
+                _persist_actions([resolved_action])
+                if resolved_action.step_id:
+                    if resolved_action.step_id in step_responses:
+                        # Real gap found via independent review: 2 actions
+                        # reusing the same step_id (an LLM mistake — the
+                        # prompt never explicitly forbids it) would
+                        # silently let the SECOND one's response clobber
+                        # the first in step_responses, so a later
+                        # FROM_STEP reference resolves to whichever
+                        # same-labeled action happened to run more
+                        # recently, with no error — genuinely ambiguous
+                        # which one a reference means, so refuse instead
+                        # of silently picking one.
+                        raise CliError(
+                            f"step_id='{resolved_action.step_id}' được gán cho hơn 1 action trong cùng "
+                            "plan — mỗi step_id chỉ được dùng đúng 1 lần, nếu không FROM_STEP tham "
+                            "chiếu tới action nào sẽ không rõ ràng."
+                        )
+                    try:
+                        step_responses[resolved_action.step_id] = _load_step_response_body(observation)
+                    except ValueError as exc:
+                        raise CliError(str(exc)) from exc
                 print(
-                    f"   [{observation.access_result.value}] {check.action.method} {check.action.target} "
+                    f"   [{observation.access_result.value}] {resolved_action.method} {resolved_action.target} "
                     f"(HTTP {observation.status_code})"
                 )
     finally:

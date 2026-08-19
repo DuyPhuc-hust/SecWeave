@@ -2520,6 +2520,491 @@ def test_cli_execute_substitutes_a_blind_marker_nested_inside_a_list_parameter(
     assert re.fullmatch(r"[0-9a-f]{32}", seeded_tags[1])
 
 
+# ----- Resource-ID-chaining: {{FROM_STEP:...}} (2026-08-19) -----
+
+
+def test_cli_execute_resolves_from_step_reference_into_a_later_actions_target(
+    capsys, monkeypatch, tmp_path
+):
+    # The scenario this feature exists for: a test_data_creation action
+    # gets a server-assigned ID it couldn't know in advance; a later
+    # action needs to read back exactly that resource, not a guessed one.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_from_step_test"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/notes",
+                                "description": "Seed a note; the server assigns its real id.",
+                                "role": "setup",
+                                "step_id": "seed_note",
+                                "parameters": {"content": "hello"},
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/notes/{{FROM_STEP:seed_note:id}}",
+                                "description": "Read back exactly the note just created.",
+                                "role": "main",
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    requested_paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/notes":
+            return httpx.Response(200, json={"id": 42})
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/notes params:content",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/notes/{id}",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+    # The real, server-assigned id was used — never the literal placeholder.
+    assert requested_paths == ["/notes", "/notes/42"]
+
+    # actions.json holds the RESOLVED target, not the unresolved
+    # {{FROM_STEP:...}} text from the plan file.
+    actions_on_disk = json.loads((storage_dir / execution_id / "actions.json").read_text())
+    main_action = next(a for a in actions_on_disk if a["role"] == "main")
+    assert main_action["target"] == "http://host.docker.internal:3000/notes/42"
+
+
+def test_cli_execute_from_step_preserves_the_referenced_values_own_type_in_parameters(
+    capsys, monkeypatch, tmp_path
+):
+    # A parameters value that's EXACTLY one {{FROM_STEP:...}} placeholder
+    # (nothing else around it) resolves to the referenced value's OWN
+    # JSON type — a real int stays an int, not a stringified "42".
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_from_step_type_test"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/notes",
+                                "description": "Seed a note.",
+                                "role": "setup",
+                                "step_id": "seed_note",
+                                "parameters": {"content": "hello"},
+                            },
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/link",
+                                "description": "Link something to the note by its real numeric id.",
+                                "role": "main",
+                                "parameters": {"note_id": "{{FROM_STEP:seed_note:id}}"},
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    seen_bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen_bodies.append(body)
+        if request.url.path == "/notes":
+            return httpx.Response(200, json={"id": 42})
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/notes params:content",
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/link params:note_id",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+    assert seen_bodies[1] == {"note_id": 42}  # real int, not "42"
+
+
+def test_cli_execute_from_step_referencing_an_unrun_step_id_fails_cleanly(capsys, monkeypatch, tmp_path):
+    # A plan referencing a step_id that never ran (typo, or a forward/self
+    # reference) must fail with a clean, specific error — never crash, and
+    # never silently send the literal placeholder text to the real target.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/notes/{{FROM_STEP:never_ran:id}}",
+                                "description": "References a step_id that doesn't exist.",
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/notes/{id}",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "never_ran" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_execute_rejects_a_from_step_resolved_value_that_escapes_the_allowlist(
+    capsys, monkeypatch, tmp_path
+):
+    # Real HIGH-severity gap found via independent review: review_plan()
+    # only ever checks the UNRESOLVED plan — a {{FROM_STEP:...}} placeholder
+    # has no "/" in it, so it always satisfies an `{id}`-style allowlist
+    # entry's `[^/]+` regex regardless of what the REAL, runtime-resolved
+    # value (sourced from a real response — exactly the kind of data an
+    # IDOR-style plan reads, and can't fully trust) turns out to be. A
+    # resolved value containing "/../.." could turn 1 allowed path segment
+    # into several, escaping the reviewed scope with zero enforcement
+    # unless the RESOLVED action is re-checked before the real request is
+    # sent. This proves the fix: a step whose real response smuggles a
+    # path-traversal payload into the id field is rejected, not silently
+    # sent.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/notes",
+                                "description": "Seed a note.",
+                                "step_id": "seed_note",
+                                "parameters": {"content": "hello"},
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/notes/{{FROM_STEP:seed_note:id}}",
+                                "description": "Read back the note by its real id.",
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    real_requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        real_requests.append(str(request.url))
+        if request.url.path == "/notes":
+            # A real, attacker-influenced response smuggling a traversal
+            # payload into the id field instead of an ordinary integer.
+            return httpx.Response(200, json={"id": "42/../../admin/settings"})
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/notes params:content",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/notes/{id}",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "không còn khớp allowlist" in captured.err
+    # The seed action IS allowed and does go out, but the GET with the
+    # escaping resolved value must NEVER reach the real target.
+    assert real_requests == ["http://host.docker.internal:3000/notes"]
+
+
+def test_cli_execute_rejects_a_step_id_reused_by_2_different_actions(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: nothing stopped 2 actions from
+    # reusing the same step_id (an LLM mistake the prompt doesn't
+    # explicitly forbid) — the SECOND one's response used to silently
+    # clobber the first in step_responses, so a later FROM_STEP reference
+    # would resolve to whichever same-labeled action happened to run more
+    # recently, with no error. Must refuse instead of silently picking one.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/notes",
+                                "description": "Seed note A.",
+                                "step_id": "dup",
+                                "parameters": {"content": "a"},
+                            },
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/notes",
+                                "description": "Seed note B, reusing the SAME step_id by mistake.",
+                                "step_id": "dup",
+                                "parameters": {"content": "b"},
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": 1})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/notes params:content",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "step_id='dup'" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_execute_from_step_referencing_a_non_scalar_in_target_fails_cleanly(
+    capsys, monkeypatch, tmp_path
+):
+    # A json_path pointing at a nested object/list (not a scalar) can't be
+    # meaningfully embedded in a URL string — must fail cleanly instead of
+    # silently interpolating Python's dict repr into a real request.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/notes",
+                                "description": "Seed a note.",
+                                "step_id": "seed_note",
+                                "parameters": {"content": "hello"},
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/notes/{{FROM_STEP:seed_note:owner}}",
+                                "description": "Mistakenly references a nested object, not a scalar id.",
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/notes":
+            return httpx.Response(200, json={"id": 1, "owner": {"name": "alice", "id": 7}})
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/notes params:content",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/notes/{id}",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "dict" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_cli_execute_plan_file_rejects_mismatched_hypothesis_id(capsys, monkeypatch, tmp_path):
     db_path = str(tmp_path / "test.db")
     plan_file = tmp_path / "plan.json"
