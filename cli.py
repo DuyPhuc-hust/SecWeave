@@ -5,10 +5,10 @@ import sys
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Type, TypeVar
+from typing import Any, Dict, List, Optional, Type, TypeVar
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from context_store.store import DEFAULT_DB_PATH, SecurityContextStore
 from evidence_harness.harness import EvidenceHarness
@@ -18,11 +18,11 @@ from hypothesis_engine.signal_normalizer.orchestrator import SignalNormalizer
 from shared.cost import CostService
 from shared.id_generator import generate_id
 from shared.kill_switch import AutomaticThresholdReason, KillSwitch, StopSource
-from shared.models.action import ActionPlanResult, ActionPlanStatus, ActionSpec
+from shared.models.action import ActionPlanResult, ActionPlanStatus, ActionSpec, ActionType
 from shared.models.entities import Authorization, AuthorizationLayer
 from shared.models.hypothesis import Hypothesis, HypothesisProvenance, HypothesisStatus
 from shared.models.kill_switch import ExecutionStatus
-from shared.models.observation import NormalizedObservation
+from shared.models.observation import NormalizedObservation, ObservationRole
 from shared.models.signal import NormalizedSignal, SignalCoverage
 from shared.models.verification_package import Environment, ReviewDecision, VerificationPackage
 from verdict_oracle.oracle import decide
@@ -528,6 +528,75 @@ def _load_frozen_plan(args: argparse.Namespace) -> ActionPlanResult:
     return plan_result
 
 
+class _IdentityLoginSpec(BaseModel):
+    """One entry of a `--identity-logins` file — a plain serialization of
+    `EvidenceHarness.login()`'s own parameters (shared/evidence_harness/
+    harness.py), so this model carries no target-specific logic of its
+    own: method/target/parameters describe THIS target's login request
+    shape, token_json_path/token_header/token_prefix describe how to pull
+    a bearer token out of the response (all optional — omit token_json_path
+    entirely for a cookie-based target, where httpx's own client jar
+    already handles the session with no extra config needed).
+    """
+
+    method: str
+    target: str
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    description: Optional[str] = None
+    token_json_path: Optional[str] = None
+    token_header: str = "Authorization"
+    token_prefix: str = "Bearer "
+
+
+def _parse_role_identity_args(raw: Optional[List[str]]) -> Dict[ObservationRole, str]:
+    """Parses repeated `--role-identity ROLE=LABEL` entries into a role ->
+    identity-label map — the mechanism that lets a 3-role plan (ActionSpec.
+    role, see shared/models/action.py) actually run each role under a
+    DIFFERENT identity, without Exploit Agent/the LLM ever having to name or
+    choose a real identity itself (SPEC §4.2: "không tự lấy credential" —
+    identity comes from the operator, only ROLE comes from the plan).
+    `LABEL` is just a string key into `--identity-logins` (or nothing, if
+    that identity is meant to run unauthenticated) — never a real
+    credential itself.
+    """
+    result: Dict[ObservationRole, str] = {}
+    for entry in raw or []:
+        if "=" not in entry:
+            raise CliError(
+                f"--role-identity không hợp lệ '{entry}' — cần đúng dạng 'ROLE=LABEL', vd "
+                "'positive_control=owner'."
+            )
+        role_raw, label = entry.split("=", 1)
+        role = _parse_enum_arg(ObservationRole, role_raw, f"--role-identity (phần ROLE của '{entry}')")
+        if not label:
+            raise CliError(f"--role-identity '{entry}' có LABEL rỗng — cần 1 tên identity không rỗng.")
+        result[role] = label
+    return result
+
+
+def _load_identity_logins(path: Optional[str]) -> Dict[str, _IdentityLoginSpec]:
+    """Loads a `--identity-logins` file — a JSON object keyed by identity
+    label, each value an `_IdentityLoginSpec`. Returns {} when `path` is
+    None (the common case: no multi-identity login needed), so callers
+    never need a separate None-check before doing a dict lookup."""
+    if not path:
+        return {}
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise CliError(f"không tìm thấy --identity-logins file '{path}'")
+    except json.JSONDecodeError as exc:
+        raise CliError(f"--identity-logins file '{path}' không phải JSON hợp lệ: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise CliError(f"--identity-logins file '{path}' phải là 1 JSON object (label -> cấu hình login).")
+
+    try:
+        return {label: _IdentityLoginSpec(**cfg) for label, cfg in raw.items()}
+    except ValidationError as exc:
+        raise CliError(f"--identity-logins file '{path}' có entry không đúng schema: {exc}") from exc
+
+
 def cmd_execute(args: argparse.Namespace) -> int:
     """Thực thi THẬT các action đã approve của 1 plan — nối KillSwitch/
     CostService/EvidenceHarness vào CLI, thứ 3 thành phần này trước đó chỉ
@@ -538,17 +607,25 @@ def cmd_execute(args: argparse.Namespace) -> int:
     tự gắn role nào khác) — không còn hardcode role=main cho mọi action như
     trước (2026-08-19: đóng phần "role tagging" của gap 3-role).
 
-    SCOPE THẬT còn lại: mọi action vẫn dùng CHUNG 1 identity (`--identity`)
-    dù role có khác nhau — 1 kịch bản 3-role đúng nghĩa (positive_control
-    đọc bằng chính danh tính chủ sở hữu, denied_control đọc bằng danh tính
-    khác) cần nhiều identity/session thật trong CÙNG 1 lượt chạy, và cần tự
-    seed blind marker (EvidenceHarness.generate_marker(), chưa wire vào
-    lệnh này) để "main" có thể SATISFIED thay vì luôn INSUFFICIENT_DATA —
-    cả 2 phần đó vẫn cần script tự viết như
-    .secweave/manual_test/identity_scenario_example.py. decide() vẫn được
-    gọi ở cuối để verdict thật ra đúng INCONCLUSIVE khi thiếu nhóm predicate
-    nào đó, thay vì giả vờ có thể kết luận CONFIRMED/NOT_REPRODUCED từ 1
-    identity/role.
+    2026-08-19 (tiếp): đóng phần "multi-identity" — `--role-identity
+    ROLE=LABEL` (lặp lại được) ánh xạ 1 role sang 1 identity LABEL khác
+    `--identity` mặc định; `--identity-logins <file>` khai credential thật
+    (method/target/parameters/token_json_path) cho từng LABEL, được
+    `harness.login()` thật TRƯỚC khi plan chạy, cho phép positive_control
+    đọc bằng chính danh tính chủ sở hữu và denied_control đọc bằng danh
+    tính khác, đúng nghĩa 3-role, trong CÙNG 1 lượt `execute`. Exploit
+    Agent vẫn không hề chạm vào credential thật — plan chỉ mang `role`,
+    LABEL/credential hoàn toàn do operator cấp qua CLI. LABEL không có
+    entry trong `--identity-logins` vẫn chạy được, chỉ là không đăng nhập
+    (client mới, chưa có session) — một identity ẩn danh hợp lệ.
+
+    SCOPE THẬT còn lại: tự động seed blind marker
+    (`EvidenceHarness.generate_marker()`, chưa wire vào lệnh này) để "main"
+    có thể SATISFIED thay vì luôn INSUFFICIENT_DATA — vẫn cần script tự
+    viết như .secweave/manual_test/identity_scenario_example.py cho phần
+    này. decide() vẫn được gọi ở cuối để verdict thật ra đúng INCONCLUSIVE
+    khi thiếu nhóm predicate nào đó, thay vì giả vờ có thể kết luận
+    CONFIRMED/NOT_REPRODUCED khi thiếu bằng chứng.
 
     `--plan-file`: dùng lại đúng plan đã `secweave plan` duyệt trước đó
     thay vì gọi LLM lập plan MỚI (xem _load_frozen_plan's docstring cho lý
@@ -615,6 +692,13 @@ def _run_execute(args: argparse.Namespace) -> int:
         if not review.cost_check.allowed:
             print(f"  Cost: {review.cost_check.reason}")
         return 1
+
+    # Parsed BEFORE any KillSwitch/CostService/EvidenceHarness state is
+    # created below — a malformed --role-identity/--identity-logins is a
+    # config problem, same class as a malformed --plan-file, and should
+    # fail before anything gets a chance to start/consume cost budget.
+    role_identity = _parse_role_identity_args(args.role_identity)
+    identity_logins = _load_identity_logins(args.identity_logins)
 
     execution_id = args.execution_id or generate_id("exec")
     kill_switch = KillSwitch(execution_id=execution_id, storage_dir=args.storage_dir)
@@ -685,63 +769,128 @@ def _run_execute(args: argparse.Namespace) -> int:
     actions_path.write_text(json.dumps(merged_actions_raw, indent=2), encoding="utf-8")
 
     print(f"-> execution_id: {execution_id}")
+    role_identity_desc = ", ".join(f"{role.value}={label}" for role, label in role_identity.items())
     print(
-        f"-> Đang thực thi {len(plan_result.plan.actions)} action đã approve (identity="
-        f"'{args.identity}' cho tất cả — mỗi action tự mang role riêng do Exploit Agent gắn, "
-        "mặc định main nếu plan không tự gắn role nào khác)..."
+        f"-> Đang thực thi {len(plan_result.plan.actions)} action đã approve — mỗi action tự mang role "
+        f"riêng do Exploit Agent gắn (mặc định main). Identity: '{args.identity}' cho role không có "
+        f"--role-identity riêng"
+        + (f", {role_identity_desc} cho role có khai báo riêng" if role_identity_desc else "")
+        + "..."
     )
 
     # Parameter names whose VALUES must never be written to the raw evidence
-    # transcript — see EvidenceHarness.capture()'s docstring.
+    # transcript — see EvidenceHarness.capture()'s docstring. Passed to
+    # login() calls too (below), so a password declared once here is
+    # redacted everywhere, not just in the main capture loop.
     sensitive_body_keys = set(args.sensitive_param or [])
     observations = []
     stopped_reason = None
+
+    def _persist_observation(observation: NormalizedObservation) -> None:
+        # Real gap found via independent review: capture() returns a
+        # structured NormalizedObservation, but cmd_execute previously
+        # only ever used it in-memory (for decide(), below) and never
+        # persisted it — only the raw request/response transcript
+        # landed on disk (evidence_harness/harness.py), in a shape
+        # that's missing execution_id/target_id/target_revision_id/
+        # channel/raw_evidence_hash/access_result. That left NO path
+        # (via CLI or by reading files back) to reconstruct the
+        # observations needed to assemble a VerificationPackage after
+        # the fact — only hand re-deriving every field from the raw
+        # transcript, error-prone and undocumented. Appended one JSON
+        # object per line (not a single JSON array rewritten each time)
+        # so a crash/kill mid-loop loses at most the one in-flight
+        # write, matching the same append-only philosophy as the
+        # kill-switch/cost audit logs, and so multiple `execute`
+        # invocations reusing one execution_id accumulate here too.
+        observations.append(observation)
+        observations_log_path = harness_storage_dir / "observations.jsonl"
+        with open(observations_log_path, "a", encoding="utf-8") as f:
+            f.write(observation.model_dump_json() + "\n")
+
     try:
-        for check in review.plan_check.checks:
+        # Every identity label actually referenced by THIS plan's own
+        # actions (the default --identity, plus any --role-identity
+        # override whose role actually appears in plan_result.plan.actions)
+        # that ALSO has a --identity-logins entry gets logged in now, once,
+        # before any of the plan's own actions run — a label with NO login
+        # entry simply runs unauthenticated (EvidenceHarness gives it a
+        # fresh client on first use), a legitimate identity too (e.g. an
+        # anonymous, never-logged-in denied_control). Real gap found via
+        # independent review: an EARLIER version of this filtered only by
+        # "referenced by --role-identity at all", not by whether that role
+        # is actually used in THIS plan — a --role-identity entry for a
+        # role this plan happens not to use would still trigger a real
+        # login HTTP request (consuming CostService budget, possibly
+        # tripping the cost cap) for an identity nothing here would ever
+        # send a single action as.
+        roles_in_plan = {action.role for action in plan_result.plan.actions}
+        relevant_labels = {label for role, label in role_identity.items() if role in roles_in_plan}
+        identities_needing_login = sorted({args.identity, *relevant_labels} & identity_logins.keys())
+        for label in identities_needing_login:
+            login_spec = identity_logins[label]
             try:
-                observation = harness.capture(
-                    check.action,
-                    role=check.action.role,
-                    identity=args.identity,
-                    sensitive_body_keys=sensitive_body_keys,
+                login_observation = harness.login(
+                    label,
+                    ActionSpec(
+                        type=ActionType.TEST_DATA_CREATION,
+                        method=login_spec.method,
+                        target=login_spec.target,
+                        description=login_spec.description or f"Log in as identity '{label}'.",
+                        parameters=login_spec.parameters,
+                    ),
+                    token_json_path=login_spec.token_json_path,
+                    token_header=login_spec.token_header,
+                    token_prefix=login_spec.token_prefix,
+                    sensitive_request_keys=sensitive_body_keys,
                 )
             except RuntimeError as exc:
-                # Real gap found via independent review: catching only
-                # (ExecutionStoppedError, CostCapExceededError) missed a
-                # bare RuntimeError from CostService.record_action()'s own
-                # write-failure path (shared/cost.py) or KillSwitch's
-                # audit-log write failure (shared/kill_switch.py, now
-                # wrapped there too) — both ARE RuntimeError subclasses
-                # already, so catching the base class covers all 3
-                # uniformly instead of missing the 2 that aren't explicitly
-                # named here.
+                # Same reasoning as the capture-loop's own RuntimeError
+                # handling below — a login attempt goes through capture()
+                # internally too, so it's subject to the exact same kill-
+                # switch/cost-cap stop conditions mid-run.
                 stopped_reason = str(exc)
-                print(f"   DỪNG GIỮA CHỪNG: {exc}", file=sys.stderr)
+                print(f"   DỪNG GIỮA CHỪNG (login '{label}'): {exc}", file=sys.stderr)
                 break
-            observations.append(observation)
-            # Real gap found via independent review: capture() returns a
-            # structured NormalizedObservation, but cmd_execute previously
-            # only ever used it in-memory (for decide(), below) and never
-            # persisted it — only the raw request/response transcript
-            # landed on disk (evidence_harness/harness.py), in a shape
-            # that's missing execution_id/target_id/target_revision_id/
-            # channel/raw_evidence_hash/access_result. That left NO path
-            # (via CLI or by reading files back) to reconstruct the
-            # observations needed to assemble a VerificationPackage after
-            # the fact — only hand re-deriving every field from the raw
-            # transcript, error-prone and undocumented. Appended one JSON
-            # object per line (not a single JSON array rewritten each time)
-            # so a crash/kill mid-loop loses at most the one in-flight
-            # write, matching the same append-only philosophy as the
-            # kill-switch/cost audit logs, and so multiple `execute`
-            # invocations reusing one execution_id accumulate here too.
-            observations_log_path = harness_storage_dir / "observations.jsonl"
-            with open(observations_log_path, "a", encoding="utf-8") as f:
-                f.write(observation.model_dump_json() + "\n")
-            print(
-                f"   [{observation.access_result.value}] {check.action.method} {check.action.target} "
-                f"(HTTP {observation.status_code})"
-            )
+            except ValueError as exc:
+                # Distinct from RuntimeError above: a broken token_json_path
+                # or an unusable extracted token is a CONFIG/setup mistake
+                # (wrong path for this target, or --identity-logins itself
+                # wrong) — not an operational stop a resume would fix the
+                # same way, so this raises immediately (same class as
+                # _load_frozen_plan/_build_llm_client's own setup failures)
+                # instead of being folded into stopped_reason below.
+                raise CliError(f"login() cho identity '{label}' thất bại: {exc}") from exc
+            _persist_observation(login_observation)
+            print(f"   [login] identity '{label}' — HTTP {login_observation.status_code}")
+
+        if stopped_reason is None:
+            for check in review.plan_check.checks:
+                try:
+                    observation = harness.capture(
+                        check.action,
+                        role=check.action.role,
+                        identity=role_identity.get(check.action.role, args.identity),
+                        sensitive_body_keys=sensitive_body_keys,
+                    )
+                except RuntimeError as exc:
+                    # Real gap found via independent review: catching only
+                    # (ExecutionStoppedError, CostCapExceededError) missed a
+                    # bare RuntimeError from CostService.record_action()'s
+                    # own write-failure path (shared/cost.py) or KillSwitch's
+                    # audit-log write failure (shared/kill_switch.py, now
+                    # wrapped there too) — both ARE RuntimeError subclasses
+                    # already, so catching the base class covers all 3
+                    # uniformly instead of missing the 2 that aren't
+                    # explicitly named here.
+                    stopped_reason = str(exc)
+                    print(f"   DỪNG GIỮA CHỪNG: {exc}", file=sys.stderr)
+                    break
+                _persist_observation(observation)
+                print(
+                    f"   [{observation.access_result.value}] {check.action.method} {check.action.target} "
+                    f"(HTTP {observation.status_code})"
+                )
     finally:
         harness.close()
         execution_context_store.close()
@@ -1262,7 +1411,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Thư mục lưu evidence + kill-switch/cost audit log (mặc định: %(default)s)",
     )
     execute_parser.add_argument(
-        "--identity", default="anonymous", help="Identity dùng để gửi mọi action (mặc định: %(default)s)"
+        "--identity",
+        default="anonymous",
+        help="Identity mặc định — dùng cho mọi role KHÔNG có --role-identity riêng (mặc định: "
+        "%(default)s)",
+    )
+    execute_parser.add_argument(
+        "--role-identity",
+        action="append",
+        help='1 entry ánh xạ role -> identity, dạng "ROLE=LABEL" (vd "positive_control=owner"). Lặp '
+        "lại flag để khai nhiều role. ROLE phải là 1 trong main/positive_control/denied_control/setup "
+        "(ActionSpec.role, do Exploit Agent gắn khi lập plan cho 1 kịch bản 3-role) — LABEL chỉ là "
+        "tên identity, không phải credential thật (Exploit Agent không tự lấy credential, chỉ tự gắn "
+        "role). Role không có entry riêng ở đây dùng --identity mặc định.",
+    )
+    execute_parser.add_argument(
+        "--identity-logins",
+        help="Đường dẫn file JSON: {label: {method, target, parameters, description?, token_json_path?, "
+        "token_header?, token_prefix?}} — mỗi label sẽ được harness.login() thật trước khi plan chạy, "
+        "nếu label đó được --identity hoặc --role-identity tham chiếu tới. Label không có entry trong "
+        "file này chạy KHÔNG đăng nhập (client mới, chưa có session) — vẫn là 1 identity hợp lệ (vd "
+        "denied_control ẩn danh). Bỏ trống token_json_path cho target dùng session kiểu cookie.",
     )
     execute_parser.add_argument(
         "--sensitive-param",

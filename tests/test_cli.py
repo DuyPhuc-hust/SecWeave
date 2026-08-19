@@ -1771,6 +1771,470 @@ def test_cli_execute_captures_each_action_with_its_own_plan_assigned_role(capsys
     assert [o.role.value for o in observations] == ["positive_control", "denied_control"]
 
 
+# ----- --role-identity / --identity-logins: multi-identity 3-role scenarios (2026-08-19) -----
+
+
+def _multi_identity_plan_file(tmp_path, hypothesis_id: str) -> Path:
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/resource",
+                                "description": "Positive control: owner reads their own resource.",
+                                "role": "positive_control",
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/resource",
+                                "description": "Denied control: attacker is correctly denied.",
+                                "role": "denied_control",
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return plan_file
+
+
+def test_cli_execute_role_identity_bad_format_fails_cleanly(capsys, monkeypatch, tmp_path):
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _multi_identity_plan_file(tmp_path, hypothesis_id)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--role-identity",
+            "positive_control_no_equals_sign",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--role-identity" in captured.err
+
+
+def test_cli_execute_role_identity_invalid_role_fails_cleanly(capsys, monkeypatch, tmp_path):
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _multi_identity_plan_file(tmp_path, hypothesis_id)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--role-identity",
+            "not_a_real_role=owner",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--role-identity" in captured.err
+
+
+def test_cli_execute_identity_logins_missing_file_fails_cleanly(capsys, monkeypatch, tmp_path):
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _multi_identity_plan_file(tmp_path, hypothesis_id)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--identity-logins",
+            str(tmp_path / "does_not_exist.json"),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "identity-logins" in captured.err
+
+
+def test_cli_execute_identity_logins_malformed_schema_fails_cleanly(capsys, monkeypatch, tmp_path):
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _multi_identity_plan_file(tmp_path, hypothesis_id)
+
+    logins_file = tmp_path / "logins.json"
+    logins_file.write_text(json.dumps({"owner": {"method": "POST"}}), encoding="utf-8")  # missing target
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--identity-logins",
+            str(logins_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "identity-logins" in captured.err
+
+
+def test_cli_execute_multi_identity_login_and_role_routing(capsys, monkeypatch, tmp_path):
+    # The scenario this whole feature exists for: 2 real identities, each
+    # logged in via its own bearer-token-in-body login (the same real shape
+    # OWASP Juice Shop uses — see .secweave/manual_test/
+    # identity_scenario_example.py), routed to the plan's 2 differently-
+    # roled actions purely by role — the plan itself never names an
+    # identity, only a role (Exploit Agent "không tự lấy credential").
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_multi_identity_test"
+    storage_dir = tmp_path / "evidence"
+    plan_file = _multi_identity_plan_file(tmp_path, hypothesis_id)
+
+    logins_file = tmp_path / "logins.json"
+    logins_file.write_text(
+        json.dumps(
+            {
+                "owner": {
+                    "method": "POST",
+                    "target": "http://host.docker.internal:3000/login",
+                    "parameters": {"email": "owner@test", "password": "pw1"},
+                    "token_json_path": "token",
+                },
+                "attacker": {
+                    "method": "POST",
+                    "target": "http://host.docker.internal:3000/login",
+                    "parameters": {"email": "attacker@test", "password": "pw2"},
+                    "token_json_path": "token",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            body = json.loads(request.content)
+            token = "owner-token" if body["email"] == "owner@test" else "attacker-token"
+            return httpx.Response(200, json={"token": token})
+        # /resource: owner's token is granted (their own data), attacker's is denied.
+        auth = request.headers.get("Authorization")
+        if auth == "Bearer owner-token":
+            return httpx.Response(200, json={"data": "owner's resource"})
+        return httpx.Response(403, json={"error": "forbidden"})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--role-identity",
+            "positive_control=owner",
+            "--role-identity",
+            "denied_control=attacker",
+            "--identity-logins",
+            str(logins_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+
+    log_path = storage_dir / execution_id / "observations.jsonl"
+    from shared.models.observation import NormalizedObservation
+
+    observations = [NormalizedObservation(**json.loads(line)) for line in log_path.read_text().splitlines()]
+    # 2 logins (role=setup, identity label sorted: attacker before owner) +
+    # 2 plan actions (in plan order: positive_control then denied_control).
+    assert [(o.role.value, o.identity) for o in observations] == [
+        ("setup", "attacker"),
+        ("setup", "owner"),
+        ("positive_control", "owner"),
+        ("denied_control", "attacker"),
+    ]
+    by_role = {o.role.value: o for o in observations}
+    assert by_role["positive_control"].access_result.value == "granted"
+    assert by_role["denied_control"].access_result.value == "denied"
+
+
+def test_cli_execute_role_identity_label_without_a_login_entry_runs_unauthenticated(
+    capsys, monkeypatch, tmp_path
+):
+    # A label referenced by --role-identity but absent from --identity-logins
+    # is a legitimate identity too (e.g. an anonymous, never-logged-in
+    # denied_control) — it must just run with a fresh, unauthenticated
+    # client, not error out for "missing" a login it never needed.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _multi_identity_plan_file(tmp_path, hypothesis_id)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "Authorization" in request.headers:
+            return httpx.Response(200, json={"data": "should not happen"})
+        return httpx.Response(401, json={"error": "unauthenticated"})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--role-identity",
+            "denied_control=never_logged_in",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+
+
+def test_cli_execute_login_token_extraction_failure_is_a_clean_error_not_a_crash(
+    capsys, monkeypatch, tmp_path
+):
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _multi_identity_plan_file(tmp_path, hypothesis_id)
+
+    logins_file = tmp_path / "logins.json"
+    logins_file.write_text(
+        json.dumps(
+            {
+                "owner": {
+                    "method": "POST",
+                    "target": "http://host.docker.internal:3000/login",
+                    "parameters": {"email": "owner@test", "password": "pw1"},
+                    # Deliberately wrong path — the real response only has "token", not "authentication.token".
+                    "token_json_path": "authentication.token",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"token": "owner-token"})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--role-identity",
+            "positive_control=owner",
+            "--identity-logins",
+            str(logins_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "login()" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_execute_skips_login_for_a_role_identity_not_used_by_this_plan(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: an earlier version filtered
+    # identities_needing_login only by "referenced by --role-identity at
+    # all", not by whether that role actually appears in THIS plan's own
+    # actions — a --role-identity entry for a role the plan doesn't use
+    # would still trigger a real login HTTP request (wasted cost-cap
+    # budget, an unnecessary side effect) for an identity nothing here
+    # would ever send an action as. This plan has ONLY a positive_control
+    # action; --role-identity maps denied_control too, but "attacker"'s
+    # login must never be attempted.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/resource",
+                                "description": "Positive control: owner reads their own resource.",
+                                "role": "positive_control",
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    logins_file = tmp_path / "logins.json"
+    logins_file.write_text(
+        json.dumps(
+            {
+                "owner": {
+                    "method": "POST",
+                    "target": "http://host.docker.internal:3000/login",
+                    "parameters": {"email": "owner@test", "password": "pw1"},
+                    "token_json_path": "token",
+                },
+                "attacker": {
+                    "method": "POST",
+                    "target": "http://host.docker.internal:3000/login",
+                    "parameters": {"email": "attacker@test", "password": "pw2"},
+                    "token_json_path": "token",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    login_calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            body = json.loads(request.content)
+            login_calls.append(body["email"])
+            return httpx.Response(200, json={"token": "owner-token" if body["email"] == "owner@test" else "x"})
+        return httpx.Response(200, json={"data": "owner's resource"})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--role-identity",
+            "positive_control=owner",
+            "--role-identity",
+            "denied_control=attacker",  # this role isn't used by the plan above
+            "--identity-logins",
+            str(logins_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+    assert login_calls == ["owner@test"]  # attacker's login was never attempted
+
+
 def test_cli_execute_plan_file_rejects_mismatched_hypothesis_id(capsys, monkeypatch, tmp_path):
     db_path = str(tmp_path / "test.db")
     plan_file = tmp_path / "plan.json"
