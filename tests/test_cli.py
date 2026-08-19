@@ -3992,3 +3992,367 @@ def test_full_pipeline_writes_unverified_then_promotes_to_verified_on_release(ca
     verified = store.get_verified_context("tgt_test")
     assert len(verified) == 1
     store.close()
+
+
+# ----- `secweave retest`: reproducibility (SPEC §8.1, WEEKLY_PLAN W7) (2026-08-19) -----
+
+
+def _single_role_plan_file(tmp_path, hypothesis_id: str) -> Path:
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000",
+                                "description": "Ordinary single-role read.",
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return plan_file
+
+
+def test_cli_retest_requires_a_plan_file(capsys, monkeypatch, tmp_path):
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    exit_code = cli.main(
+        [
+            "retest",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--plan-file" in captured.err
+
+
+def test_cli_retest_requires_at_least_2_runs(capsys, monkeypatch, tmp_path):
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    exit_code = cli.main(
+        [
+            "retest",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--runs",
+            "1",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--runs" in captured.err
+
+
+def test_cli_retest_runs_n_independent_times_and_reports_full_agreement(capsys, monkeypatch, tmp_path):
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+    storage_dir = tmp_path / "evidence"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "retest",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--runs",
+            "3",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            "exec_retest_base",
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+
+    # A single-role plan (no controls) always resolves to inconclusive —
+    # deterministic across all 3 independent runs.
+    summary_path = storage_dir / "exec_retest_base_retest_summary.json"
+    summary = json.loads(summary_path.read_text())
+    assert summary["runs"] == 3
+    assert [r["verdict"] for r in summary["results"]] == ["inconclusive"] * 3
+    assert summary["most_common_verdict"] == "inconclusive"
+    assert summary["agreement_count"] == 3
+    assert summary["agreement_ratio"] == 1.0
+    assert summary["meets_recommended_threshold"] is True
+    assert summary["retest_id"] in captured.out  # --format json prints it too
+
+    # Each run got its OWN independent execution — 3 separate evidence dirs.
+    for i in (1, 2, 3):
+        assert (storage_dir / f"exec_retest_base_retest{i}" / "observations.jsonl").exists()
+
+
+def test_cli_retest_reports_disagreement_when_verdicts_actually_differ(capsys, monkeypatch, tmp_path):
+    # A real, deterministic way to exercise the "verdicts differ across
+    # runs" path: a full 3-role + blind-marker plan (same shape as
+    # test_cli_execute_substitutes_blind_marker_and_satisfies_the_main_predicate,
+    # which reaches a real CONFIRMED) where the denied_control action's
+    # behavior changes after the first 2 total captures across the whole
+    # retest (simulating a flaky/inconsistent real target): runs 1-2 see a
+    # false-granted denied control (main+positive still satisfied, but
+    # oracle.py's denied-check short-circuits before ever reaching main ->
+    # NOT_REPRODUCED); run 3 sees denied_control correctly denied, so all
+    # 3 groups are satisfied -> CONFIRMED. 2/3 agreement, not 3/3.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/notes",
+                                "description": "Seed a note with a blind marker.",
+                                "role": "setup",
+                                "parameters": {"content": "{{SECWEAVE_BLIND_MARKER}}"},
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/notes/1",
+                                "description": "Positive control.",
+                                "role": "positive_control",
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/notes/1",
+                                "description": "Denied control.",
+                                "role": "denied_control",
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/notes/1",
+                                "description": "Main: read the seeded note back.",
+                                "role": "main",
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    seeded_content = []
+    get_call_count = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/notes":
+            body = json.loads(request.content)
+            seeded_content.append(body["content"])
+            return httpx.Response(200, json={"id": 1})
+        # Each run makes exactly 3 GET /notes/1 calls, in plan order:
+        # positive_control, denied_control, main. Position 1 (0-indexed)
+        # within each run's 3 calls is always denied_control. Deliberately
+        # makes RUN 1 the MINORITY outcome (confirmed) and runs 2-3 the
+        # MAJORITY (not_reproduced) — real gap found via independent
+        # review: an earlier version made run 1 agree with the majority,
+        # so a broken implementation that took results[0]'s verdict as
+        # "most common" instead of the true majority would have produced
+        # the exact same (wrong-for-the-wrong-reason) assertions. Ordering
+        # the minority outcome FIRST forces the test to actually exercise
+        # majority-counting logic, not first-result logic.
+        get_call_count[0] += 1
+        position_in_run = (get_call_count[0] - 1) % 3
+        run_index = (get_call_count[0] - 1) // 3  # 0, 1, 2 for run 1, 2, 3
+        if position_in_run == 1:  # denied_control
+            if run_index == 0:
+                return httpx.Response(403, json={})  # correctly denied, only on run 1
+            return httpx.Response(200, json={"content": seeded_content[-1]})  # incorrectly granted
+        return httpx.Response(200, json={"content": seeded_content[-1]})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "retest",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--runs",
+            "3",
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/notes params:content",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/notes/1",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            "exec_retest_disagree",
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+
+    summary = json.loads((storage_dir / "exec_retest_disagree_retest_summary.json").read_text())
+    assert [r["verdict"] for r in summary["results"]] == ["confirmed", "not_reproduced", "not_reproduced"]
+    assert summary["most_common_verdict"] == "not_reproduced"
+    assert summary["agreement_count"] == 2
+    assert summary["agreement_ratio"] == pytest.approx(2 / 3)
+    assert summary["meets_recommended_threshold"] is True  # 2/3 >= 2/3
+
+
+def test_cli_retest_stops_immediately_on_a_setup_failure_instead_of_limping_through(
+    capsys, monkeypatch, tmp_path
+):
+    # A config mistake (here: a malformed --identity-logins file) would hit
+    # every one of the N runs identically — failing the whole batch on the
+    # FIRST occurrence is more honest than silently reporting on however
+    # many runs happened to complete first.
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    logins_file = tmp_path / "bad_logins.json"
+    logins_file.write_text("not valid json", encoding="utf-8")
+
+    exit_code = cli.main(
+        [
+            "retest",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--runs",
+            "3",
+            "--identity-logins",
+            str(logins_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "lần 1/3" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_retest_surfaces_runs_that_captured_no_verdict_at_all(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: agreement_ratio alone can't
+    # tell a reader WHY it's below threshold — a run that never captured
+    # anything (e.g. BLOCKED by the planning-time cost cap, same cap
+    # applies identically to every run here) looks, at that one field,
+    # indistinguishable from a run that genuinely produced a DIFFERENT
+    # verdict. runs_with_no_verdict makes this explicit instead of making
+    # a reader cross-reference `results` by hand.
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    exit_code = cli.main(
+        [
+            "retest",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--runs",
+            "3",
+            "--cap",
+            "0",  # blocks every run identically at the planning-time cost check
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            "exec_retest_no_verdict",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+
+    summary = json.loads((tmp_path / "evidence" / "exec_retest_no_verdict_retest_summary.json").read_text())
+    assert [r["verdict"] for r in summary["results"]] == [None, None, None]
+    assert summary["runs_with_no_verdict"] == 3
+    assert summary["most_common_verdict"] is None
+    assert summary["agreement_count"] == 0
+    assert summary["agreement_ratio"] == 0.0
