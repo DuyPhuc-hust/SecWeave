@@ -148,12 +148,9 @@ def _load_identity_logins(path: Optional[str]) -> Dict[str, _IdentityLoginSpec]:
 
     if not isinstance(raw, dict):
         raise CliError(f"--identity-logins file '{path}' phải là 1 JSON object (label -> cấu hình login).")
-    # Real gap found via independent review: only the OUTER shape (dict)
-    # was checked — a value that isn't itself a JSON object (e.g.
-    # {"owner": "typo'd string"}) reached `_IdentityLoginSpec(**cfg)`
-    # unguarded, raising a raw TypeError ("argument after ** must be a
-    # mapping, not str") instead of the clean CliError every other
-    # malformed-shape case in this file now produces.
+    # Each entry's VALUE must be checked too, not just the outer dict — a
+    # non-dict value (e.g. {"owner": "typo'd string"}) would otherwise
+    # reach `_IdentityLoginSpec(**cfg)` and raise a raw TypeError.
     non_dict_labels = [label for label, cfg in raw.items() if not isinstance(cfg, dict)]
     if non_dict_labels:
         raise CliError(
@@ -171,16 +168,12 @@ def _replace_placeholder_recursive(value: Any, marker: str) -> Any:
     """Walks `value` — a plain string, or any JSON-shaped nesting of
     dict/list around strings (exactly what LLM JSON output can ever
     produce) — replacing every occurrence of BLIND_MARKER_PLACEHOLDER
-    with `marker`. Real gap found via independent review: an earlier
-    version only substituted TOP-LEVEL STRING values of
-    action.parameters — a not-perfectly-obedient LLM (this codebase has
-    documented real cases of one ignoring instructions) putting the
-    placeholder in action.target/description, or nesting it inside a
-    dict/list value within parameters, would sail through un-substituted
-    with NO error — the real target would silently receive the literal
-    placeholder text instead of a real marker, and nobody would notice
-    short of reading the raw transcript by hand. Recursing over every
-    field (see `_action_field_values_for_marker_scan`) closes that."""
+    with `marker`. Recurses into every field (see
+    `_action_field_values_for_marker_scan`), not just top-level string
+    values of `parameters` — an LLM that puts the placeholder in
+    target/description, or nests it inside parameters, must not have it
+    silently sail through un-substituted: the real target would then
+    receive the literal placeholder text instead of a real marker."""
     if isinstance(value, str):
         return value.replace(BLIND_MARKER_PLACEHOLDER, marker)
     if isinstance(value, dict):
@@ -202,9 +195,7 @@ def _contains_placeholder_recursive(value: Any) -> bool:
 
 def _action_field_values_for_marker_scan(action: ActionSpec) -> List[Any]:
     """Every field of `action` the placeholder could plausibly end up in —
-    not just `parameters` (see `_replace_placeholder_recursive`'s
-    docstring for why scanning only `parameters`' top-level string values
-    was a real gap)."""
+    not just `parameters`."""
     return [action.target, action.description, action.method, action.parameters]
 
 
@@ -305,16 +296,13 @@ def _lookup_from_step(step_id: str, path: str, step_responses: Dict[str, Any]) -
 
 def _resolve_from_step_in_string(text: str, step_responses: Dict[str, Any]) -> str:
     """For target/description (always plain strings) — every match is
-    stringified and interpolated into the surrounding text. Real gap
-    found via independent review: a resolved value that's itself a
-    dict/list (a json_path pointing at a nested object rather than a
-    scalar) used to be silently `str()`-ed into the URL/description —
-    Python's dict repr embedded literally in a URL is nonsense, not
-    something a plan author could have meant. Rejected explicitly instead
-    of producing a garbled request (harness.capture() DOES already catch
-    an invalid URL and record a failed observation rather than crashing,
-    but failing here is clearer and doesn't waste a real HTTP attempt/cost
-    slot on a request that could never have been meaningful).
+    stringified and interpolated into the surrounding text. A resolved
+    value that's itself a dict/list (a json_path pointing at a nested
+    object rather than a scalar) is rejected explicitly rather than
+    silently `str()`-ed into the URL/description — Python's dict repr
+    embedded literally in a URL is nonsense, and failing here is clearer
+    than wasting a real HTTP attempt on a request that could never have
+    been meaningful.
     """
 
     def _sub(match: re.Match) -> str:
@@ -363,65 +351,44 @@ def _resolve_from_step_references(action: ActionSpec, step_responses: Dict[str, 
 
 def cmd_execute(args: argparse.Namespace) -> int:
     """Thực thi THẬT các action đã approve của 1 plan — nối KillSwitch/
-    CostService/EvidenceHarness vào CLI, thứ 3 thành phần này trước đó chỉ
-    chạy được qua script thủ công (.secweave/manual_test/*.py), chưa từng
-    có entrypoint CLI/API thật nào (real gap tìm được qua review toàn dự
-    án). Mỗi action được capture với đúng `action.role` mà Exploit Agent đã
-    gắn cho nó khi lập plan (ActionSpec.role, mặc định main nếu plan không
-    tự gắn role nào khác) — không còn hardcode role=main cho mọi action như
-    trước (2026-08-19: đóng phần "role tagging" của gap 3-role).
+    CostService/EvidenceHarness vào CLI. Mỗi action được capture với đúng
+    `action.role` mà Exploit Agent gắn cho nó khi lập plan (ActionSpec.role,
+    mặc định main).
 
-    2026-08-19 (tiếp): đóng phần "multi-identity" — `--role-identity
+    Kịch bản 3-role (main/positive_control/denied_control): `--role-identity
     ROLE=LABEL` (lặp lại được) ánh xạ 1 role sang 1 identity LABEL khác
     `--identity` mặc định; `--identity-logins <file>` khai credential thật
-    (method/target/parameters/token_json_path) cho từng LABEL, được
-    `harness.login()` thật TRƯỚC khi plan chạy, cho phép positive_control
-    đọc bằng chính danh tính chủ sở hữu và denied_control đọc bằng danh
-    tính khác, đúng nghĩa 3-role, trong CÙNG 1 lượt `execute`. Exploit
-    Agent vẫn không hề chạm vào credential thật — plan chỉ mang `role`,
-    LABEL/credential hoàn toàn do operator cấp qua CLI. LABEL không có
-    entry trong `--identity-logins` vẫn chạy được, chỉ là không đăng nhập
-    (client mới, chưa có session) — một identity ẩn danh hợp lệ.
+    cho từng LABEL, được `harness.login()` thật TRƯỚC khi plan chạy — cho
+    phép positive_control đọc bằng chính danh tính chủ sở hữu và
+    denied_control đọc bằng danh tính khác, trong CÙNG 1 lượt `execute`.
+    Exploit Agent không hề chạm vào credential thật — plan chỉ mang `role`,
+    LABEL/credential hoàn toàn do operator cấp qua CLI. LABEL không có entry
+    trong `--identity-logins` vẫn chạy được, chỉ là không đăng nhập (một
+    identity ẩn danh hợp lệ).
 
-    2026-08-19 (tiếp): đóng phần "blind marker seeding" — gap con thứ 3/3
-    cuối cùng của kịch bản 3-role. Nếu plan có action nào chứa
-    `BLIND_MARKER_PLACEHOLDER` (shared/models/observation.py) trong
-    parameters — dấu hiệu Exploit Agent đã thiết kế 1 action `role=setup`
-    seed dữ liệu mồi — lệnh này tự gọi `EvidenceHarness.generate_marker()`
-    lấy marker THẬT rồi thay placeholder bằng marker thật trong TOÀN BỘ
-    action's parameters, TRƯỚC `review_plan()` (để Policy Service kiểm
-    đúng giá trị thật sẽ gửi, không phải placeholder), rồi truyền
-    `marker=` thật vào mọi `capture()` — nhờ đó "main" giờ có thể thật sự
-    SATISFIED, không còn luôn INSUFFICIENT_DATA. Exploit Agent/LLM không
-    bao giờ thấy giá trị marker thật, chỉ biết đúng 1 placeholder công
-    khai cố định (SPEC §4.3.4: "Exploit Agent / mọi LLM: Không" biết
-    marker). Plan không dùng placeholder thì hành vi y hệt trước đây
-    (`marker=None`, không tự sinh `seed_manifest.json`). decide() vẫn được
-    gọi ở cuối để verdict thật ra đúng INCONCLUSIVE khi thiếu nhóm
-    predicate nào đó, thay vì giả vờ có thể kết luận CONFIRMED/
-    NOT_REPRODUCED khi thiếu bằng chứng.
+    Blind marker: nếu plan có action nào chứa `BLIND_MARKER_PLACEHOLDER`
+    (shared/models/observation.py) trong parameters — dấu hiệu 1 action
+    `role=setup` seed dữ liệu mồi — lệnh này tự gọi
+    `EvidenceHarness.generate_marker()` lấy marker THẬT rồi thay placeholder
+    bằng marker thật TRƯỚC `review_plan()` (để Policy Service kiểm đúng giá
+    trị thật sẽ gửi), rồi truyền `marker=` thật vào mọi `capture()`. Exploit
+    Agent/LLM không bao giờ thấy giá trị marker thật, chỉ biết đúng 1
+    placeholder công khai cố định (SPEC §4.3.4). Plan không dùng placeholder
+    thì không tự sinh `seed_manifest.json`.
 
-    2026-08-19 (tiếp): thêm resource-ID-chaining — `{{FROM_STEP:<step_id>:
-    <json_path>}}` trong target/parameters của 1 action được tự resolve
-    bằng giá trị THẬT trích từ response thật của action `step_id` đã chạy
-    TRƯỚC nó trong cùng plan (vd 1 note vừa tạo, server tự cấp ID, action
-    sau cần đọc lại đúng note đó). Khác blind marker (resolve 1 lần, trước
-    review_plan()) — cái này BẮT BUỘC resolve XEN KẼ trong vòng lặp capture
-    chính, vì giá trị thật chỉ tồn tại sau khi action nguồn đã thực sự
-    chạy; Policy Service vẫn kiểm được plan chưa resolve vì cú pháp
-    `{param}` trong allowlist vốn đã khớp bất kỳ text nào ở 1 path segment,
-    kể cả text `{{FROM_STEP:...}}` chưa resolve. `actions.json` được ghi
-    lại LẦN 2 cho từng action ngay khi nó chạy xong, đè lên bản chưa
-    resolve đã ghi lúc đầu (đổi `_persist_actions()` sang "action_id trùng
-    thì bản mới thắng"). Tham chiếu tới step_id chưa chạy (chưa tới lượt,
-    hoặc gõ sai) → `CliError` sạch, không silently gửi text placeholder
-    tới target thật.
+    Resource-ID-chaining: `{{FROM_STEP:<step_id>:<json_path>}}` trong
+    target/parameters của 1 action được tự resolve bằng giá trị THẬT trích
+    từ response thật của action `step_id` đã chạy TRƯỚC nó trong cùng plan
+    (vd 1 note vừa tạo, server tự cấp ID). Resolve XEN KẼ trong vòng lặp
+    capture chính (không thể resolve trước, vì giá trị thật chỉ tồn tại sau
+    khi action nguồn đã chạy) — mỗi action resolve xong được re-check qua
+    `is_allowed()` với giá trị THẬT (không phải placeholder) ngay trước khi
+    gửi. Tham chiếu tới step_id chưa chạy → `CliError` sạch.
 
     `--plan-file`: dùng lại đúng plan đã `secweave plan` duyệt trước đó
-    thay vì gọi LLM lập plan MỚI (xem _load_frozen_plan's docstring cho lý
-    do). Không truyền cờ này vẫn hoạt động như trước — tiện cho test nhanh
-    1 bước — nhưng KHÔNG đảm bảo plan thực thi giống plan đã xem qua
-    `secweave plan` trước đó, vì LLM không xác định.
+    thay vì gọi LLM lập plan MỚI (xem `_load_frozen_plan`). Không truyền cờ
+    này vẫn hoạt động — tiện cho test nhanh 1 bước — nhưng KHÔNG đảm bảo
+    thực thi đúng plan đã xem qua `secweave plan`, vì LLM không xác định.
     """
     try:
         return _run_execute(args)
@@ -431,29 +398,12 @@ def cmd_execute(args: argparse.Namespace) -> int:
 
 
 def _run_execute(args: argparse.Namespace) -> int:
-    # Real gap found via independent review: argparse's required=True on
-    # --target-revision-id only checks the FLAG was passed, not that its
-    # VALUE is non-empty — `--target-revision-id ""` used to sail through
-    # here, then crash with an unhandled ValueError the moment the first
-    # action's capture() tried to write it to Context Store
-    # (record_unverified_observation's own _require_revision check,
-    # deliberately NOT swallowed by capture()'s best-effort
-    # `except RuntimeError: pass`, since silently dropping a config
-    # mistake would defeat the whole point of validating it). Checked
-    # here, once, up front — a clean CliError before any real HTTP
-    # request instead of a raw traceback mid-run.
+    # argparse's required=True only checks the flag was passed, not that
+    # its value is non-empty — checked here, once, up front, so a config
+    # mistake fails as a clean CliError before any real HTTP request runs,
+    # not as a raw traceback mid-run.
     if not args.target_revision_id:
         raise CliError("--target-revision-id không được để trống.")
-    # Real gap found via independent review: unlike --target-revision-id
-    # (enforced by Context Store's own _require_revision — every observation
-    # write fails loud on empty), --target-id had NO equivalent enforcement
-    # anywhere (context_store/store.py never validates it). The only place
-    # that happened to reject "" was `_load_hypothesis_from_context_store`'s
-    # own staleness cross-check — but that helper only runs on the non-
-    # --plan-file branch below, so the (documented, RECOMMENDED) --plan-file
-    # path silently accepted --target-id "" and baked it into every
-    # observation/Context Store write for this run. Checked here, uniformly,
-    # regardless of which branch runs.
     if not args.target_id:
         raise CliError("--target-id không được để trống.")
 
@@ -496,19 +446,9 @@ def _run_execute(args: argparse.Namespace) -> int:
 
     execution_id = args.execution_id or generate_id("exec")
 
-    # Blind marker (SPEC §4.3.4): a plan that opted into a 3-role blind-
-    # marker scenario (Exploit Agent's prompt teaches it to embed
-    # BLIND_MARKER_PLACEHOLDER in exactly the bait-data parameter it wants
-    # checked) gets that placeholder swapped for a REAL random marker HERE
-    # — after the LLM is completely done, and BEFORE Policy Service/Cost
-    # Service/execution ever see the plan — so the real marker value never
-    # passes through any LLM context (SPEC's own table: "Exploit Agent /
-    # mọi LLM: Không" biết marker). Substituting before review_plan() below
-    # (not after) matters for a real reason, not just tidiness: an
-    # allowlist entry with `params:key=regex` on this parameter is checked
-    # against the REAL marker's shape (32 hex chars from
-    # EvidenceHarness.generate_marker()), not the placeholder text — the
-    # only way that check can mean anything.
+    # Substituted BEFORE review_plan() below, not after: an allowlist entry
+    # with `params:key=regex` on this parameter must check the REAL
+    # marker's shape (32 hex chars), not the placeholder text.
     marker_value = None
     if _uses_blind_marker_placeholder(plan_result.plan.actions):
         # A throwaway EvidenceHarness — no kill_switch/cost_service/
@@ -556,16 +496,10 @@ def _run_execute(args: argparse.Namespace) -> int:
 
     kill_switch = KillSwitch(execution_id=execution_id, storage_dir=args.storage_dir)
 
-    # Real gap found via independent review: kill_switch.start() used to be
-    # called unconditionally, which crashes uncaught with a raw ValueError
-    # the moment an operator reuses an --execution-id whose PRIOR execute
-    # invocation ever succeeded even once (status would already be RUNNING,
-    # since nothing yet drives it to COMPLETED — see
-    # shared/models/kill_switch.py's ExecutionStatus docstring) or was
-    # STOPPED. Reusing an execution_id across multiple `execute` invocations
-    # is exactly how CostService's own cap is meant to accumulate real
-    # meaning (shared/cost.py: "a caller reusing one execution_id across
-    # more than one plan") — so this must be handled, not crash.
+    # Reusing an execution_id across multiple `execute` invocations is how
+    # CostService's own cap accumulates real meaning across calls — so a
+    # status of RUNNING (a prior invocation already started it) or STOPPED
+    # must be handled here, not just PREPARED.
     if kill_switch.status == ExecutionStatus.PREPARED:
         kill_switch.start()
     elif kill_switch.status == ExecutionStatus.STOPPED:
@@ -602,45 +536,27 @@ def _run_execute(args: argparse.Namespace) -> int:
     def _persist_actions(new_actions: List[ActionSpec]) -> None:
         # Persisted so a later, separate `secweave assemble-package`
         # invocation can reconstruct VerificationPackage's `actions` input
-        # (SPEC §7 field #9) without needing the original --plan-file to
-        # still be lying around. MERGED with whatever's already on disk (by
-        # action_id), not overwritten wholesale — real gap found via
-        # independent review: reusing one execution_id across multiple
-        # `execute` calls with DIFFERENT plans is an explicitly supported
-        # pattern elsewhere in this codebase (kill-switch RUNNING-
-        # continuation branch, CostService cap accumulation — see this
-        # function's own comment above on kill_switch.status), and
-        # observations.jsonl already accumulates across such calls.
-        # Overwriting actions.json with only THIS invocation's actions
-        # permanently and unrecoverably broke `assemble-package` for
-        # exactly that pattern — an earlier call's ActionSpec, still
-        # referenced by an earlier observation's action_ref, would vanish
-        # from the file entirely.
+        # (SPEC §7 field #9) without the original --plan-file. MERGED with
+        # whatever's already on disk (by action_id), not overwritten
+        # wholesale — reusing one execution_id across multiple `execute`
+        # calls (with different plans, or the same plan retried) is a
+        # supported pattern, and an earlier call's ActionSpec may still be
+        # referenced by an earlier observation's action_ref.
         #
-        # A matching action_id WRITES OVER the existing entry (not
-        # skipped) — needed for resource-ID-chaining: the same action_id
-        # gets persisted TWICE within one invocation, once upfront still
-        # carrying its unresolved {{FROM_STEP:...}} text (in case a run
-        # stops before reaching it), then again with the REAL resolved
-        # value right as it's captured — the resolved version must win.
-        # Harmless for the cross-invocation case this was built for too:
-        # the same auto-generated action_id reappearing across 2 different
-        # `execute` calls only happens by re-using the exact same
-        # --plan-file, so the "newer" content is never a genuinely
-        # different action being confused for an old one.
+        # A matching action_id WRITES OVER the existing entry — needed for
+        # resource-ID-chaining: the same action_id is persisted twice
+        # within one invocation, once upfront with its unresolved
+        # {{FROM_STEP:...}} text, then again with the real resolved value
+        # once captured — the resolved version must win.
         try:
             existing_actions_raw = (
                 json.loads(actions_path.read_text(encoding="utf-8")) if actions_path.exists() else []
             )
         except (json.JSONDecodeError, OSError) as exc:
             raise CliError(f"không đọc lại được '{actions_path}': {exc}") from exc
-        # Real gap found via independent review: actions.json is operator-
-        # editable between 2 `execute` calls reusing the same execution_id
-        # (a supported pattern, see this function's own comment above) —
-        # an accidental hand-edit that breaks its list-of-objects shape
-        # used to crash `item["action_id"]` with a raw TypeError/KeyError
-        # instead of a clean CliError, same class of gap fixed elsewhere
-        # in this file for this exact artifact.
+        # actions.json is operator-editable between calls — a hand-edit
+        # that breaks its list-of-objects shape must produce a clean
+        # CliError, not a raw TypeError/KeyError.
         if not isinstance(existing_actions_raw, list) or not all(
             isinstance(item, dict) and "action_id" in item for item in existing_actions_raw
         ):
@@ -679,39 +595,23 @@ def _run_execute(args: argparse.Namespace) -> int:
     step_responses: Dict[str, Any] = {}
 
     def _persist_observation(observation: NormalizedObservation) -> None:
-        # Real gap found via independent review: capture() returns a
-        # structured NormalizedObservation, but cmd_execute previously
-        # only ever used it in-memory (for decide(), below) and never
-        # persisted it — only the raw request/response transcript
-        # landed on disk (evidence_harness/harness.py), in a shape
-        # that's missing execution_id/target_id/target_revision_id/
-        # channel/raw_evidence_hash/access_result. That left NO path
-        # (via CLI or by reading files back) to reconstruct the
-        # observations needed to assemble a VerificationPackage after
-        # the fact — only hand re-deriving every field from the raw
-        # transcript, error-prone and undocumented. Appended one JSON
-        # object per line (not a single JSON array rewritten each time)
-        # so a crash/kill mid-loop loses at most the one in-flight
-        # write, matching the same append-only philosophy as the
-        # kill-switch/cost audit logs, and so multiple `execute`
-        # invocations reusing one execution_id accumulate here too.
+        # Appended one JSON object per line (not a single array rewritten
+        # each time), matching the append-only kill-switch/cost audit
+        # logs — a crash/kill mid-loop loses at most the one in-flight
+        # write, and multiple `execute` invocations reusing one
+        # execution_id accumulate here too. This file (not the raw
+        # request/response transcript in evidence_harness/harness.py,
+        # which lacks execution_id/channel/hash/access_result) is what
+        # `assemble-package`/`retest`/`measure` read back later.
         observations.append(observation)
         observations_log_path = harness_storage_dir / "observations.jsonl"
         try:
             with open(observations_log_path, "a", encoding="utf-8") as f:
                 f.write(observation.model_dump_json() + "\n")
         except OSError as exc:
-            # Real gap found via independent review: unlike `report`'s
-            # --out write (already hardened), this append had no guard —
-            # a disk-full/permission failure here crashed with a raw
-            # traceback instead of a clean CliError, and — worse — the
-            # observation this call is persisting had already been
-            # appended to the in-memory `observations` list above, so a
-            # silently-swallowed failure here would have gone on to
-            # compute a verdict from evidence that was never actually
-            # durable on disk. Fail loudly instead: on-disk
-            # observations.jsonl is the ONLY source of truth every later
-            # command (assemble-package/retest/measure) reads back.
+            # `observations` already has this entry in memory — must fail
+            # loudly rather than let a verdict get computed from evidence
+            # that was never actually made durable on disk.
             raise CliError(
                 f"không ghi được observation vào '{observations_log_path}': {type(exc).__name__}: {exc}"
             ) from exc
@@ -722,16 +622,12 @@ def _run_execute(args: argparse.Namespace) -> int:
         # override whose role actually appears in plan_result.plan.actions)
         # that ALSO has a --identity-logins entry gets logged in now, once,
         # before any of the plan's own actions run — a label with NO login
-        # entry simply runs unauthenticated (EvidenceHarness gives it a
-        # fresh client on first use), a legitimate identity too (e.g. an
-        # anonymous, never-logged-in denied_control). Real gap found via
-        # independent review: an EARLIER version of this filtered only by
-        # "referenced by --role-identity at all", not by whether that role
-        # is actually used in THIS plan — a --role-identity entry for a
-        # role this plan happens not to use would still trigger a real
-        # login HTTP request (consuming CostService budget, possibly
-        # tripping the cost cap) for an identity nothing here would ever
-        # send a single action as.
+        # entry simply runs unauthenticated (a legitimate identity too, e.g.
+        # an anonymous denied_control). Filtering by roles ACTUALLY IN THIS
+        # PLAN (not just "has a --role-identity entry at all") matters: an
+        # unused --role-identity entry would otherwise still trigger a real
+        # login HTTP request for an identity nothing here ever sends an
+        # action as.
         roles_in_plan = {action.role for action in plan_result.plan.actions}
         relevant_labels = {label for role, label in role_identity.items() if role in roles_in_plan}
         identities_needing_login = sorted({args.identity, *relevant_labels} & identity_logins.keys())
@@ -743,28 +639,17 @@ def _run_execute(args: argparse.Namespace) -> int:
                 target=login_spec.target,
                 description=login_spec.description or f"Log in as identity '{label}'.",
                 parameters=login_spec.parameters,
-                # Real gap found while running this end-to-end: without
-                # this, ActionSpec.role defaulted to MAIN — but
                 # harness.login() ALWAYS internally captures with
-                # role=SETUP regardless of what the ActionSpec itself
-                # says, so the persisted action_record entry would claim
-                # role=main for an action whose own observation says
-                # role=setup — a confusing, misleading mismatch for
-                # anyone reading the assembled package later.
+                # role=SETUP regardless of what the ActionSpec says — set
+                # explicitly here so the persisted action_record entry
+                # doesn't contradict its own observation.
                 role=ObservationRole.SETUP,
             )
-            # Real gap found while running this end-to-end: login_action's
-            # action_id is freshly auto-generated here (ActionSpec.action_id
-            # defaults to a new id, never supplied by the operator) and
-            # NEVER appeared anywhere in plan_result.plan.actions — so
-            # without this call, assemble-package would later reject the
-            # WHOLE package with "action_record thiếu ActionSpec cho
-            # action_ref" the moment it tried to reconstruct action_record
-            # for this login's own (role=setup) observation. Persisted
-            # (not just attempted) even if the login itself fails below —
-            # matches how plan_result.plan.actions is persisted regardless
-            # of whether every one of them ends up producing an
-            # observation.
+            # Persisted (not just attempted) even if the login itself fails
+            # below — login_action's auto-generated action_id never
+            # appears in plan_result.plan.actions, so without this,
+            # assemble-package would reject the whole package for missing
+            # an ActionSpec for this login's own observation.
             _persist_actions([login_action])
             try:
                 login_observation = harness.login(
@@ -776,21 +661,16 @@ def _run_execute(args: argparse.Namespace) -> int:
                     sensitive_request_keys=sensitive_body_keys,
                 )
             except RuntimeError as exc:
-                # Same reasoning as the capture-loop's own RuntimeError
-                # handling below — a login attempt goes through capture()
-                # internally too, so it's subject to the exact same kill-
-                # switch/cost-cap stop conditions mid-run.
+                # A login goes through capture() internally, so it's
+                # subject to the same kill-switch/cost-cap stop conditions
+                # mid-run as the main loop below.
                 stopped_reason = str(exc)
                 print(f"   DỪNG GIỮA CHỪNG (login '{label}'): {exc}", file=sys.stderr)
                 break
             except ValueError as exc:
-                # Distinct from RuntimeError above: a broken token_json_path
-                # or an unusable extracted token is a CONFIG/setup mistake
-                # (wrong path for this target, or --identity-logins itself
-                # wrong) — not an operational stop a resume would fix the
-                # same way, so this raises immediately (same class as
-                # _load_frozen_plan/_build_llm_client's own setup failures)
-                # instead of being folded into stopped_reason below.
+                # A broken token_json_path or unusable token is a config
+                # mistake, not an operational stop a resume would fix —
+                # raises immediately instead of folding into stopped_reason.
                 raise CliError(f"login() cho identity '{label}' thất bại: {exc}") from exc
             _persist_observation(login_observation)
             print(f"   [login] identity '{label}' — HTTP {login_observation.status_code}")
@@ -805,22 +685,16 @@ def _run_execute(args: argparse.Namespace) -> int:
                 # run yet/doesn't exist, or its response can't be
                 # traversed to the requested json path.
                 resolved_action = _resolve_from_step_references(check.action, step_responses)
-                # Real gap found via independent review: review_plan() above
-                # only ever checked the UNRESOLVED plan against the
-                # allowlist — a {{FROM_STEP:...}} placeholder has no "/" in
-                # it, so it always satisfies an `{id}`-style path template's
-                # `[^/]+` regex regardless of what the runtime-resolved
-                # value turns out to be. Since that value comes from a
-                # REAL, possibly attacker-influenced response (exactly the
-                # kind of data an IDOR-style plan reads), a resolved value
-                # like "42/../../admin/settings" could turn one path
-                # segment into several, escaping the reviewed scope with
-                # zero enforcement — a real, exploitable bypass, same class
-                # already fixed once for percent-encoded path traversal.
-                # Re-checking the ACTUALLY-RESOLVED action here — right
-                # before it's sent, with the exact bytes that will go out —
-                # closes it: deny-by-default applies to what's really sent,
-                # not just to what the plan looked like on paper.
+                # review_plan() above only checked the UNRESOLVED plan — a
+                # {{FROM_STEP:...}} placeholder has no "/" in it, so it
+                # always satisfies an `{id}`-style path template regardless
+                # of what the runtime-resolved value (from a REAL, possibly
+                # attacker-influenced response) turns out to be, e.g.
+                # "42/../../admin/settings" escaping the reviewed scope.
+                # Re-checking the ACTUALLY-RESOLVED action here, with the
+                # exact bytes about to be sent, closes that: deny-by-
+                # default applies to what's really sent, not the plan on
+                # paper.
                 resolved_decision = is_allowed(resolved_action, authorization)
                 if not resolved_decision.allowed:
                     raise CliError(
@@ -837,15 +711,10 @@ def _run_execute(args: argparse.Namespace) -> int:
                         sensitive_body_keys=sensitive_body_keys,
                     )
                 except RuntimeError as exc:
-                    # Real gap found via independent review: catching only
-                    # (ExecutionStoppedError, CostCapExceededError) missed a
-                    # bare RuntimeError from CostService.record_action()'s
-                    # own write-failure path (shared/cost.py) or KillSwitch's
-                    # audit-log write failure (shared/kill_switch.py, now
-                    # wrapped there too) — both ARE RuntimeError subclasses
-                    # already, so catching the base class covers all 3
-                    # uniformly instead of missing the 2 that aren't
-                    # explicitly named here.
+                    # Catches the base class, not just (ExecutionStoppedError,
+                    # CostCapExceededError) — CostService's/KillSwitch's own
+                    # write-failure paths also raise plain RuntimeError
+                    # subclasses and must stop the run the same way.
                     stopped_reason = str(exc)
                     print(f"   DỪNG GIỮA CHỪNG: {exc}", file=sys.stderr)
                     break
@@ -859,16 +728,10 @@ def _run_execute(args: argparse.Namespace) -> int:
                 _persist_actions([resolved_action])
                 if resolved_action.step_id:
                     if resolved_action.step_id in step_responses:
-                        # Real gap found via independent review: 2 actions
-                        # reusing the same step_id (an LLM mistake — the
-                        # prompt never explicitly forbids it) would
-                        # silently let the SECOND one's response clobber
-                        # the first in step_responses, so a later
-                        # FROM_STEP reference resolves to whichever
-                        # same-labeled action happened to run more
-                        # recently, with no error — genuinely ambiguous
-                        # which one a reference means, so refuse instead
-                        # of silently picking one.
+                        # 2 actions reusing the same step_id would silently
+                        # let the second one's response clobber the first —
+                        # genuinely ambiguous which one a later FROM_STEP
+                        # reference means, so refuse rather than guess.
                         raise CliError(
                             f"step_id='{resolved_action.step_id}' được gán cho hơn 1 action trong cùng "
                             "plan — mỗi step_id chỉ được dùng đúng 1 lần, nếu không FROM_STEP tham "
@@ -889,16 +752,12 @@ def _run_execute(args: argparse.Namespace) -> int:
     print(f"-> Kill-switch status cuối: {kill_switch.status.value}")
     print(f"-> Cost: {cost_service.executed_action_count}/{cost_service.cap}")
 
-    # Real gap found via independent review: this was only ever a local
-    # variable used for THIS invocation's own decide() call, never
-    # persisted — a later, separate `secweave assemble-package` invocation
-    # had no way to know whether the execution it's assembling a package
-    # for actually COMPLETED or was STOPPED partway (a distinction
-    # decide()/assemble_verdict() treat as safety-critical: SPEC §3.4 only
-    # allows CONFIRMED/NOT_REPRODUCED when COMPLETED). Persisted
-    # unconditionally (not just when this invocation captured new
-    # observations) so it always reflects this invocation's real outcome,
-    # even across multiple `execute` calls reusing one execution_id.
+    # Persisted so a later, separate `secweave assemble-package` invocation
+    # knows whether this execution actually COMPLETED or was STOPPED
+    # partway — decide()/assemble_verdict() only allow CONFIRMED/
+    # NOT_REPRODUCED when COMPLETED (SPEC §3.4). Written unconditionally
+    # (not just when this invocation captured new observations) so it
+    # always reflects this invocation's real outcome.
     execution_status = ExecutionStatus.STOPPED if stopped_reason else ExecutionStatus.COMPLETED
     execution_status_path = harness_storage_dir / "execution_status.json"
     try:
@@ -906,11 +765,9 @@ def _run_execute(args: argparse.Namespace) -> int:
             json.dumps({"execution_status": execution_status.value}), encoding="utf-8"
         )
     except OSError as exc:
-        # Real gap found via independent review: unguarded, unlike `report`
-        # --out's write — a disk-full/permission failure here happens
-        # AFTER every real HTTP request of this run already completed, so
-        # a raw traceback here would also swallow the verdict printout
-        # below that reports what the run actually did.
+        # This happens AFTER every real HTTP request of the run already
+        # completed — must not swallow the verdict printout below with a
+        # raw traceback.
         raise CliError(
             f"không ghi được '{execution_status_path}': {type(exc).__name__}: {exc}"
         ) from exc

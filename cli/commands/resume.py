@@ -18,7 +18,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 
 def _run_resume(args: argparse.Namespace) -> int:
-    # See `_run_kill`'s identical check — same gap, same fix.
+    # See `_run_kill`'s identical check for why an empty string must be rejected.
     if not args.execution_id:
         raise CliError("--execution-id không được để trống.")
     kill_switch = KillSwitch(execution_id=args.execution_id, storage_dir=args.storage_dir)

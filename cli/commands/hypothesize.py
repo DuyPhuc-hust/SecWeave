@@ -37,12 +37,8 @@ def _run_hypothesize(args: argparse.Namespace) -> int:
         except FileNotFoundError:
             raise CliError(f"không tìm thấy source file '{args.source}'")
         except OSError as exc:
-            # Real gap found via independent review: only FileNotFoundError
-            # was caught — realistic misuse like --source pointing at a
-            # DIRECTORY (IsADirectoryError) or an unreadable file
-            # (PermissionError) crashed with a raw traceback instead of
-            # this command's otherwise-clean failure path. Both are OSError
-            # subclasses, caught together here.
+            # Covers --source pointing at a directory (IsADirectoryError) or
+            # an unreadable file (PermissionError), not just a missing one.
             raise CliError(f"không đọc được source file '{args.source}': {exc}") from exc
         except UnicodeDecodeError as exc:
             # A binary/non-UTF8 file is equally realistic --source misuse
@@ -58,21 +54,18 @@ def _run_hypothesize(args: argparse.Namespace) -> int:
             if args.target_id
             else []
         )
-        # SPEC §4.6 write-path diagram's dashed arrow: "unverified: chỉ tra
-        # cứu, có nhãn cảnh báo" — a real, sanctioned read pathway, not a
-        # future TODO. build_prompt() labels this separately from
-        # verified_context so the LLM can't mistake "captured once, never
-        # reviewed" for confirmed fact.
+        # SPEC §4.6: "unverified: chỉ tra cứu, có nhãn cảnh báo" —
+        # build_prompt() labels this separately from verified_context so
+        # the LLM can't mistake "captured once, never reviewed" for
+        # confirmed fact.
         unverified_context = (
             context_store.get_unverified_context(args.target_id, args.target_revision_id)
             if args.target_id
             else []
         )
     except RuntimeError as exc:
-        # Real gap found via independent review: get_verified_context() had
-        # no exception handling at all — a real sqlite failure here (e.g.
-        # lock contention) used to escape uncaught and dump a raw
-        # traceback instead of this clean error.
+        # A real sqlite failure here (e.g. lock contention) must not dump a
+        # raw traceback instead of this command's clean error contract.
         context_store.close()
         raise CliError(str(exc)) from exc
 

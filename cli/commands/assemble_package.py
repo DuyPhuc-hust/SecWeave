@@ -17,12 +17,10 @@ from verification_package.assembler import assemble_verification_package
 
 def cmd_assemble_package(args: argparse.Namespace) -> int:
     """Lắp `VerificationPackage` (SPEC §7) từ artifact thật của 1 lượt
-    `execute` đã chạy — tách riêng khỏi `execute` có chủ đích (real gap
-    tìm được qua review: trước lệnh này, `assemble_verification_package()`
-    đã build/test đầy đủ nhưng chỉ gọi được qua Python API, không có CLI
-    nào cả). Đọc lại 3 artifact `execute` đã lưu (`observations.jsonl`,
-    `actions.json`, `execution_status.json`) trong cùng thư mục
-    execution — không cần `--plan-file` gốc vẫn còn tồn tại.
+    `execute` đã chạy — tách riêng khỏi `execute` có chủ đích. Đọc lại 3
+    artifact `execute` đã lưu (`observations.jsonl`, `actions.json`,
+    `execution_status.json`) trong cùng thư mục execution — không cần
+    `--plan-file` gốc vẫn còn tồn tại.
 
     4 field bắt buộc (`--scenario`, `--limitations`, `--next-action`,
     `--authorization-reference`) là phán đoán của con người, không tự sinh
@@ -38,12 +36,9 @@ def cmd_assemble_package(args: argparse.Namespace) -> int:
 
 
 def _run_assemble_package(args: argparse.Namespace) -> int:
-    # Real gap found via independent review: same "empty string is not the
-    # same as flag omitted" gap already fixed for `kill`/`resume`/`execute`
-    # — `Path(storage_dir) / ""` resolves to storage_dir itself, so an
-    # empty --execution-id would silently read whatever loose
-    # observations.jsonl/actions.json/execution_status.json happen to sit
-    # directly under --storage-dir instead of erroring on the mistyped flag.
+    # An empty string is not the same as the flag being omitted —
+    # Path(storage_dir) / "" resolves to storage_dir itself, silently
+    # reading whatever loose artifacts sit directly under --storage-dir.
     if not args.execution_id:
         raise CliError("--execution-id không được để trống.")
     execution_dir = Path(args.storage_dir) / args.execution_id
@@ -66,15 +61,9 @@ def _run_assemble_package(args: argparse.Namespace) -> int:
         actions_data = json.loads(actions_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         raise CliError(f"không đọc được artifact của execution '{args.execution_id}': {exc}") from exc
-    # Real gap found via independent review: this parsing used to go
-    # straight from json.loads() into Model(**item) with no shape check —
-    # `measure`'s own read of the exact same 2 artifact kinds was hardened
-    # this way, but assemble-package (which reads them first, and is the
-    # one call site that always must have run before `measure` or `report`
-    # can do anything useful) never got the same guard, so a hand-edited or
-    # torn observations.jsonl/actions.json (both operator-editable files by
-    # design — see `review-package`'s own docstring on this exact risk)
-    # could crash with a raw TypeError instead of a clean CliError.
+    # A shape check before Model(**item) — these files are operator-
+    # editable between runs, and a hand-edited or torn one must produce a
+    # clean CliError, not a raw TypeError.
     if not all(isinstance(o, dict) for o in observation_dicts):
         raise CliError(f"'{observations_path}' có dòng không phải JSON object — file này có bị sửa tay không?")
     if not isinstance(actions_data, list) or not all(isinstance(item, dict) for item in actions_data):

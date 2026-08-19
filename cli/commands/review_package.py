@@ -24,14 +24,11 @@ def cmd_review_package(args: argparse.Namespace) -> int:
     (không flag nào cho sửa `raw_evidence_references`/`artifact_hashes`/
     `normalized_observations`/`action_record` — chỉ đọc lại nguyên trạng từ
     file). Nhưng `predicate_results`/`verdict` chính chúng lại NẰM SẴN
-    trong file — review độc lập tìm ra: 1 file JSON bị sửa tay (fabricate
-    `verdict`+`predicate_results` khớp nhau về logic nội bộ, nhưng không
-    khớp với `normalized_observations` thật) vẫn qua được mọi validator
-    hiện có, vì các validator chỉ kiểm NỘI BỘ package tự nhất quán, không
-    đối chiếu lại với observation thật. Sửa bằng cách tính lại
-    `evaluate_predicates()` trên đúng `normalized_observations` trong file
-    rồi so với `predicate_results` đã khai — lệch là từ chối, không hỏi gì
-    thêm.
+    trong file, nên phải tính lại `evaluate_predicates()` trên đúng
+    `normalized_observations` trong file rồi so với `predicate_results` đã
+    khai — lệch là từ chối: 1 file bị sửa tay để fabricate verdict+predicate
+    khớp nhau về nội bộ nhưng không khớp observation thật sẽ không qua
+    được validator nào nếu chỉ kiểm tính nhất quán nội bộ.
     """
     try:
         return _run_review_package(args)
@@ -50,23 +47,15 @@ def _run_review_package(args: argparse.Namespace) -> int:
         raise CliError(f"không đọc được package file '{package_path}': {exc}") from exc
     except json.JSONDecodeError as exc:
         raise CliError(f"'{package_path}' không phải JSON hợp lệ: {exc}") from exc
-    # Real gap found via independent review: `report`/`measure` (which read
-    # the exact same VerificationPackage JSON artifact) both guard against
-    # a wrong-shaped-but-valid-JSON top level (e.g. a list instead of an
-    # object) — this command, arguably the most safety-critical of the 3
-    # (it can promote observations to verified in the Context Store), never
-    # got the same guard, so `package_data.get(...)` below would raise a
-    # raw AttributeError instead of a clean CliError.
     if not isinstance(package_data, dict):
         raise CliError(f"'{package_path}' phải là 1 JSON object (VerificationPackage), nhận '{type(package_data).__name__}'.")
 
     decision = _parse_enum_arg(ReviewDecision, args.decision, "--decision")
 
     if args.retest_reference and decision != ReviewDecision.RETEST:
-        # Real gap found via independent review: --retest-reference could be
-        # set together with ANY decision (vd release), tạo ra 1 package vừa
-        # is_release_ready=True vừa mang retest_reference — mâu thuẫn với
-        # đúng ý nghĩa field #19 ("absent until retests have run").
+        # --retest-reference with a non-retest decision would attach field
+        # #19 ("absent until retests have run") to a package where no retest
+        # actually happened.
         raise CliError(
             f"--retest-reference chỉ hợp lệ cùng --decision retest (đang dùng --decision {decision.value})."
         )
@@ -82,19 +71,13 @@ def _run_review_package(args: argparse.Namespace) -> int:
     except (ValidationError, KeyError, TypeError) as exc:
         raise CliError(f"không đọc được normalized_observations/predicate_results trong file: {exc}") from exc
     if declared_results != recomputed_results:
-        # Real bypass found via independent review: without this check, a
-        # hand-edited package file with a fabricated verdict=confirmed +
-        # matching (but fake) predicate_results — while normalized_
-        # observations was left untouched, still showing no real satisfying
-        # evidence — passed every existing validator (they only check
-        # INTERNAL consistency, e.g. "CONFIRMED requires all 3 groups
-        # satisfied," never that predicate_results actually reflects the
-        # observations it claims to summarize) and came out the other end
-        # with a legitimate-looking, decision=release human_review_record
-        # attached. Recomputing from the package's OWN normalized_
-        # observations and refusing on any mismatch closes this — a real
-        # assemble-package run always produces a package where these agree,
-        # so this never fires for output that wasn't hand-tampered with.
+        # Every other validator here only checks INTERNAL consistency
+        # (e.g. "CONFIRMED requires all 3 groups satisfied"), never that
+        # predicate_results actually reflects normalized_observations — so
+        # a hand-edited file with a fabricated but internally-consistent
+        # verdict+predicate_results, left next to untouched (unsatisfying)
+        # observations, would otherwise pass. A real assemble-package run
+        # always produces a package where these agree.
         raise CliError(
             "predicate_results trong file KHÔNG khớp với normalized_observations thật — package này có "
             "dấu hiệu bị sửa tay sau khi `assemble-package` chạy, từ chối review."
@@ -112,12 +95,10 @@ def _run_review_package(args: argparse.Namespace) -> int:
 
     existing_review = package_data.get("human_review_record")
     if existing_review:
-        # Real gap found via independent review: overwriting silently left
-        # zero trace that a PRIOR reviewer's decision (e.g. a reject) ever
-        # existed. Not blocked outright (a legitimate re-review after a
-        # rejected package gets fixed and reassembled is a real workflow),
-        # but surfaced loudly so an operator watching the terminal/log sees
-        # exactly what's being replaced.
+        # Not blocked outright — a legitimate re-review after a rejected
+        # package gets fixed and reassembled is a real workflow — but
+        # surfaced loudly so a prior reviewer's decision isn't silently
+        # overwritten without a trace.
         print(
             f"CẢNH BÁO: đang GHI ĐÈ 1 human_review_record đã có — reviewer trước: "
             f"'{existing_review.get('reviewer')}', decision trước: '{existing_review.get('decision')}', "
@@ -137,23 +118,18 @@ def _run_review_package(args: argparse.Namespace) -> int:
         package_data["retest_reference"] = args.retest_reference
 
     try:
-        # Rebuilding the WHOLE object (not a partial model_copy(update=...),
-        # which does not re-run validators) so every validator — including
+        # Rebuilt from the whole dict, not model_copy(update=...) — the
+        # latter doesn't re-run validators, and every validator (including
         # HumanReviewRecord's own decision=release/checked_raw_artifact
-        # check and VerificationPackage's predicate-completeness checks —
-        # runs again against the fully updated data, not just the new field
-        # in isolation.
+        # check) must run again against the fully updated data.
         package = VerificationPackage(**package_data)
     except ValidationError as exc:
         raise CliError(f"không gắn được human_review_record vào package: {exc}") from exc
 
     if decision == ReviewDecision.RELEASE:
-        # SPEC §4.6 write path, step 2: "Human Review -- phát hành package
-        # -> chuyển verified --> Context Store." Only reachable here because
-        # decision=release + checked_raw_artifact=true was already enforced
-        # above (HumanReviewRecord's own validator) — promotion never runs
-        # for a reject/retest decision, matching the diagram's own arrow
-        # (only a released package promotes anything).
+        # SPEC §4.6 write path: "Human Review -- phát hành package ->
+        # chuyển verified --> Context Store" — only a released package
+        # promotes anything.
         promotion_context_store = _open_context_store(args.context_db)
         try:
             promoted = promotion_context_store.promote_execution_to_verified(

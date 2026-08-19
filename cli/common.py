@@ -142,26 +142,20 @@ def _load_hypothesis_from_context_store(
     `current_target_id`/`current_revision` (the target/revision the CALLER
     is about to plan/execute against — optional since `plan` doesn't
     require them) enable a WARNING, not a hard block, if they differ from
-    what was recorded when this hypothesis was generated (real gap found
-    via independent review of the verified_observations revision-
-    staleness fix — the same class of gap exists one tier up: a hypothesis
-    carries no memory of what it was generated for). A warning rather than
-    a CliError deliberately: re-testing an OLD hypothesis against a NEWER
-    revision on purpose (e.g. confirming a fix landed) is a legitimate
-    workflow WEEKLY_PLAN W7 itself describes — this must not block it,
-    only make the operator aware. Only compared when BOTH sides are known
-    (a NULL/None on either side means nothing to compare against, not a
-    mismatch).
+    what was recorded when this hypothesis was generated. A warning rather
+    than a CliError deliberately: re-testing an OLD hypothesis against a
+    NEWER revision on purpose (e.g. confirming a fix landed) is a
+    legitimate workflow WEEKLY_PLAN W7 itself describes — this must not
+    block it, only make the operator aware. Only compared when BOTH sides
+    are known (a NULL/None on either side means nothing to compare
+    against, not a mismatch).
 
-    Real gap found via independent review: an empty string (`""`) is just
-    as falsy as `None` in the comparison below, so a caller passing
-    `--target-id ""`/`--target-revision-id ""` (e.g. an unset shell
-    variable interpolated into a script) would silently skip the cross-
-    check entirely — no warning, no error — indistinguishable from the
-    flag never being passed at all. Since this feature's only job IS
-    emitting that warning, treated as a caller mistake worth surfacing
-    explicitly rather than a legitimate "nothing to compare" case (which
-    only `None` — the flag genuinely omitted — means).
+    An empty string (`""`) is rejected outright rather than silently
+    treated as "nothing to compare" — it's just as falsy as `None` in the
+    comparison below, so `--target-id ""` (e.g. an unset shell variable
+    interpolated into a script) would otherwise skip the cross-check with
+    no warning and no error, indistinguishable from the flag never being
+    passed.
     """
     if current_target_id == "":
         raise CliError("target_id truyền vào để đối chiếu không được là chuỗi rỗng — bỏ hẳn cờ nếu không cần.")

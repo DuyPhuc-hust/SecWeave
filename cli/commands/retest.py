@@ -78,16 +78,10 @@ def _run_retest(args: argparse.Namespace) -> int:
     most_common_verdict, agree_count = verdict_counts.most_common(1)[0] if verdict_counts else (None, 0)
     ratio = agree_count / len(results)
     meets_threshold = ratio >= (2 / 3)
-    # Real gap found via independent review: `agreement_ratio` alone can't
-    # tell a reader WHY it's below the threshold — a run stopped by an
-    # unrelated kill-switch/cost-cap trigger (verdict=None) looks
-    # identical, at this one field, to a run that genuinely produced a
-    # DIFFERENT verdict. The `results` list already carries this
-    # distinction (a null verdict vs. a named one), but a reader who only
-    # glances at `agreement_ratio`/`meets_recommended_threshold` could
-    # misread infra noise as the system being non-deterministic — so
-    # surface the count explicitly instead of making them cross-reference
-    # `results` by hand every time.
+    # Surfaced separately from agreement_ratio — a run stopped by an
+    # unrelated kill-switch/cost-cap trigger (verdict=None) would otherwise
+    # look identical to one that genuinely produced a different verdict,
+    # misreading infra noise as the system being non-deterministic.
     no_verdict_count = sum(1 for _, v in results if v is None)
 
     summary = {
@@ -102,21 +96,16 @@ def _run_retest(args: argparse.Namespace) -> int:
         "runs_with_no_verdict": no_verdict_count,
     }
     summary_path = Path(args.storage_dir) / f"{base_execution_id}_retest_summary.json"
-    # Real gap found via this feature's own test suite: if EVERY run gets
-    # BLOCKED before ever reaching EvidenceHarness construction (e.g. all
-    # 3 runs hit the same planning-time cost cap), nothing ever creates
-    # --storage-dir at all (EvidenceHarness.__init__ is what normally
-    # does that, scoped to storage_dir/execution_id) — writing the
-    # summary there would otherwise crash with a raw FileNotFoundError.
     try:
+        # mkdir needed explicitly: if every run got BLOCKED before
+        # EvidenceHarness was ever constructed, nothing else creates
+        # --storage-dir (that's normally EvidenceHarness.__init__'s job).
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     except OSError as exc:
-        # Real gap found via independent review: unguarded, same class as
-        # the other writes hardened in this pass — a disk-full/permission
-        # failure here happens AFTER every retest run already completed
-        # real HTTP requests, so a raw traceback would also swallow the
-        # agreement-ratio printout below.
+        # A disk-full/permission failure here happens AFTER every retest
+        # run already completed real HTTP requests — must not swallow the
+        # agreement-ratio printout below with a raw traceback.
         raise CliError(f"không ghi được '{summary_path}': {type(exc).__name__}: {exc}") from exc
 
     print(f"\n-> Tỷ lệ cùng verdict: {agree_count}/{len(results)} ({ratio:.0%}) — verdict phổ biến nhất: "

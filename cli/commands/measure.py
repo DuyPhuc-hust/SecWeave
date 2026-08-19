@@ -153,14 +153,11 @@ def _run_measure(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         elif summary["results"] and cross_checked == 0:
-            # Real gap found via independent review: nếu KHÔNG lần nào cross-
-            # check được (vd --storage-dir sai, hoặc artifact đã bị dọn), kết
-            # quả JSON trông y hệt "đã đối chiếu 3/3 lần, khớp hoàn toàn" —
-            # không có field nào phân biệt "đã kiểm tra và khớp" với "chưa
-            # kiểm tra được gì cả". Phải nói rõ ra, không để im lặng trông
-            # giống "verified clean" — cùng nguyên tắc với
-            # actions_outside_allowlist_count báo "N/A" thay vì 0 khi không
-            # có --allowed-action.
+            # If NOTHING cross-checked (e.g. wrong --storage-dir), the JSON
+            # output would otherwise look identical to "checked N/N, all
+            # matched" — must say so explicitly, same principle as
+            # actions_outside_allowlist_count reporting "N/A" instead of 0
+            # when --allowed-action was never given.
             report["reproducibility"]["WARNING_could_not_cross_check_any_run"] = (
                 f"Không đối chiếu được lần retest nào với raw artifact thật (0/{len(summary['results'])}) — "
                 "kiểm tra lại --storage-dir có đúng thư mục đã dùng khi `secweave retest` chạy không. Số "
@@ -220,10 +217,8 @@ def _run_measure(args: argparse.Namespace) -> int:
                 try:
                     kill_switch_events.append(json.loads(line))
                 except json.JSONDecodeError:
-                    # Same "a crash tears only the last line" reasoning as
-                    # CostService's own audit log — this is a best-effort
-                    # report, not a recovery routine, so skip it rather than
-                    # fail the whole measurement over 1 torn line.
+                    # Best-effort report, not a recovery routine — skip a
+                    # torn line rather than fail the whole measurement.
                     continue
         stop_events = [e for e in kill_switch_events if e.get("event") == "stop"]
         automatic_stops = [e for e in stop_events if e.get("source") == "automatic_threshold"]

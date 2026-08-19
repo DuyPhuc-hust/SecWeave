@@ -22,12 +22,9 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
 
 def _run_kill(args: argparse.Namespace) -> int:
-    # Real gap found via independent review: argparse's required=True only
-    # checks the flag was passed, not that its value is non-empty (same
-    # class of gap already closed for `execute --target-revision-id`).
-    # `Path(storage_dir) / ""` evaluates to `storage_dir` itself — an empty
-    # --execution-id silently pointed KillSwitch at the storage_dir ROOT
-    # instead of erroring on the obviously-mistyped flag.
+    # An empty string is not the same as the flag being omitted —
+    # Path(storage_dir) / "" evaluates to storage_dir itself, silently
+    # pointing KillSwitch at the storage_dir root instead of erroring.
     if not args.execution_id:
         raise CliError("--execution-id không được để trống.")
     source = _parse_enum_arg(StopSource, args.source, "--source")
@@ -39,14 +36,10 @@ def _run_kill(args: argparse.Namespace) -> int:
         )
 
     kill_switch = KillSwitch(execution_id=args.execution_id, storage_dir=args.storage_dir)
-    # Captured BEFORE stop() (which immediately appends its own event) —
-    # real gap found via independent review: a mistyped/never-started
-    # --execution-id silently succeeds (PREPARED is a valid, intentional
-    # state to stop() from — "abort before start()" — so this can't just
-    # be rejected outright), printing output textually IDENTICAL to a real
-    # successful stop. An operator relying on this command for an
-    # unambiguous panic-stop confirmation deserves an explicit signal that
-    # nothing was actually running under this id.
+    # Captured before stop() appends its own event — PREPARED is a valid
+    # state to stop() from (abort before start()), so a mistyped/never-
+    # started --execution-id would otherwise print output identical to a
+    # real successful stop, with no signal that nothing was running.
     had_prior_history = bool(kill_switch.read_audit_log())
 
     try:
