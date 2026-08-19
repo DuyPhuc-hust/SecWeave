@@ -1074,6 +1074,7 @@ def test_cli_execute_stops_when_cost_cap_is_reached(capsys, monkeypatch, tmp_pat
     # so this is refused as BLOCKED before ever reaching CostService/the
     # real network call — consistent with `plan`'s own existing behavior.
     assert exit_code == 1
+    assert "BLOCKED" in captured.out
     assert calls == []
 
 

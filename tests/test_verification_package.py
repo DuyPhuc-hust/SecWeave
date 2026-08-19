@@ -457,6 +457,33 @@ def test_assemble_raises_a_clear_error_for_a_completely_empty_observation_list()
         )
 
 
+def test_assemble_rejects_observations_from_a_different_execution_id():
+    # Real gap found via independent review: nothing previously checked
+    # that every observation's own execution_id matched the execution_id
+    # parameter — a caller accidentally mixing observations from 2 runs
+    # (e.g. a positive_control from run A, a denied_control from run B)
+    # would silently produce a package whose verdict rests on evidence
+    # from more than one execution while looking internally consistent.
+    # This check runs before decide() ever reads the raw evidence back off
+    # disk, so a placeholder (not real-file-backed) observation is enough.
+    observations = [_observation(), _observation(observation_id="obs_2", execution_id="exec_OTHER_RUN")]
+
+    with pytest.raises(ValueError, match="execution_id khác"):
+        assemble_verification_package(
+            target_id="tgt_1",
+            environment=Environment.STAGING,
+            revision="rev_1",
+            authorization=_authorization(),
+            scenario="x",
+            execution_id="exec_1",
+            actions=[],
+            observations=observations,
+            execution_status=ExecutionStatus.STOPPED,
+            limitations="x",
+            next_action="x",
+        )
+
+
 def test_assemble_carries_the_oracles_verdict_reason_into_the_package(tmp_path):
     # Real gap found via independent review: VerdictResult.reason (the ONLY
     # place explaining an unusual-but-correct combination, e.g. all 3

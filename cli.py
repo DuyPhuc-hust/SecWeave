@@ -3,8 +3,9 @@ import json
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Type, TypeVar
 
 import httpx
 from pydantic import ValidationError
@@ -50,6 +51,21 @@ def _open_context_store(db_path: str) -> SecurityContextStore:
         return SecurityContextStore(db_path=db_path)
     except sqlite3.Error as exc:
         raise CliError(f"không mở được Context Store tại '{db_path}': {exc}") from exc
+
+
+_EnumT = TypeVar("_EnumT", bound=Enum)
+
+
+def _parse_enum_arg(enum_cls: Type[_EnumT], raw: str, flag_name: str) -> _EnumT:
+    """Parses a CLI flag's raw string into an Enum member, raising a
+    uniform CliError listing every valid choice on failure — the same
+    shape was repeated 4x across --environment/--decision/--source/
+    --automatic-threshold-reason before being pulled out here."""
+    try:
+        return enum_cls(raw)
+    except ValueError:
+        valid = ", ".join(member.value for member in enum_cls)
+        raise CliError(f"{flag_name} không hợp lệ '{raw}' — chỉ chấp nhận: {valid}")
 
 
 def _print_skip_warning(message: str) -> None:
@@ -557,24 +573,7 @@ def _run_execute(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         context_store = _open_context_store(args.context_db)
-
-        try:
-            record = context_store.get_hypothesis(args.hypothesis_id)
-        except RuntimeError as exc:
-            raise CliError(str(exc)) from exc
-        finally:
-            context_store.close()
-
-        if record is None:
-            raise CliError(
-                f"không tìm thấy hypothesis_id '{args.hypothesis_id}' (chỉ tra được bản ghi "
-                "status=hypothesis, không tra được not_verifiable)"
-            )
-
-        try:
-            hypothesis = _load_stored_hypothesis(record)
-        except ValueError as exc:
-            raise CliError(str(exc)) from exc
+        hypothesis = _load_hypothesis_from_context_store(context_store, args.hypothesis_id)
 
         llm_client = _build_llm_client(
             args,
@@ -811,11 +810,7 @@ def _run_assemble_package(args: argparse.Namespace) -> int:
     except (json.JSONDecodeError, ValidationError, ValueError, OSError) as exc:
         raise CliError(f"không đọc được artifact của execution '{args.execution_id}': {exc}") from exc
 
-    try:
-        environment = Environment(args.environment)
-    except ValueError:
-        valid = ", ".join(e.value for e in Environment)
-        raise CliError(f"--environment không hợp lệ '{args.environment}' — chỉ chấp nhận: {valid}")
+    environment = _parse_enum_arg(Environment, args.environment, "--environment")
 
     print(
         "CẢNH BÁO: authorization dùng để lắp package dưới đây CHỈ dựng tạm từ --authorization-reference "
@@ -897,11 +892,7 @@ def _run_review_package(args: argparse.Namespace) -> int:
     except json.JSONDecodeError as exc:
         raise CliError(f"'{package_path}' không phải JSON hợp lệ: {exc}") from exc
 
-    try:
-        decision = ReviewDecision(args.decision)
-    except ValueError:
-        valid = ", ".join(d.value for d in ReviewDecision)
-        raise CliError(f"--decision không hợp lệ '{args.decision}' — chỉ chấp nhận: {valid}")
+    decision = _parse_enum_arg(ReviewDecision, args.decision, "--decision")
 
     if args.retest_reference and decision != ReviewDecision.RETEST:
         # Real gap found via independent review: --retest-reference could be
@@ -1058,22 +1049,13 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
 
 def _run_kill(args: argparse.Namespace) -> int:
-    try:
-        source = StopSource(args.source)
-    except ValueError:
-        valid = ", ".join(s.value for s in StopSource)
-        raise CliError(f"--source không hợp lệ '{args.source}' — chỉ chấp nhận: {valid}")
+    source = _parse_enum_arg(StopSource, args.source, "--source")
 
     automatic_threshold_reason = None
     if args.automatic_threshold_reason:
-        try:
-            automatic_threshold_reason = AutomaticThresholdReason(args.automatic_threshold_reason)
-        except ValueError:
-            valid = ", ".join(r.value for r in AutomaticThresholdReason)
-            raise CliError(
-                f"--automatic-threshold-reason không hợp lệ '{args.automatic_threshold_reason}' — chỉ "
-                f"chấp nhận: {valid}"
-            )
+        automatic_threshold_reason = _parse_enum_arg(
+            AutomaticThresholdReason, args.automatic_threshold_reason, "--automatic-threshold-reason"
+        )
 
     kill_switch = KillSwitch(execution_id=args.execution_id, storage_dir=args.storage_dir)
     # Captured BEFORE stop() (which immediately appends its own event) —

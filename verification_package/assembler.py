@@ -66,12 +66,33 @@ def assemble_verification_package(
     captured) is exactly SPEC §4.5's "execution record" case this module
     doesn't build — better to fail loud and specific here than let a
     caller puzzle out 5 field errors that all trace back to one root cause.
+
+    Also raises ValueError if any observation's own `execution_id` doesn't
+    match the `execution_id` parameter — real gap found via independent
+    review: nothing previously checked this, so a caller accidentally
+    concatenating observations from two different runs (e.g. reusing a
+    variable, or a bug in whatever reads observations.jsonl back) would
+    silently produce a package whose predicate_results/verdict rest on
+    evidence from more than one execution — e.g. a positive_control from
+    run A combined with a denied_control from run B — while looking
+    internally consistent. `execution_id` is deliberately still its own
+    parameter (not derived from the observations) so this exact mismatch
+    has something to be checked against, instead of just trusting
+    whatever the list happens to contain.
     """
     if not observations:
         raise ValueError(
             "assemble_verification_package(): observations rỗng — không thể tạo Verification Package "
             "khi execution chưa thu được bất kỳ bằng chứng nào (đây là trường hợp SPEC §4.5 gọi là "
             "'execution record', chưa có code hỗ trợ ở increment này)."
+        )
+
+    mismatched_execution_ids = {o.execution_id for o in observations} - {execution_id}
+    if mismatched_execution_ids:
+        raise ValueError(
+            f"assemble_verification_package(): observations có execution_id khác với '{execution_id}' đã "
+            f"truyền: {sorted(mismatched_execution_ids)} — mỗi Verification Package chỉ được lắp từ bằng "
+            "chứng của đúng 1 execution, không được trộn nhiều lượt chạy khác nhau."
         )
 
     verdict_result = decide(observations, execution_status=execution_status)
