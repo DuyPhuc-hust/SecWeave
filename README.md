@@ -113,7 +113,7 @@ pytest
 
 ## Dùng CLI
 
-4 lệnh, dùng report mẫu có sẵn trong `tests/fixtures/` để thử ngay.
+11 lệnh, dùng report mẫu có sẵn trong `tests/fixtures/` để thử ngay.
 
 Các file mẫu trong `tests/fixtures/` là output **thật** (không tự viết tay) từ Semgrep/Trivy/OWASP ZAP chạy thật vào SecWeave/OWASP Juice Shop — xem chú thích trong từng file. Ví dụ dưới dùng `zap_sample_report.json` vì nó có URL thật, đi được hết cả 4 bước; `semgrep_sample_report.json`/`trivy_sample_report.json` là whitebox (SAST/SCA, không có URL) nên `plan` sẽ trả `NOT_PLANNABLE` — đúng hành vi mong đợi, không phải lỗi (xem `--tool` bên dưới để thử các file đó).
 
@@ -140,6 +140,73 @@ python cli.py plan --hypothesis-id <hyp_...> \
 **4. Tra lại hypothesis đã sinh:**
 ```bash
 python cli.py show-hypothesis --hypothesis-id <hyp_...>
+```
+
+**5. Thực thi plan đã duyệt, thu bằng chứng thật (`execute`)** — SẼ GỬI REQUEST THẬT, chỉ chạy khi thực sự được phép trên target đó:
+```bash
+python cli.py execute --hypothesis-id <hyp_...> \
+  --allowed-action "GET http://host.docker.internal:3000" \
+  --target-id tgt_juiceshop --target-revision-id rev_local_docker \
+  --execution-id exec_demo_1 \
+  --storage-dir .secweave/evidence --context-db .secweave/context.db
+```
+In ra verdict cuối (thường `inconclusive` cho finding 1-role như trên — thiếu positive/denied control, đúng hành vi, không phải lỗi). Ghi lại `--execution-id` (tự đặt hoặc đọc dòng `-> execution_id:` nếu không truyền) để dùng ở bước 7.
+
+Kịch bản đủ 3-role (main/positive_control/denied_control, nhiều identity thật qua `--role-identity`/`--identity-logins`, blind marker qua `{{SECWEAVE_BLIND_MARKER}}`, ID tài nguyên động qua `{{FROM_STEP:step_id:json_path}}`) — xem `execute --help` và ví dụ đầy đủ tại `.secweave/manual_test/identity_scenario_example.py` (kịch bản IDOR thật đã tìm ra lỗi thật của Juice Shop).
+
+**6. Đo tính lặp lại — chạy lại ĐÚNG 1 plan nhiều lần độc lập (`retest`, SPEC §8.1)** — tuỳ chọn, cần đóng băng plan trước:
+```bash
+python cli.py plan --hypothesis-id <hyp_...> \
+  --allowed-action "GET http://host.docker.internal:3000" \
+  --context-db .secweave/context.db --format json > plan.json
+
+python cli.py retest --hypothesis-id <hyp_...> --plan-file plan.json \
+  --allowed-action "GET http://host.docker.internal:3000" \
+  --target-id tgt_juiceshop --target-revision-id rev_local_docker \
+  --storage-dir .secweave/evidence --context-db .secweave/context.db --runs 3
+```
+`--plan-file` bắt buộc cho `retest` (khác `execute`, nơi nó tuỳ chọn) — để LLM tự lập lại plan mỗi lần sẽ lẫn "LLM không tất định" với "hệ thống không lặp lại được". In ra verdict của TỪNG lần, không có đường nào để chỉ báo cáo lần "đẹp nhất"; lưu 1 file tóm tắt JSON — `retest_id` bên trong dùng cho `--retest-reference` ở bước 8.
+
+**7. Lắp Verification Package đủ 19 trường (`assemble-package`)**:
+```bash
+python cli.py assemble-package --execution-id exec_demo_1 \
+  --storage-dir .secweave/evidence \
+  --target-id tgt_juiceshop --target-revision-id rev_local_docker \
+  --environment sandbox --authorization-reference auth_local_test_1 \
+  --scenario "Cross-Domain Misconfiguration tại host.docker.internal:3000" \
+  --limitations "Chỉ có role=main, thiếu positive/denied control." \
+  --next-action "Không cần thêm — quan sát trực tiếp." \
+  --format json > package.json
+```
+
+**8. Con người review, quyết định release (`review-package`, Gate 4)**:
+```bash
+python cli.py review-package --package-file package.json \
+  --context-db .secweave/context.db \
+  --reviewer "<tên người review>" --decision release \
+  --reason "Đã đối chiếu raw evidence, khớp normalized observation." \
+  --checked-raw-artifact
+```
+In ra danh sách raw evidence reference cần tự tay đối chiếu TRƯỚC khi chạy lệnh này — bắt buộc, không phải gợi ý. `decision=release` bắt buộc kèm `--checked-raw-artifact`; `--decision retest`/`reject` không cần. `release` thành công sẽ promote observation sang `verified` trong Context Store.
+
+**9. Dừng khẩn 1 execution đang chạy, từ terminal KHÁC (`kill`, SPEC §6.3)**:
+```bash
+python cli.py kill --execution-id exec_demo_1 --storage-dir .secweave/evidence \
+  --source operator --reason "Phát hiện hành vi ngoài dự kiến, dừng ngay để kiểm tra."
+```
+`--source` nhận 1 trong 6 nguồn SPEC §6.3 (`operator`/`target_owner`/`infra_owner`/`data_isms_owner`/`incident_responder`/`automatic_threshold` — nguồn cuối bắt buộc kèm `--automatic-threshold-reason`).
+
+**10. Cho 1 execution đã STOPPED chạy lại (`resume`, đường DUY NHẤT)**:
+```bash
+python cli.py resume --execution-id exec_demo_1 --storage-dir .secweave/evidence \
+  --authorization-reference "Owner đã duyệt lại qua email lúc 14:00 20/08/2026"
+```
+
+**11. Đánh dấu 1 verified fact trong Context Store là đã cũ (`mark-stale`, SPEC §4.6)**:
+```bash
+python cli.py mark-stale --target-id tgt_juiceshop \
+  --reason "Target đã đổi revision, ngữ cảnh cũ có thể không còn đúng." \
+  --context-db .secweave/context.db
 ```
 
 Mỗi lệnh có `--help` riêng để xem đầy đủ tuỳ chọn.
