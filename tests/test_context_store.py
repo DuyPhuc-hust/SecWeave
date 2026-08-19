@@ -375,6 +375,82 @@ def test_record_and_get_hypothesis_roundtrip():
     store.close()
 
 
+# ----- Hypothesis-level revision tracking (2026-08-19) — same class of gap
+# as verified_observations' revision-staleness fix, one tier up the
+# pipeline: a hypothesis carries no record of what target_id/revision it
+# was generated for. -----
+
+
+def test_record_hypothesis_without_target_id_defaults_to_none():
+    # hypothesize without --target-id is a real, common, supported case —
+    # must not be forced to supply one.
+    store = SecurityContextStore(db_path=":memory:")
+    signal = _signal()
+    result = HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, reason="x")
+
+    store.record_hypothesis(result, signal)
+    record = store.get_hypotheses_by_signal_id(signal.signal_id)[0]
+
+    assert record["target_id"] is None
+    assert record["revision"] is None
+    store.close()
+
+
+def test_record_hypothesis_stores_target_id_and_revision_when_given():
+    store = SecurityContextStore(db_path=":memory:")
+    signal = _signal()
+    result = HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, reason="x")
+
+    store.record_hypothesis(result, signal, target_id="tgt_1", revision="rev_1")
+    record = store.get_hypotheses_by_signal_id(signal.signal_id)[0]
+
+    assert record["target_id"] == "tgt_1"
+    assert record["revision"] == "rev_1"
+    store.close()
+
+
+def test_opens_pre_existing_db_missing_hypotheses_target_and_revision_columns(tmp_path):
+    # Simulates a .secweave/context.db created before this migration —
+    # reopening it must not break, and pre-existing rows must simply have
+    # NULL target_id/revision (nothing to backfill meaningfully, unlike
+    # verified_observations' revision, which is required and backfills to
+    # '' — a hypothesis's target_id/revision is optional metadata, so NULL
+    # is the honest "unknown" value here, not a special sentinel).
+    db_path = str(tmp_path / "pre_target_revision_schema.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE hypotheses (
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hypothesis_id TEXT UNIQUE,
+            signal_id TEXT NOT NULL,
+            source_tool TEXT NOT NULL,
+            status TEXT NOT NULL,
+            expected_behavior TEXT,
+            suspected_behavior TEXT,
+            observation_criteria TEXT,
+            reason TEXT,
+            coverage TEXT NOT NULL,
+            location TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO hypotheses (hypothesis_id, signal_id, source_tool, status, coverage, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("hyp_old", "sig_old", "semgrep", "not_verifiable", "complete", "2026-01-01T00:00:00Z"),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SecurityContextStore(db_path=db_path)
+    record = store.get_hypotheses_by_signal_id("sig_old")[0]
+    assert record["target_id"] is None
+    assert record["revision"] is None
+    store.close()
+
+
 def test_record_not_verifiable_result_retrievable_by_signal_id():
     store = SecurityContextStore(db_path=":memory:")
     signal = _signal()

@@ -756,6 +756,244 @@ def _create_stored_hypothesis(capsys, monkeypatch, db_path: str) -> str:
     return json.loads(capsys.readouterr().out)[0]["result"]["hypothesis"]["hypothesis_id"]
 
 
+# ----- Hypothesis-level revision tracking (2026-08-19): `plan` warns (but
+# doesn't block) when acting on a hypothesis recorded for a different
+# target_id/revision. -----
+
+
+def _create_stored_hypothesis_for_target(capsys, monkeypatch, db_path: str, target_id: str, revision: str) -> str:
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubOpenAICompatibleClient)
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            ZAP_FIXTURE,
+            "--tool",
+            "owasp_zap",
+            "--tool-version",
+            "2.14.0",
+            "--target-id",
+            target_id,
+            "--target-revision-id",
+            revision,
+            "--format",
+            "json",
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+    return json.loads(capsys.readouterr().out)[0]["result"]["hypothesis"]["hypothesis_id"]
+
+
+def test_cli_plan_warns_when_revision_differs_from_when_hypothesis_was_generated(
+    capsys, monkeypatch, tmp_path
+):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis_for_target(capsys, monkeypatch, db_path, "tgt_1", "rev_OLD")
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--target-id",
+            "tgt_1",
+            "--target-revision-id",
+            "rev_NEW",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0  # a warning, not a block — plan still proceeds normally
+    assert "được sinh khi target ở revision" in captured.err
+    assert "rev_OLD" in captured.err
+    assert "rev_NEW" in captured.err
+
+
+def test_cli_plan_warns_when_target_id_differs_from_when_hypothesis_was_generated(
+    capsys, monkeypatch, tmp_path
+):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis_for_target(capsys, monkeypatch, db_path, "tgt_OLD", "rev_1")
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--target-id",
+            "tgt_NEW",
+            "--target-revision-id",
+            "rev_1",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "được sinh cho target_id" in captured.err
+    assert "tgt_OLD" in captured.err
+    assert "tgt_NEW" in captured.err
+
+
+def test_cli_plan_no_warning_when_revision_matches(capsys, monkeypatch, tmp_path):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis_for_target(capsys, monkeypatch, db_path, "tgt_1", "rev_1")
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--target-id",
+            "tgt_1",
+            "--target-revision-id",
+            "rev_1",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "được sinh cho target_id" not in captured.err
+    assert "được sinh khi target ở revision" not in captured.err
+
+
+def test_cli_plan_no_warning_when_target_id_not_passed_at_all(capsys, monkeypatch, tmp_path):
+    # Backward compatibility: --target-id/--target-revision-id are BOTH
+    # optional on `plan` — a plan run without either must behave exactly
+    # as before this feature existed, no warning, no crash.
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "được sinh cho target_id" not in captured.err
+    assert "được sinh khi target ở revision" not in captured.err
+
+
+def test_cli_plan_target_id_mismatch_wins_over_revision_mismatch_when_both_differ(
+    capsys, monkeypatch, tmp_path
+):
+    # Real gap found via independent review: no test previously exercised
+    # BOTH target_id AND revision differing at once (the realistic case —
+    # a hypothesis for a genuinely different target naturally has an
+    # unrelated revision too) — the target_id-mismatch warning (the more
+    # informative one: "results may no longer be relevant AT ALL") must be
+    # the one that fires, not the revision one.
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis_for_target(capsys, monkeypatch, db_path, "tgt_OLD", "rev_OLD")
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--target-id",
+            "tgt_NEW",
+            "--target-revision-id",
+            "rev_NEW",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "được sinh cho target_id" in captured.err
+    assert "được sinh khi target ở revision" not in captured.err
+
+
+def test_cli_plan_rejects_an_empty_target_id_for_the_staleness_check(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: unlike `execute` (which
+    # rejects an empty --target-revision-id from an earlier review round),
+    # `plan`'s --target-id/--target-revision-id had no such guard — an
+    # empty string is just as falsy as None in the comparison, so it used
+    # to silently disable the staleness check instead of erroring, making
+    # a scripting mistake (an unset shell variable) indistinguishable from
+    # "the operator didn't ask for this check."
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--target-id",
+            "",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "target_id" in captured.err
+    assert "chuỗi rỗng" in captured.err
+
+
+def test_cli_plan_rejects_an_empty_target_revision_id_for_the_staleness_check(capsys, monkeypatch, tmp_path):
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    exit_code = cli.main(
+        [
+            "plan",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--target-revision-id",
+            "",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "revision" in captured.err
+    assert "chuỗi rỗng" in captured.err
+
+
 def test_cli_plan_not_found_hypothesis_id_returns_error(capsys, tmp_path):
     exit_code = cli.main(
         [
@@ -1048,6 +1286,50 @@ def test_cli_execute_rejects_an_empty_target_revision_id(capsys, monkeypatch, tm
     assert exit_code == 1
     assert "--target-revision-id" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_cli_execute_without_plan_file_warns_when_revision_differs(capsys, monkeypatch, tmp_path):
+    # Same _load_hypothesis_from_context_store warning already tested for
+    # `plan` — this confirms `execute`'s OWN non---plan-file branch (its
+    # separate call site) actually passes args.target_id/
+    # args.target_revision_id through too, not just that the shared
+    # function works in isolation.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis_for_target(capsys, monkeypatch, db_path, "tgt_1", "rev_OLD")
+
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubPlanLLMClient)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_1",
+            "--target-revision-id",
+            "rev_NEW",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0  # a warning, not a block
+    assert "được sinh khi target ở revision" in captured.err
+    assert "rev_OLD" in captured.err
+    assert "rev_NEW" in captured.err
 
 
 def test_cli_execute_captures_evidence_for_approved_actions(capsys, monkeypatch, tmp_path):

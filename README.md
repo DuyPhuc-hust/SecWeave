@@ -100,6 +100,10 @@ Review độc lập tìm 1 lỗi thật + 1 gap liền kề đáng ghi nhận + 
 
 1 test mới cho lỗi rỗng, 6 test cho `context_store`, 2 test cho `hypothesize` — tổng 567/567 test pass.
 
+**Hypothesis-level revision tracking (2026-08-19, tiếp)** — đóng gap liền kề, cùng lớp với fix trên nhưng 1 tầng cao hơn: bảng `hypotheses` hoàn toàn không lưu target_id/revision, nên 1 hypothesis sinh cho `rev_1` vẫn có thể đem `plan`/`execute` sau đó với revision khác hẳn, không có đối chiếu tự động nào. Khác `verified_observations` (LỌC CỨNG, từ chối phục vụ), đây CHỈ CẢNH BÁO, không chặn — retest lại 1 hypothesis cũ trên revision mới (xác nhận 1 lỗi đã fix) là quy trình hợp lệ theo WEEKLY_PLAN W7, chặn cứng sẽ phá luồng đó. `hypotheses` thêm cột `target_id`/`revision` (tuỳ chọn — khác `verified_observations`, `hypothesize` không có `--target-id` vẫn là ca hợp lệ bình thường). `plan` thêm 2 cờ mới `--target-id`/`--target-revision-id` (tuỳ chọn, CHỈ để đối chiếu cảnh báo, không dùng cho Authorization/allowlist gì cả — help text ghi rõ "không chặn" để tránh hiểu nhầm ngang hàng với `execute`'s cùng tên cờ nhưng bắt buộc thật). Xác nhận bằng dữ liệu thật + LLM thật: hypothesize cho `rev_OLD`, `plan` với `rev_NEW` → đúng cảnh báo in ra.
+
+Review độc lập tìm 2 gap nhỏ, cả 2 đã sửa: (1) `plan` chấp nhận `--target-id ""`/`--target-revision-id ""` (chuỗi rỗng) và âm thầm bỏ qua luôn việc đối chiếu — giống hệt None, không có cách nào phân biệt "cố tình không đối chiếu" với "lỗi script quên gán biến" — sửa bằng từ chối tường minh (`CliError`) ngay trong `_load_hypothesis_from_context_store()`, áp dụng chung cho cả `plan` lẫn `execute`; (2) chưa có test nào cho trường hợp CẢ target_id lẫn revision cùng khác (ca thực tế nhất — 1 target khác hẳn tự nhiên có revision không liên quan) để xác nhận đúng cảnh báo target_id thắng, không phải revision. 9 test mới, 578/578 test pass.
+
 ## Cài đặt
 
 Yêu cầu Python 3.10+.

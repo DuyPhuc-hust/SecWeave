@@ -233,7 +233,9 @@ def _run_hypothesize(args: argparse.Namespace) -> int:
             for signal, raw in zip(signals, raw_responses):
                 try:
                     result = engine.parse_response(raw, signal)
-                    context_store.record_hypothesis(result, signal)
+                    context_store.record_hypothesis(
+                        result, signal, target_id=args.target_id, revision=args.target_revision_id
+                    )
                 except RuntimeError as exc:
                     failure = str(exc)
                     break
@@ -252,7 +254,9 @@ def _run_hypothesize(args: argparse.Namespace) -> int:
                         verified_context=verified_context,
                         unverified_context=unverified_context,
                     )
-                    context_store.record_hypothesis(result, signal)
+                    context_store.record_hypothesis(
+                        result, signal, target_id=args.target_id, revision=args.target_revision_id
+                    )
                 except (RuntimeError, httpx.HTTPError) as exc:
                     failure = str(exc)
                     break
@@ -380,14 +384,48 @@ def _load_stored_hypothesis(record: dict) -> Hypothesis:
     )
 
 
-def _load_hypothesis_from_context_store(context_store: SecurityContextStore, hypothesis_id: str) -> Hypothesis:
+def _load_hypothesis_from_context_store(
+    context_store: SecurityContextStore,
+    hypothesis_id: str,
+    current_target_id: Optional[str] = None,
+    current_revision: Optional[str] = None,
+) -> Hypothesis:
     """Looks up a stored Hypothesis by id, raising CliError on any failure
     (not found, store error, or a schema mismatch while reconstructing
     it) — shared by `plan` and `execute` (without --plan-file), both of
     which start from a stored hypothesis_id the same way. Closes
     `context_store` once the lookup itself is done, before the
     (network-free) reconstruction step.
+
+    `current_target_id`/`current_revision` (the target/revision the CALLER
+    is about to plan/execute against — optional since `plan` doesn't
+    require them) enable a WARNING, not a hard block, if they differ from
+    what was recorded when this hypothesis was generated (real gap found
+    via independent review of the verified_observations revision-
+    staleness fix — the same class of gap exists one tier up: a hypothesis
+    carries no memory of what it was generated for). A warning rather than
+    a CliError deliberately: re-testing an OLD hypothesis against a NEWER
+    revision on purpose (e.g. confirming a fix landed) is a legitimate
+    workflow WEEKLY_PLAN W7 itself describes — this must not block it,
+    only make the operator aware. Only compared when BOTH sides are known
+    (a NULL/None on either side means nothing to compare against, not a
+    mismatch).
+
+    Real gap found via independent review: an empty string (`""`) is just
+    as falsy as `None` in the comparison below, so a caller passing
+    `--target-id ""`/`--target-revision-id ""` (e.g. an unset shell
+    variable interpolated into a script) would silently skip the cross-
+    check entirely — no warning, no error — indistinguishable from the
+    flag never being passed at all. Since this feature's only job IS
+    emitting that warning, treated as a caller mistake worth surfacing
+    explicitly rather than a legitimate "nothing to compare" case (which
+    only `None` — the flag genuinely omitted — means).
     """
+    if current_target_id == "":
+        raise CliError("target_id truyền vào để đối chiếu không được là chuỗi rỗng — bỏ hẳn cờ nếu không cần.")
+    if current_revision == "":
+        raise CliError("revision truyền vào để đối chiếu không được là chuỗi rỗng — bỏ hẳn cờ nếu không cần.")
+
     try:
         record = context_store.get_hypothesis(hypothesis_id)
     except RuntimeError as exc:
@@ -399,6 +437,22 @@ def _load_hypothesis_from_context_store(context_store: SecurityContextStore, hyp
         raise CliError(
             f"không tìm thấy hypothesis_id '{hypothesis_id}' (chỉ tra được bản ghi "
             "status=hypothesis, không tra được not_verifiable)"
+        )
+
+    stored_target_id = record.get("target_id")
+    stored_revision = record.get("revision")
+    if stored_target_id and current_target_id and stored_target_id != current_target_id:
+        print(
+            f"CẢNH BÁO: hypothesis '{hypothesis_id}' được sinh cho target_id='{stored_target_id}', khác "
+            f"với target_id hiện tại '{current_target_id}' — kết quả có thể không còn liên quan.",
+            file=sys.stderr,
+        )
+    elif stored_revision and current_revision and stored_revision != current_revision:
+        print(
+            f"CẢNH BÁO: hypothesis '{hypothesis_id}' được sinh khi target ở revision '{stored_revision}', "
+            f"khác với revision hiện tại '{current_revision}' — code target có thể đã đổi từ lúc đó, cân "
+            "nhắc sinh lại hypothesis mới từ signal gốc thay vì dùng bản cũ này.",
+            file=sys.stderr,
         )
 
     try:
@@ -431,7 +485,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 def _run_plan(args: argparse.Namespace) -> int:
     context_store = _open_context_store(args.context_db)
-    hypothesis = _load_hypothesis_from_context_store(context_store, args.hypothesis_id)
+    hypothesis = _load_hypothesis_from_context_store(
+        context_store, args.hypothesis_id, args.target_id, args.target_revision_id
+    )
 
     llm_client = _build_llm_client(
         args,
@@ -905,7 +961,9 @@ def _run_execute(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         context_store = _open_context_store(args.context_db)
-        hypothesis = _load_hypothesis_from_context_store(context_store, args.hypothesis_id)
+        hypothesis = _load_hypothesis_from_context_store(
+            context_store, args.hypothesis_id, args.target_id, args.target_revision_id
+        )
 
         llm_client = _build_llm_client(
             args,
@@ -1888,6 +1946,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan_parser.add_argument(
         "--cap", type=int, default=10, help="Cap số hành động dự kiến tối đa trong plan (mặc định: %(default)s)"
+    )
+    plan_parser.add_argument(
+        "--target-id",
+        help="target_id dự kiến sẽ execute lên — tuỳ chọn, chỉ dùng để CẢNH BÁO (không chặn) nếu khác "
+        "với target_id lúc hypothesis này được sinh ra qua `hypothesize --target-id`.",
+    )
+    plan_parser.add_argument(
+        "--target-revision-id",
+        help="revision dự kiến sẽ execute lên — tuỳ chọn, dùng cùng --target-id để CẢNH BÁO nếu khác "
+        "với revision lúc hypothesis này được sinh ra (SPEC §4.6 staleness — 1 tầng cao hơn "
+        "verified_observations, không chặn vì retest lại 1 hypothesis cũ trên revision mới là quy "
+        "trình hợp lệ, chỉ cần biết để cân nhắc, không cần chặn).",
     )
     _add_llm_mode_arg(plan_parser)
     _add_format_arg(plan_parser)

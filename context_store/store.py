@@ -138,7 +138,9 @@ class SecurityContextStore:
                 reason TEXT,
                 coverage TEXT NOT NULL,
                 location TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                target_id TEXT,
+                revision TEXT
             )
             """
         )
@@ -156,6 +158,23 @@ class SecurityContextStore:
         existing_hyp_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(hypotheses)")}
         if "location" not in existing_hyp_columns:
             self._conn.execute("ALTER TABLE hypotheses ADD COLUMN location TEXT")
+        # Real gap found via independent review of the verified_observations
+        # revision-staleness fix (2026-08-19): the SAME class of gap exists
+        # one tier up the pipeline — a hypothesis carries no record of which
+        # target_id/revision it was generated for, so a stale hypothesis
+        # generated against an old revision can be `plan`ned/`execute`d
+        # later with no automatic cross-check at all. NULL (not backfilled
+        # to '' — unlike verified_observations' `revision`, this is
+        # genuinely optional metadata, not something every write path is
+        # required to always know) for pre-existing rows AND for any new
+        # hypothesize() call made without --target-id — see
+        # _load_hypothesis_from_context_store's own warning logic for how a
+        # NULL here is treated (never compared, since there's nothing to
+        # compare against).
+        if "target_id" not in existing_hyp_columns:
+            self._conn.execute("ALTER TABLE hypotheses ADD COLUMN target_id TEXT")
+        if "revision" not in existing_hyp_columns:
+            self._conn.execute("ALTER TABLE hypotheses ADD COLUMN revision TEXT")
 
         existing_vo_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(verified_observations)")}
         # Every row in a pre-existing DB was written under the OLD schema,
@@ -395,7 +414,22 @@ class SecurityContextStore:
         except sqlite3.Error as exc:
             raise RuntimeError(f"Không đọc được unverified context cho target_id '{target_id}': {exc}") from exc
 
-    def record_hypothesis(self, result: HypothesisResult, signal: NormalizedSignal) -> None:
+    def record_hypothesis(
+        self,
+        result: HypothesisResult,
+        signal: NormalizedSignal,
+        target_id: Optional[str] = None,
+        revision: Optional[str] = None,
+    ) -> None:
+        """`target_id`/`revision` are OPTIONAL, unlike verified_observations'
+        `revision` (required there) — a hypothesis can legitimately be
+        generated with no target_id at all (`hypothesize` without
+        --target-id is a supported, common case: no context lookup, just
+        turn a signal into a hypothesis). When both ARE known, storing them
+        lets a later `plan`/`execute` warn if the hypothesis is being acted
+        on for a different target/revision than it was generated for — see
+        _load_hypothesis_from_context_store's cross-check.
+        """
         is_hypothesis = result.status == HypothesisStatus.HYPOTHESIS
         try:
             self._conn.execute(
@@ -403,8 +437,8 @@ class SecurityContextStore:
                 INSERT INTO hypotheses (
                     hypothesis_id, signal_id, source_tool, status,
                     expected_behavior, suspected_behavior, observation_criteria,
-                    reason, coverage, location, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reason, coverage, location, created_at, target_id, revision
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.hypothesis.hypothesis_id if is_hypothesis else None,
@@ -418,6 +452,8 @@ class SecurityContextStore:
                     signal.source.coverage.value,
                     result.hypothesis.provenance.location.model_dump_json() if is_hypothesis else None,
                     datetime.now(timezone.utc).isoformat(),
+                    target_id,
+                    revision,
                 ),
             )
             self._conn.commit()
@@ -427,7 +463,7 @@ class SecurityContextStore:
     _HYPOTHESIS_COLUMNS = (
         "hypothesis_id", "signal_id", "source_tool", "status", "expected_behavior",
         "suspected_behavior", "observation_criteria", "reason", "coverage", "location",
-        "created_at",
+        "created_at", "target_id", "revision",
     )
 
     def get_hypothesis(self, hypothesis_id: str) -> Optional[Dict[str, Any]]:
