@@ -18,18 +18,20 @@ _signal = semgrep_sqli_signal
 
 def test_get_verified_context_empty_by_default():
     store = SecurityContextStore(db_path=":memory:")
-    assert store.get_verified_context("target_1") == []
+    assert store.get_verified_context("target_1", "rev_1") == []
     store.close()
 
 
 def test_get_verified_context_filters_by_target_id():
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "Object ownership checked on GET /objects/:id")
+    store.record_unverified_observation(
+        "target_1", "exec_1", "Object ownership checked on GET /objects/:id", "rev_1"
+    )
     store.promote_execution_to_verified("exec_1", "pkg_1")
-    store.record_unverified_observation("target_2", "exec_2", "Unrelated target observation")
+    store.record_unverified_observation("target_2", "exec_2", "Unrelated target observation", "rev_1")
     store.promote_execution_to_verified("exec_2", "pkg_2")
 
-    result = store.get_verified_context("target_1")
+    result = store.get_verified_context("target_1", "rev_1")
     assert len(result) == 1
     assert result[0]["description"] == "Object ownership checked on GET /objects/:id"
     store.close()
@@ -40,9 +42,9 @@ def test_record_unverified_observation_not_returned_by_get_verified_context():
     # an observation Evidence Harness just captured, with no Human Review
     # yet, must never feed the Hypothesis Engine's trusted context.
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "Not yet reviewed by anyone")
+    store.record_unverified_observation("target_1", "exec_1", "Not yet reviewed by anyone", "rev_1")
 
-    assert store.get_verified_context("target_1") == []
+    assert store.get_verified_context("target_1", "rev_1") == []
     store.close()
 
 
@@ -51,9 +53,9 @@ def test_get_unverified_context_returns_it_with_a_warning_label():
     # nhãn cảnh báo" — this pathway exists, but every result must carry an
     # explicit warning so nothing downstream mistakes it for confirmed fact.
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "Not yet reviewed by anyone")
+    store.record_unverified_observation("target_1", "exec_1", "Not yet reviewed by anyone", "rev_1")
 
-    result = store.get_unverified_context("target_1")
+    result = store.get_unverified_context("target_1", "rev_1")
     assert len(result) == 1
     assert result[0]["description"] == "Not yet reviewed by anyone"
     assert "CHƯA XÁC MINH" in result[0]["warning"]
@@ -62,27 +64,27 @@ def test_get_unverified_context_returns_it_with_a_warning_label():
 
 def test_promote_execution_to_verified_moves_it_out_of_unverified_context():
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "obs")
-    assert len(store.get_unverified_context("target_1")) == 1
+    store.record_unverified_observation("target_1", "exec_1", "obs", "rev_1")
+    assert len(store.get_unverified_context("target_1", "rev_1")) == 1
 
     promoted = store.promote_execution_to_verified("exec_1", "pkg_1")
 
     assert promoted == 1
-    assert store.get_unverified_context("target_1") == []
-    assert len(store.get_verified_context("target_1")) == 1
+    assert store.get_unverified_context("target_1", "rev_1") == []
+    assert len(store.get_verified_context("target_1", "rev_1")) == 1
     store.close()
 
 
 def test_promote_execution_to_verified_only_touches_the_named_execution():
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "obs A")
-    store.record_unverified_observation("target_1", "exec_2", "obs B")
+    store.record_unverified_observation("target_1", "exec_1", "obs A", "rev_1")
+    store.record_unverified_observation("target_1", "exec_2", "obs B", "rev_1")
 
     promoted = store.promote_execution_to_verified("exec_1", "pkg_1")
 
     assert promoted == 1
-    assert len(store.get_verified_context("target_1")) == 1
-    assert len(store.get_unverified_context("target_1")) == 1
+    assert len(store.get_verified_context("target_1", "rev_1")) == 1
+    assert len(store.get_unverified_context("target_1", "rev_1")) == 1
 
 
 def test_promote_execution_to_verified_is_not_re_stamped_on_a_second_call():
@@ -90,7 +92,7 @@ def test_promote_execution_to_verified_is_not_re_stamped_on_a_second_call():
     # refresh the expiry every time review-package happens to run again
     # against the same execution.
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "obs")
+    store.record_unverified_observation("target_1", "exec_1", "obs", "rev_1")
     first = store.promote_execution_to_verified("exec_1", "pkg_1")
     second = store.promote_execution_to_verified("exec_1", "pkg_2")
 
@@ -107,7 +109,7 @@ def test_get_verified_context_excludes_an_expired_entry():
     # concern this test isn't exercising) to test the READ-side exclusion
     # in isolation.
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "obs")
+    store.record_unverified_observation("target_1", "exec_1", "obs", "rev_1")
     store.promote_execution_to_verified("exec_1", "pkg_1", valid_for_days=1)
     store._conn.execute(
         "UPDATE verified_observations SET valid_until = '2000-01-01T00:00:00+00:00' WHERE target_id = ?",
@@ -115,7 +117,7 @@ def test_get_verified_context_excludes_an_expired_entry():
     )
     store._conn.commit()
 
-    assert store.get_verified_context("target_1") == []
+    assert store.get_verified_context("target_1", "rev_1") == []
     store.close()
 
 
@@ -127,7 +129,7 @@ def test_promote_execution_to_verified_rejects_non_positive_valid_for_days():
     # never be promoted again with a correct expiry, permanently lost from
     # get_verified_context().
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "obs")
+    store.record_unverified_observation("target_1", "exec_1", "obs", "rev_1")
 
     with pytest.raises(ValueError):
         store.promote_execution_to_verified("exec_1", "pkg_1", valid_for_days=0)
@@ -145,7 +147,7 @@ def test_promote_execution_to_verified_rejects_an_absurdly_large_valid_for_days(
     # datetime's max representable range) raised an uncaught OverflowError
     # instead of a clean, catchable error.
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "obs")
+    store.record_unverified_observation("target_1", "exec_1", "obs", "rev_1")
 
     with pytest.raises(ValueError):
         store.promote_execution_to_verified("exec_1", "pkg_1", valid_for_days=999_999_999)
@@ -157,29 +159,29 @@ def test_mark_stale_removes_both_verified_and_unverified_rows_from_both_read_pat
     # than risk keeping a fact that might now be wrong — applies to BOTH
     # unverified and verified rows for the target, not just one.
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "still unverified")
-    store.record_unverified_observation("target_1", "exec_2", "will be verified")
+    store.record_unverified_observation("target_1", "exec_1", "still unverified", "rev_1")
+    store.record_unverified_observation("target_1", "exec_2", "will be verified", "rev_1")
     store.promote_execution_to_verified("exec_2", "pkg_1")
 
     marked = store.mark_stale("target_1", "target_1's revision changed, scope of impact unclear")
 
     assert marked == 2
-    assert store.get_verified_context("target_1") == []
-    assert store.get_unverified_context("target_1") == []
+    assert store.get_verified_context("target_1", "rev_1") == []
+    assert store.get_unverified_context("target_1", "rev_1") == []
     store.close()
 
 
 def test_mark_stale_does_not_affect_other_targets():
     store = SecurityContextStore(db_path=":memory:")
-    store.record_unverified_observation("target_1", "exec_1", "obs")
+    store.record_unverified_observation("target_1", "exec_1", "obs", "rev_1")
     store.promote_execution_to_verified("exec_1", "pkg_1")
-    store.record_unverified_observation("target_2", "exec_2", "obs")
+    store.record_unverified_observation("target_2", "exec_2", "obs", "rev_1")
     store.promote_execution_to_verified("exec_2", "pkg_2")
 
     store.mark_stale("target_1", "revision changed")
 
-    assert store.get_verified_context("target_1") == []
-    assert len(store.get_verified_context("target_2")) == 1
+    assert store.get_verified_context("target_1", "rev_1") == []
+    assert len(store.get_verified_context("target_2", "rev_1")) == 1
     store.close()
 
 
@@ -187,7 +189,7 @@ def test_get_unverified_context_raises_runtime_error_not_a_raw_sqlite_error():
     store = SecurityContextStore(db_path=":memory:")
     store.close()
     with pytest.raises(RuntimeError):
-        store.get_unverified_context("target_1")
+        store.get_unverified_context("target_1", "rev_1")
 
 
 def test_promote_execution_to_verified_raises_runtime_error_not_a_raw_sqlite_error():
@@ -208,7 +210,99 @@ def test_record_unverified_observation_raises_runtime_error_not_a_raw_sqlite_err
     store = SecurityContextStore(db_path=":memory:")
     store.close()
     with pytest.raises(RuntimeError):
-        store.record_unverified_observation("target_1", "exec_1", "obs")
+        store.record_unverified_observation("target_1", "exec_1", "obs", "rev_1")
+
+
+# ----- Revision-staleness (2026-08-19): a verified/unverified fact must not
+# outlive the revision it was captured against, even if nobody remembers to
+# call mark_stale() -----
+
+
+def test_record_unverified_observation_rejects_an_empty_revision():
+    store = SecurityContextStore(db_path=":memory:")
+    with pytest.raises(ValueError):
+        store.record_unverified_observation("target_1", "exec_1", "obs", "")
+    store.close()
+
+
+def test_get_verified_context_rejects_an_empty_revision():
+    store = SecurityContextStore(db_path=":memory:")
+    with pytest.raises(ValueError):
+        store.get_verified_context("target_1", "")
+    store.close()
+
+
+def test_get_unverified_context_rejects_an_empty_revision():
+    store = SecurityContextStore(db_path=":memory:")
+    with pytest.raises(ValueError):
+        store.get_unverified_context("target_1", "")
+    store.close()
+
+
+def test_get_verified_context_excludes_a_fact_verified_against_a_different_revision():
+    # The core of the fix: a fact verified while the target was at rev_1
+    # must NOT be served once the caller is asking about rev_2 — this is a
+    # structural read-time guard, independent of whether anyone ever calls
+    # mark_stale().
+    store = SecurityContextStore(db_path=":memory:")
+    store.record_unverified_observation("target_1", "exec_1", "obs from rev_1", "rev_1")
+    store.promote_execution_to_verified("exec_1", "pkg_1")
+
+    assert len(store.get_verified_context("target_1", "rev_1")) == 1
+    assert store.get_verified_context("target_1", "rev_2") == []
+    store.close()
+
+
+def test_get_unverified_context_excludes_an_observation_from_a_different_revision():
+    store = SecurityContextStore(db_path=":memory:")
+    store.record_unverified_observation("target_1", "exec_1", "obs from rev_1", "rev_1")
+
+    assert len(store.get_unverified_context("target_1", "rev_1")) == 1
+    assert store.get_unverified_context("target_1", "rev_2") == []
+    store.close()
+
+
+def test_opens_pre_existing_db_missing_revision_column_treats_old_rows_as_unmatched(tmp_path):
+    # A row written before this migration has no way to know what revision
+    # it was really verified against — backfilled to '' (see
+    # _migrate_add_missing_columns), which must NEVER match a real,
+    # non-empty revision string a caller queries with (that would silently
+    # treat "unknown revision" as "matches every revision," exactly the
+    # bug this feature closes).
+    db_path = str(tmp_path / "pre_revision_schema.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE verified_observations (
+            id TEXT PRIMARY KEY,
+            target_id TEXT NOT NULL,
+            execution_id TEXT NOT NULL,
+            description TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            verified_at TEXT NOT NULL,
+            package_id TEXT,
+            valid_until TEXT,
+            stale INTEGER NOT NULL DEFAULT 0,
+            stale_reason TEXT
+        )
+        """
+    )
+    future = "2999-01-01T00:00:00+00:00"
+    conn.execute(
+        """
+        INSERT INTO verified_observations (
+            id, target_id, execution_id, description, status, created_at, verified_at, valid_until
+        ) VALUES (?, ?, ?, ?, 'verified', ?, ?, ?)
+        """,
+        ("obs_old", "target_1", "exec_old", "written before revision tracking existed", future, future, future),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SecurityContextStore(db_path=db_path)
+    assert store.get_verified_context("target_1", "rev_1") == []
+    store.close()
 
 
 def test_opens_pre_existing_db_missing_verified_observations_columns_without_crashing(tmp_path):
@@ -241,12 +335,12 @@ def test_opens_pre_existing_db_missing_verified_observations_columns_without_cra
     store = SecurityContextStore(db_path=db_path)
     # Old row is not returned as verified context — NULL valid_until means
     # "unknown expiry," excluded rather than trusted forever.
-    assert store.get_verified_context("target_1") == []
+    assert store.get_verified_context("target_1", "rev_1") == []
     # But the migration itself must not crash, and a fresh write/promote
     # cycle must work normally afterward.
-    store.record_unverified_observation("target_1", "exec_new", "written after migration")
+    store.record_unverified_observation("target_1", "exec_new", "written after migration", "rev_1")
     store.promote_execution_to_verified("exec_new", "pkg_new")
-    assert len(store.get_verified_context("target_1")) == 1
+    assert len(store.get_verified_context("target_1", "rev_1")) == 1
     store.close()
 
 
@@ -441,7 +535,7 @@ def test_get_verified_context_raises_runtime_error_not_a_raw_sqlite_error():
     store = SecurityContextStore(db_path=":memory:")
     store.close()
     with pytest.raises(RuntimeError):
-        store.get_verified_context("target_1")
+        store.get_verified_context("target_1", "rev_1")
 
 
 def test_get_hypotheses_by_signal_id_raises_runtime_error_not_a_raw_sqlite_error():

@@ -146,6 +146,12 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
 
 
 def _run_hypothesize(args: argparse.Namespace) -> int:
+    if args.target_id and not args.target_revision_id:
+        raise CliError(
+            "--target-revision-id là bắt buộc khi có --target-id — Context Store cần biết revision "
+            "HIỆN TẠI của target để lọc đúng context còn hợp lệ, không trả nhầm context của 1 revision "
+            "đã cũ (SPEC §4.6 staleness)."
+        )
     signals = _load_signals(args)
 
     source_snippet = None
@@ -174,7 +180,9 @@ def _run_hypothesize(args: argparse.Namespace) -> int:
 
     try:
         verified_context = (
-            context_store.get_verified_context(args.target_id) if args.target_id else []
+            context_store.get_verified_context(args.target_id, args.target_revision_id)
+            if args.target_id
+            else []
         )
         # SPEC §4.6 write-path diagram's dashed arrow: "unverified: chỉ tra
         # cứu, có nhãn cảnh báo" — a real, sanctioned read pathway, not a
@@ -182,7 +190,9 @@ def _run_hypothesize(args: argparse.Namespace) -> int:
         # verified_context so the LLM can't mistake "captured once, never
         # reviewed" for confirmed fact.
         unverified_context = (
-            context_store.get_unverified_context(args.target_id) if args.target_id else []
+            context_store.get_unverified_context(args.target_id, args.target_revision_id)
+            if args.target_id
+            else []
         )
     except RuntimeError as exc:
         # Real gap found via independent review: get_verified_context() had
@@ -864,6 +874,20 @@ def cmd_execute(args: argparse.Namespace) -> int:
 
 
 def _run_execute(args: argparse.Namespace) -> int:
+    # Real gap found via independent review: argparse's required=True on
+    # --target-revision-id only checks the FLAG was passed, not that its
+    # VALUE is non-empty — `--target-revision-id ""` used to sail through
+    # here, then crash with an unhandled ValueError the moment the first
+    # action's capture() tried to write it to Context Store
+    # (record_unverified_observation's own _require_revision check,
+    # deliberately NOT swallowed by capture()'s best-effort
+    # `except RuntimeError: pass`, since silently dropping a config
+    # mistake would defeat the whole point of validating it). Checked
+    # here, once, up front — a clean CliError before any real HTTP
+    # request instead of a raw traceback mid-run.
+    if not args.target_revision_id:
+        raise CliError("--target-revision-id không được để trống.")
+
     if args.plan_file:
         plan_result = _load_frozen_plan(args)
         # review_plan()/check_plan()/check_cost() are pure Policy/Cost logic
@@ -1831,6 +1855,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_report_args(hypothesize_parser)
     hypothesize_parser.add_argument("--source", help="Đường dẫn file source code liên quan (tuỳ chọn)")
     hypothesize_parser.add_argument("--target-id", help="target_id để tra verified context (tuỳ chọn)")
+    hypothesize_parser.add_argument(
+        "--target-revision-id",
+        help="target_revision_id HIỆN TẠI của target — bắt buộc nếu có --target-id. Context Store chỉ "
+        "trả về verified/unverified context đã ghi cho ĐÚNG revision này; context của revision khác "
+        "coi như không có (SPEC §4.6 staleness — tránh dùng nhầm kết luận cũ sau khi target đổi code). "
+        "PHẢI là 1 định danh bất biến, content-addressed (vd git SHA) — 1 nhãn có thể bị đổi ý nghĩa "
+        "theo thời gian (tag bị move, số build tái sử dụng) sẽ vô hiệu hoá cơ chế chống stale này.",
+    )
     _add_llm_mode_arg(hypothesize_parser)
     _add_format_arg(hypothesize_parser)
     _add_context_db_arg(hypothesize_parser)
@@ -1907,7 +1939,12 @@ def build_parser() -> argparse.ArgumentParser:
             "thi thật (mặc định: %(default)s)",
         )
         parser.add_argument("--target-id", required=True, help="target_id ghi vào evidence")
-        parser.add_argument("--target-revision-id", required=True, help="target_revision_id ghi vào evidence")
+        parser.add_argument(
+            "--target-revision-id",
+            required=True,
+            help="target_revision_id ghi vào evidence — PHẢI là 1 định danh bất biến, content-addressed "
+            "(vd git SHA), không được rỗng (SPEC §4.6 staleness dựa vào giả định này để lọc context).",
+        )
         parser.add_argument(
             "--execution-id", help="Định danh execution (mặc định: tự sinh mới mỗi lần chạy)"
         )

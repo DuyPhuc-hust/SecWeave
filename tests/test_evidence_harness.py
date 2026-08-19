@@ -1226,12 +1226,12 @@ def test_capture_writes_an_unverified_context_store_entry_when_wired(tmp_path):
 
     harness.capture(_action(), role=ObservationRole.MAIN)
 
-    unverified = context_store.get_unverified_context("tgt_ctx_test")
+    unverified = context_store.get_unverified_context("tgt_ctx_test", "rev_1")
     assert len(unverified) == 1
     assert "granted" in unverified[0]["description"]
     assert "200" in unverified[0]["description"]
     # Never returned as trusted context until a human review promotes it.
-    assert context_store.get_verified_context("tgt_ctx_test") == []
+    assert context_store.get_verified_context("tgt_ctx_test", "rev_1") == []
     context_store.close()
 
 
@@ -1293,7 +1293,7 @@ def test_capture_does_not_leak_a_query_string_value_into_the_context_store(tmp_p
 
     harness.capture(action, role=ObservationRole.MAIN)
 
-    unverified = context_store.get_unverified_context("tgt_leak_test")
+    unverified = context_store.get_unverified_context("tgt_leak_test", "rev_1")
     assert len(unverified) == 1
     assert secret_marker not in unverified[0]["description"]
     assert "SECRET123" not in unverified[0]["description"]
@@ -1350,7 +1350,7 @@ def test_capture_strips_userinfo_credential_from_the_context_store_description(t
 
     harness.capture(action, role=ObservationRole.MAIN)
 
-    unverified = context_store.get_unverified_context("tgt_userinfo_ctx_test")
+    unverified = context_store.get_unverified_context("tgt_userinfo_ctx_test", "rev_1")
     assert len(unverified) == 1
     assert "S3cr3t" not in unverified[0]["description"]
     assert "admin:S3cr3t@" not in unverified[0]["description"]

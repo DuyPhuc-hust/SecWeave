@@ -223,6 +223,70 @@ def test_cli_hypothesize_records_hypothesis_to_context_store(capsys, monkeypatch
     assert record["location"] == data[0]["result"]["hypothesis"]["provenance"]["location"]
 
 
+def test_cli_hypothesize_target_id_without_revision_fails_cleanly(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review (revision-staleness fix,
+    # 2026-08-19): --target-id alone used to be enough to query Context
+    # Store — but a verified/unverified fact is only trustworthy for the
+    # EXACT revision it was captured against (SecurityContextStore.
+    # get_verified_context/get_unverified_context now require it). Without
+    # --target-revision-id there's no way to filter correctly, so this
+    # must fail cleanly rather than silently querying with an unknown
+    # revision.
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubOpenAICompatibleClient)
+
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--target-id",
+            "tgt_1",
+            "--context-db",
+            str(tmp_path / "test.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--target-revision-id" in captured.err
+
+
+def test_cli_hypothesize_with_target_id_and_revision_queries_context_store_successfully(
+    capsys, monkeypatch, tmp_path
+):
+    import hypothesis_engine.llm_client.openai_compatible_client as llm_module
+
+    monkeypatch.setattr(llm_module, "OpenAICompatibleLLMClient", _StubOpenAICompatibleClient)
+
+    exit_code = cli.main(
+        [
+            "hypothesize",
+            "--signal",
+            SEMGREP_FIXTURE,
+            "--tool",
+            "semgrep",
+            "--tool-version",
+            "1.78.0",
+            "--target-id",
+            "tgt_1",
+            "--target-revision-id",
+            "rev_1",
+            "--format",
+            "json",
+            "--context-db",
+            str(tmp_path / "test.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)[0]["result"]["status"] == "hypothesis"
+
+
 def test_cli_show_hypothesis_not_found_returns_error(capsys, tmp_path):
     exit_code = cli.main(
         [
@@ -948,6 +1012,42 @@ def _patch_evidence_harness_transport(monkeypatch, handler):
         # instead of the real class — use the reference captured above.
         lambda: real_client_class(transport=httpx.MockTransport(handler)),
     )
+
+
+def test_cli_execute_rejects_an_empty_target_revision_id(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review (revision-staleness fix,
+    # 2026-08-19): argparse's required=True on --target-revision-id only
+    # checks the FLAG was passed, not that its VALUE is non-empty —
+    # "--target-revision-id ''" used to sail through argparse, then crash
+    # with an unhandled ValueError from Context Store's own
+    # _require_revision the moment the first action's capture() tried to
+    # write it (not caught by capture()'s best-effort
+    # `except RuntimeError: pass`). Must fail cleanly, before any real
+    # HTTP request, not with a raw traceback mid-run.
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--target-revision-id" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_cli_execute_captures_evidence_for_approved_actions(capsys, monkeypatch, tmp_path):
@@ -3738,8 +3838,8 @@ def test_cli_review_package_release_with_checked_raw_artifact_succeeds(capsys, m
     # SPEC §4.6 write path, step 2: releasing must promote this execution's
     # unverified observations to verified in the Context Store.
     store = SecurityContextStore(db_path=context_db)
-    assert store.get_unverified_context("tgt_test") == []
-    verified = store.get_verified_context("tgt_test")
+    assert store.get_unverified_context("tgt_test", "rev_test") == []
+    verified = store.get_verified_context("tgt_test", "rev_test")
     assert len(verified) == 1
     store.close()
 
@@ -3908,7 +4008,7 @@ def test_cli_mark_stale_excludes_target_from_both_read_paths(capsys, tmp_path):
 
     context_db = str(tmp_path / "context.db")
     store = SecurityContextStore(db_path=context_db)
-    store.record_unverified_observation("tgt_1", "exec_1", "some observation")
+    store.record_unverified_observation("tgt_1", "exec_1", "some observation", "rev_1")
     store.promote_execution_to_verified("exec_1", "pkg_1")
     store.close()
 
@@ -3929,7 +4029,7 @@ def test_cli_mark_stale_excludes_target_from_both_read_paths(capsys, tmp_path):
     assert "1" in captured.out
 
     store = SecurityContextStore(db_path=context_db)
-    assert store.get_verified_context("tgt_1") == []
+    assert store.get_verified_context("tgt_1", "rev_1") == []
     store.close()
 
 
@@ -3962,8 +4062,8 @@ def test_full_pipeline_writes_unverified_then_promotes_to_verified_on_release(ca
 
     # After execute() but before any review: unverified only.
     store = SecurityContextStore(db_path=context_db)
-    assert store.get_verified_context("tgt_test") == []
-    unverified = store.get_unverified_context("tgt_test")
+    assert store.get_verified_context("tgt_test", "rev_test") == []
+    unverified = store.get_unverified_context("tgt_test", "rev_test")
     assert len(unverified) == 1
     assert "CHƯA XÁC MINH" in unverified[0]["warning"]
     store.close()
@@ -3988,8 +4088,8 @@ def test_full_pipeline_writes_unverified_then_promotes_to_verified_on_release(ca
 
     # After release: promoted to verified, no longer unverified.
     store = SecurityContextStore(db_path=context_db)
-    assert store.get_unverified_context("tgt_test") == []
-    verified = store.get_verified_context("tgt_test")
+    assert store.get_unverified_context("tgt_test", "rev_test") == []
+    verified = store.get_verified_context("tgt_test", "rev_test")
     assert len(verified) == 1
     store.close()
 

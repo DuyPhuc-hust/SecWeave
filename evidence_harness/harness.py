@@ -762,6 +762,7 @@ class EvidenceHarness:
                         f"[{role.value}] {action.method} {target_without_query} -> "
                         f"access_result={access_result.value}, status_code={status_code}"
                     ),
+                    revision=self._target_revision_id,
                 )
             except RuntimeError:
                 pass

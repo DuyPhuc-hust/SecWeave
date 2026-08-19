@@ -54,6 +54,34 @@ STATUS_VERIFIED = "verified"
 _LEGACY_MIGRATION_SENTINEL = ""  # see _migrate_add_missing_columns' verified_at note
 
 
+def _require_revision(revision: str) -> None:
+    """A blank revision would silently match every legacy row backfilled
+    to '' (see _migrate_add_missing_columns' `revision` note) — those
+    rows mean "we don't actually know what revision this was," not "this
+    matches any/every revision," so an empty value here is always a
+    caller mistake, not a legitimate query.
+
+    Undocumented assumption flagged via independent review, worth stating
+    explicitly: this store treats `revision` as CONTENT-ADDRESSED and
+    IMMUTABLE (SPEC §10.1: "Quản lý phiên bản | Git | Gắn revision vào
+    package" — i.e. a git SHA, not a mutable label). Exact-string matching
+    (this function + get_verified_context/get_unverified_context's own
+    `revision = ?`) is only a valid staleness guard under that assumption
+    — the SAME string genuinely means the SAME code. A caller passing a
+    MUTABLE label instead (a moved tag, a reused build counter, a branch
+    name) would silently reopen the exact staleness gap this mechanism
+    exists to close: an old fact verified under an earlier meaning of that
+    label would look fresh again the moment the label is reused. Nothing
+    in this class can detect that misuse — it's a contract on the
+    caller's own revision identifier, not something checkable here.
+    """
+    if not revision:
+        raise ValueError(
+            "revision không được rỗng — SecurityContextStore không đối chiếu 'không rõ revision' với "
+            "'khớp mọi revision'; nếu chưa biết revision hiện tại của target, đừng gọi hàm này."
+        )
+
+
 class SecurityContextStore:
     def __init__(self, db_path: str = DEFAULT_DB_PATH) -> None:
         if db_path != ":memory:":
@@ -91,7 +119,8 @@ class SecurityContextStore:
                 package_id TEXT,
                 valid_until TEXT,
                 stale INTEGER NOT NULL DEFAULT 0,
-                stale_reason TEXT
+                stale_reason TEXT,
+                revision TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -160,8 +189,24 @@ class SecurityContextStore:
             self._conn.execute("ALTER TABLE verified_observations ADD COLUMN stale INTEGER NOT NULL DEFAULT 0")
         if "stale_reason" not in existing_vo_columns:
             self._conn.execute("ALTER TABLE verified_observations ADD COLUMN stale_reason TEXT")
+        if "revision" not in existing_vo_columns:
+            # Real gap found via independent review: nothing tied a
+            # verified fact to the revision it was verified against, so
+            # get_verified_context() kept serving a still-fresh
+            # (stale=0, valid_until not expired) fact from an OLD
+            # revision as trusted context even after the target's code
+            # had since changed — nothing detected the mismatch
+            # automatically, only an operator remembering to call
+            # mark_stale() did. A pre-existing row has no way to know
+            # what revision it was really verified against, so it
+            # backfills to '' — same "unknown, therefore not
+            # trustworthy" treatment as a migrated NULL valid_until
+            # above, not "matches every revision."
+            self._conn.execute("ALTER TABLE verified_observations ADD COLUMN revision TEXT NOT NULL DEFAULT ''")
 
-    def record_unverified_observation(self, target_id: str, execution_id: str, description: str) -> str:
+    def record_unverified_observation(
+        self, target_id: str, execution_id: str, description: str, revision: str
+    ) -> str:
         """Write path step 1 (SPEC §4.6 diagram: "Evidence Harness --ghi
         quan sát, trạng thái = unverified--> Context Store"). Called by
         EvidenceHarness.capture() right after a real observation is
@@ -176,15 +221,24 @@ class SecurityContextStore:
         any credential (SPEC §4.6's explicit "never store" list) — callers
         are trusted to pass a mechanical summary (action + access_result +
         status_code), never raw response content.
+
+        `revision` (e.g. EvidenceHarness's own target_revision_id) is what
+        lets get_verified_context/get_unverified_context automatically stop
+        serving this fact once the target has moved past this revision —
+        see this class's revision-staleness fix for the full reasoning.
+        Required, non-empty (see _require_revision) — an empty value would
+        otherwise silently match legacy pre-migration rows, which are
+        deliberately backfilled to '' to mean "unknown, not trustworthy."
         """
+        _require_revision(revision)
         observation_id = generate_id("ctxobs")
         try:
             self._conn.execute(
                 """
                 INSERT INTO verified_observations (
                     id, target_id, execution_id, description, status,
-                    created_at, verified_at, package_id, valid_until, stale, stale_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL)
+                    created_at, verified_at, package_id, valid_until, stale, stale_reason, revision
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, ?)
                 """,
                 (
                     observation_id,
@@ -197,6 +251,7 @@ class SecurityContextStore:
                     # can't be relaxed via ALTER TABLE without a full table rebuild) — "" means
                     # "not verified yet," distinct from a real ISO timestamp; status=unverified is the
                     # authoritative signal, this is only a placeholder to satisfy the column constraint.
+                    revision,
                 ),
             )
             self._conn.commit()
@@ -272,7 +327,7 @@ class SecurityContextStore:
             raise RuntimeError(f"Không đánh dấu stale cho target_id '{target_id}': {exc}") from exc
         return cursor.rowcount
 
-    def get_verified_context(self, target_id: str) -> List[Dict[str, Any]]:
+    def get_verified_context(self, target_id: str, revision: str) -> List[Dict[str, Any]]:
         # SPEC §4.6 diagram: "giả thuyết lượt sau CHỈ dựa trên verified" —
         # this is the ONLY read path Hypothesis Engine's prompt is built
         # from (see hypothesis_engine/engine.py), so it must never return a
@@ -282,14 +337,26 @@ class SecurityContextStore:
         # expiry, so no longer trustworthy" and excluded, not as "trusted
         # forever" (SPEC's explicit ban on unbounded safe conclusions
         # applies here too, not just to newly-written rows).
+        #
+        # `revision` filters to rows verified against THIS EXACT revision —
+        # real gap found via independent review: without this, a fact
+        # verified against an old revision kept being served as trusted
+        # context after the target's code had since changed, with nothing
+        # detecting the mismatch automatically (only an operator
+        # remembering to call mark_stale() did). This is a structural read-
+        # time guard, not a substitute for mark_stale() — it silently
+        # excludes stale-revision rows from THIS query, it doesn't persist
+        # anything, so a caller that queries with the WRONG revision by
+        # mistake can't accidentally mark real facts stale.
+        _require_revision(revision)
         try:
             cursor = self._conn.execute(
                 """
                 SELECT id, description, verified_at FROM verified_observations
-                WHERE target_id = ? AND status = ? AND stale = 0
+                WHERE target_id = ? AND status = ? AND stale = 0 AND revision = ?
                   AND valid_until IS NOT NULL AND valid_until > ?
                 """,
-                (target_id, STATUS_VERIFIED, datetime.now(timezone.utc).isoformat()),
+                (target_id, STATUS_VERIFIED, revision, datetime.now(timezone.utc).isoformat()),
             )
             return [
                 {"id": row[0], "description": row[1], "verified_at": row[2]}
@@ -298,20 +365,22 @@ class SecurityContextStore:
         except sqlite3.Error as exc:
             raise RuntimeError(f"Không đọc được verified context cho target_id '{target_id}': {exc}") from exc
 
-    def get_unverified_context(self, target_id: str) -> List[Dict[str, Any]]:
+    def get_unverified_context(self, target_id: str, revision: str) -> List[Dict[str, Any]]:
         """SPEC §4.6 diagram's dashed arrow: "unverified: chỉ tra cứu, có
         nhãn cảnh báo" — Hypothesis Engine MAY look this up, but every
         result must carry an explicit warning label so nothing downstream
         can mistake it for confirmed fact. Stale unverified rows are
         excluded for the same reason SPEC's staleness principle exists at
         all: a fact that's merely unverified AND stale has strictly less
-        going for it than a fresh unverified one.
+        going for it than a fresh unverified one. `revision` filters the
+        same way get_verified_context() does — see its docstring.
         """
+        _require_revision(revision)
         try:
             cursor = self._conn.execute(
                 "SELECT id, description, created_at FROM verified_observations "
-                "WHERE target_id = ? AND status = ? AND stale = 0",
-                (target_id, STATUS_UNVERIFIED),
+                "WHERE target_id = ? AND status = ? AND stale = 0 AND revision = ?",
+                (target_id, STATUS_UNVERIFIED, revision),
             )
             return [
                 {
