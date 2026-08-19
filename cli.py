@@ -22,7 +22,7 @@ from shared.models.action import ActionPlanResult, ActionPlanStatus, ActionSpec,
 from shared.models.entities import Authorization, AuthorizationLayer
 from shared.models.hypothesis import Hypothesis, HypothesisProvenance, HypothesisStatus
 from shared.models.kill_switch import ExecutionStatus
-from shared.models.observation import NormalizedObservation, ObservationRole
+from shared.models.observation import BLIND_MARKER_PLACEHOLDER, NormalizedObservation, ObservationRole
 from shared.models.signal import NormalizedSignal, SignalCoverage
 from shared.models.verification_package import Environment, ReviewDecision, VerificationPackage
 from verdict_oracle.oracle import decide
@@ -597,6 +597,90 @@ def _load_identity_logins(path: Optional[str]) -> Dict[str, _IdentityLoginSpec]:
         raise CliError(f"--identity-logins file '{path}' có entry không đúng schema: {exc}") from exc
 
 
+def _replace_placeholder_recursive(value: Any, marker: str) -> Any:
+    """Walks `value` — a plain string, or any JSON-shaped nesting of
+    dict/list around strings (exactly what LLM JSON output can ever
+    produce) — replacing every occurrence of BLIND_MARKER_PLACEHOLDER
+    with `marker`. Real gap found via independent review: an earlier
+    version only substituted TOP-LEVEL STRING values of
+    action.parameters — a not-perfectly-obedient LLM (this codebase has
+    documented real cases of one ignoring instructions) putting the
+    placeholder in action.target/description, or nesting it inside a
+    dict/list value within parameters, would sail through un-substituted
+    with NO error — the real target would silently receive the literal
+    placeholder text instead of a real marker, and nobody would notice
+    short of reading the raw transcript by hand. Recursing over every
+    field (see `_action_field_values_for_marker_scan`) closes that."""
+    if isinstance(value, str):
+        return value.replace(BLIND_MARKER_PLACEHOLDER, marker)
+    if isinstance(value, dict):
+        return {key: _replace_placeholder_recursive(v, marker) for key, v in value.items()}
+    if isinstance(value, list):
+        return [_replace_placeholder_recursive(v, marker) for v in value]
+    return value
+
+
+def _contains_placeholder_recursive(value: Any) -> bool:
+    if isinstance(value, str):
+        return BLIND_MARKER_PLACEHOLDER in value
+    if isinstance(value, dict):
+        return any(_contains_placeholder_recursive(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_placeholder_recursive(v) for v in value)
+    return False
+
+
+def _action_field_values_for_marker_scan(action: ActionSpec) -> List[Any]:
+    """Every field of `action` the placeholder could plausibly end up in —
+    not just `parameters` (see `_replace_placeholder_recursive`'s
+    docstring for why scanning only `parameters`' top-level string values
+    was a real gap)."""
+    return [action.target, action.description, action.method, action.parameters]
+
+
+def _uses_blind_marker_placeholder(actions: List[ActionSpec]) -> bool:
+    """True if any action anywhere contains BLIND_MARKER_PLACEHOLDER —
+    Exploit Agent's own signal (taught in its prompt) that this plan opted
+    into a blind-marker 3-role scenario (SPEC §4.3.4)."""
+    return any(
+        _contains_placeholder_recursive(value)
+        for action in actions
+        for value in _action_field_values_for_marker_scan(action)
+    )
+
+
+def _substitute_blind_marker(action: ActionSpec, marker: str) -> ActionSpec:
+    """Replaces BLIND_MARKER_PLACEHOLDER with the REAL marker EVERYWHERE
+    in `action` (target/description/method/parameters, recursively) —
+    called on every action in a plan that uses the placeholder anywhere
+    (not just the role=setup one), in case a future prompt ever has a
+    legitimate reason to reference it from more than one action. A no-op
+    for any action that doesn't contain the placeholder at all.
+
+    Verifies afterward that NOTHING is left un-substituted — a defensive
+    check that should be unreachable given the recursion above covers
+    every JSON-representable shape action.parameters can take, but a
+    silent partial substitution (the real target receiving the literal
+    placeholder text instead of a real marker) is exactly the failure
+    mode a future refactor missing a field must fail LOUDLY on, not
+    quietly reproduce.
+    """
+    substituted = action.model_copy(
+        update={
+            "target": _replace_placeholder_recursive(action.target, marker),
+            "description": _replace_placeholder_recursive(action.description, marker),
+            "method": _replace_placeholder_recursive(action.method, marker),
+            "parameters": _replace_placeholder_recursive(action.parameters, marker),
+        }
+    )
+    if any(_contains_placeholder_recursive(v) for v in _action_field_values_for_marker_scan(substituted)):
+        raise CliError(
+            f"action_id='{action.action_id}': placeholder blind marker vẫn còn sau khi thay thế — lỗi "
+            "nội bộ không nên xảy ra, báo lại kèm plan gốc."
+        )
+    return substituted
+
+
 def cmd_execute(args: argparse.Namespace) -> int:
     """Thực thi THẬT các action đã approve của 1 plan — nối KillSwitch/
     CostService/EvidenceHarness vào CLI, thứ 3 thành phần này trước đó chỉ
@@ -619,13 +703,23 @@ def cmd_execute(args: argparse.Namespace) -> int:
     entry trong `--identity-logins` vẫn chạy được, chỉ là không đăng nhập
     (client mới, chưa có session) — một identity ẩn danh hợp lệ.
 
-    SCOPE THẬT còn lại: tự động seed blind marker
-    (`EvidenceHarness.generate_marker()`, chưa wire vào lệnh này) để "main"
-    có thể SATISFIED thay vì luôn INSUFFICIENT_DATA — vẫn cần script tự
-    viết như .secweave/manual_test/identity_scenario_example.py cho phần
-    này. decide() vẫn được gọi ở cuối để verdict thật ra đúng INCONCLUSIVE
-    khi thiếu nhóm predicate nào đó, thay vì giả vờ có thể kết luận
-    CONFIRMED/NOT_REPRODUCED khi thiếu bằng chứng.
+    2026-08-19 (tiếp): đóng phần "blind marker seeding" — gap con thứ 3/3
+    cuối cùng của kịch bản 3-role. Nếu plan có action nào chứa
+    `BLIND_MARKER_PLACEHOLDER` (shared/models/observation.py) trong
+    parameters — dấu hiệu Exploit Agent đã thiết kế 1 action `role=setup`
+    seed dữ liệu mồi — lệnh này tự gọi `EvidenceHarness.generate_marker()`
+    lấy marker THẬT rồi thay placeholder bằng marker thật trong TOÀN BỘ
+    action's parameters, TRƯỚC `review_plan()` (để Policy Service kiểm
+    đúng giá trị thật sẽ gửi, không phải placeholder), rồi truyền
+    `marker=` thật vào mọi `capture()` — nhờ đó "main" giờ có thể thật sự
+    SATISFIED, không còn luôn INSUFFICIENT_DATA. Exploit Agent/LLM không
+    bao giờ thấy giá trị marker thật, chỉ biết đúng 1 placeholder công
+    khai cố định (SPEC §4.3.4: "Exploit Agent / mọi LLM: Không" biết
+    marker). Plan không dùng placeholder thì hành vi y hệt trước đây
+    (`marker=None`, không tự sinh `seed_manifest.json`). decide() vẫn được
+    gọi ở cuối để verdict thật ra đúng INCONCLUSIVE khi thiếu nhóm
+    predicate nào đó, thay vì giả vờ có thể kết luận CONFIRMED/
+    NOT_REPRODUCED khi thiếu bằng chứng.
 
     `--plan-file`: dùng lại đúng plan đã `secweave plan` duyệt trước đó
     thay vì gọi LLM lập plan MỚI (xem _load_frozen_plan's docstring cho lý
@@ -676,6 +770,42 @@ def _run_execute(args: argparse.Namespace) -> int:
         print(f"NOT_PLANNABLE — {plan_result.reason}")
         return 0
 
+    execution_id = args.execution_id or generate_id("exec")
+
+    # Blind marker (SPEC §4.3.4): a plan that opted into a 3-role blind-
+    # marker scenario (Exploit Agent's prompt teaches it to embed
+    # BLIND_MARKER_PLACEHOLDER in exactly the bait-data parameter it wants
+    # checked) gets that placeholder swapped for a REAL random marker HERE
+    # — after the LLM is completely done, and BEFORE Policy Service/Cost
+    # Service/execution ever see the plan — so the real marker value never
+    # passes through any LLM context (SPEC's own table: "Exploit Agent /
+    # mọi LLM: Không" biết marker). Substituting before review_plan() below
+    # (not after) matters for a real reason, not just tidiness: an
+    # allowlist entry with `params:key=regex` on this parameter is checked
+    # against the REAL marker's shape (32 hex chars from
+    # EvidenceHarness.generate_marker()), not the placeholder text — the
+    # only way that check can mean anything.
+    marker_value = None
+    if _uses_blind_marker_placeholder(plan_result.plan.actions):
+        # A throwaway EvidenceHarness — no kill_switch/cost_service/
+        # http_client wired in — used ONLY to call generate_marker(),
+        # which needs nothing but execution_id/storage_dir/target
+        # metadata and never opens an httpx.Client (that's lazy, on first
+        # capture()/login() call, neither of which happens here). The
+        # REAL EvidenceHarness constructed later reuses the same
+        # execution_id/storage_dir, so generate_marker()'s own
+        # idempotent-per-execution_id seed manifest means this throwaway
+        # instance and the real one always agree on the same value.
+        marker_value = EvidenceHarness(
+            execution_id=execution_id,
+            target_id=args.target_id,
+            target_revision_id=args.target_revision_id,
+            storage_dir=args.storage_dir,
+        ).generate_marker()
+        plan_result.plan.actions = [
+            _substitute_blind_marker(action, marker_value) for action in plan_result.plan.actions
+        ]
+
     print(
         "CẢNH BÁO: authorization dùng để check dưới đây CHỈ dựng tạm để test cục bộ từ "
         "--allowed-action — KHÔNG phải Gate 2/3 thật đã duyệt. Lệnh này SẼ GỬI REQUEST THẬT tới "
@@ -700,7 +830,6 @@ def _run_execute(args: argparse.Namespace) -> int:
     role_identity = _parse_role_identity_args(args.role_identity)
     identity_logins = _load_identity_logins(args.identity_logins)
 
-    execution_id = args.execution_id or generate_id("exec")
     kill_switch = KillSwitch(execution_id=execution_id, storage_dir=args.storage_dir)
 
     # Real gap found via independent review: kill_switch.start() used to be
@@ -870,6 +999,7 @@ def _run_execute(args: argparse.Namespace) -> int:
                     observation = harness.capture(
                         check.action,
                         role=check.action.role,
+                        marker=marker_value,
                         identity=role_identity.get(check.action.role, args.identity),
                         sensitive_body_keys=sensitive_body_keys,
                     )

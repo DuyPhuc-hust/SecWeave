@@ -60,19 +60,27 @@ redesign knows what to scrutinize hardest):
   Naming the other 4 here is cheap and keeps the schema from silently
   assuming HTTP is the only channel that will ever exist, but constructing
   an observation for one of them would need real Harness work first.
-- A REAL GAP this schema surfaces but does not fully fix: ActionSpec has no
-  field today saying "this action is meant to serve as the positive control"
-  (or denied control) — Exploit Agent's prompt doesn't ask the LLM to design
-  a 3-role action set either. Without that, nothing can actually produce a
-  correctly-tagged `role` for these observations yet; evidence_harness/
-  harness.py's capture() still takes `role` as a caller-supplied argument,
-  not something it derives on its own. This schema assumes that part of the
-  gap gets closed later (either in ActionSpec or in how a human/Oracle
-  assembles a run's observations). The adjacent, narrower gap — ActionSpec
-  having no stable ID at all for action_ref to point to — IS closed now:
-  ActionSpec.action_id (shared/models/action.py) is what Evidence Harness
+- UPDATE (2026-08-19): the "no field says which role an action serves"
+  gap described above is now closed — ActionSpec.role (shared/models/
+  action.py) lets Exploit Agent tag main/positive_control/denied_control/
+  setup when it designs a 3-role plan; cli.py's `execute` reads it instead
+  of hardcoding role=main. ActionSpec.action_id (also shared/models/
+  action.py) was already closed before that — it's what Evidence Harness
   writes into action_ref.
 """
+
+BLIND_MARKER_PLACEHOLDER = "{{SECWEAVE_BLIND_MARKER}}"
+"""SPEC §4.3.4's blind marker — closed 2026-08-19. A FIXED, non-secret
+placeholder token: Exploit Agent's prompt teaches the LLM to embed this
+EXACT string as one bait-data parameter value of a role=SETUP action, when
+it decides a hypothesis benefits from blind-marker verification. The LLM
+never sees or invents the REAL marker (a random token from
+EvidenceHarness.generate_marker()) — SPEC's own table names ONLY Harness
+and Oracle as legitimate readers, explicitly excluding "Exploit Agent /
+mọi LLM". cli.py's `execute` substitutes this placeholder for the real
+value AFTER the LLM is done and BEFORE Policy Service/Cost Service/
+execution ever see it, so the real value never passes through any LLM
+context — only this constant (a public token, not a secret) does."""
 
 from datetime import datetime
 from enum import Enum

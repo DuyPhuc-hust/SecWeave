@@ -2235,6 +2235,291 @@ def test_cli_execute_skips_login_for_a_role_identity_not_used_by_this_plan(capsy
     assert login_calls == ["owner@test"]  # attacker's login was never attempted
 
 
+# ----- Blind marker seeding automation (2026-08-19) -----
+
+
+def test_cli_execute_substitutes_blind_marker_and_satisfies_the_main_predicate(
+    capsys, monkeypatch, tmp_path
+):
+    # The scenario this feature exists for: a role=setup action plants bait
+    # data whose content is the FIXED placeholder Exploit Agent's prompt
+    # teaches it to use; cli.py substitutes a REAL random marker before
+    # anything (Policy Service, the real request) ever sees it; role=main
+    # reads the same resource back and gets response_contains_marker=True,
+    # request_contains_marker=False — the main predicate actually SATISFIED
+    # instead of perpetually INSUFFICIENT_DATA.
+    import re
+
+    import httpx
+
+    from shared.kill_switch import ExecutionStatus
+    from shared.models.observation import NormalizedObservation
+    from verdict_oracle.oracle import decide
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_blind_marker_test"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/notes",
+                                "description": "Seed bait note with blind marker.",
+                                "role": "setup",
+                                "parameters": {"content": "{{SECWEAVE_BLIND_MARKER}}"},
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/notes/1",
+                                "description": "Main: read the seeded note back via the suspected path.",
+                                "role": "main",
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    seeded_content = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/notes":
+            body = json.loads(request.content)
+            seeded_content.append(body["content"])
+            return httpx.Response(200, json={"id": 1})
+        return httpx.Response(200, json={"content": seeded_content[0]})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/notes params:content",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/notes/1",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+
+    # The real marker actually sent is a random 32-hex-char string, never
+    # the literal placeholder text.
+    assert len(seeded_content) == 1
+    real_marker = seeded_content[0]
+    assert real_marker != "{{SECWEAVE_BLIND_MARKER}}"
+    assert re.fullmatch(r"[0-9a-f]{32}", real_marker)
+
+    log_path = storage_dir / execution_id / "observations.jsonl"
+    observations = [NormalizedObservation(**json.loads(line)) for line in log_path.read_text().splitlines()]
+    by_role = {o.role.value: o for o in observations}
+    assert by_role["main"].response_contains_marker is True
+    assert by_role["main"].request_contains_marker is False
+
+    # The seed manifest holds the SAME real marker (idempotent per
+    # execution_id — proof the throwaway generate_marker() call and the
+    # real capture loop agree on one value).
+    seed_manifest = json.loads((storage_dir / execution_id / "seed_manifest.json").read_text())
+    assert seed_manifest["marker"] == real_marker
+
+    # actions.json (persisted for a later assemble-package) holds the REAL
+    # marker too, not the placeholder — proof substitution happened before
+    # persistence, not after.
+    actions_on_disk = json.loads((storage_dir / execution_id / "actions.json").read_text())
+    setup_action = next(a for a in actions_on_disk if a["role"] == "setup")
+    assert setup_action["parameters"]["content"] == real_marker
+
+    result = decide(observations, execution_status=ExecutionStatus.COMPLETED)
+    by_group = {r.group.value: r.status.value for r in result.predicate_results}
+    assert by_group["main"] == "satisfied"
+    # Overall verdict is still inconclusive — this test only wires 1 of the
+    # 3 required predicate groups; SPEC requires all 3 for a final verdict.
+    assert result.verdict.value == "inconclusive"
+
+
+def test_cli_execute_without_the_placeholder_never_generates_or_passes_a_marker(
+    capsys, monkeypatch, tmp_path
+):
+    # Backward compatibility: a plan that never uses the placeholder must
+    # behave EXACTLY as before this feature existed — no seed_manifest.json
+    # written at all, and main's marker fields stay None (insufficient_data,
+    # not a false "unsatisfied").
+    import httpx
+
+    from shared.models.observation import NormalizedObservation
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_no_marker_test"
+    storage_dir = tmp_path / "evidence"
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/notes/1",
+                                "description": "Main: ordinary single-role read.",
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/notes/1",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+    assert not (storage_dir / execution_id / "seed_manifest.json").exists()
+
+    log_path = storage_dir / execution_id / "observations.jsonl"
+    observations = [NormalizedObservation(**json.loads(line)) for line in log_path.read_text().splitlines()]
+    assert observations[0].response_contains_marker is None
+    assert observations[0].request_contains_marker is None
+
+
+def test_cli_execute_substitutes_a_blind_marker_nested_inside_a_list_parameter(
+    capsys, monkeypatch, tmp_path
+):
+    # Real gap found via independent review: an earlier version of the
+    # substitution only scanned TOP-LEVEL STRING values of
+    # action.parameters — a placeholder nested inside a list/dict value
+    # (a shape an imperfectly-obedient LLM could plausibly produce, e.g.
+    # a "tags" array) would sail through un-substituted with no error,
+    # silently sending the literal placeholder text to the real target.
+    # This proves the fix: nested occurrences ARE now detected and
+    # substituted.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_nested_marker_test"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/notes",
+                                "description": "Seed bait note with a nested blind marker.",
+                                "role": "setup",
+                                "parameters": {"tags": ["public", "{{SECWEAVE_BLIND_MARKER}}"]},
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    seeded_tags = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seeded_tags.extend(body["tags"])
+        return httpx.Response(200, json={"id": 1})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/notes params:tags",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 0
+    assert seeded_tags[0] == "public"
+    assert seeded_tags[1] != "{{SECWEAVE_BLIND_MARKER}}"
+    import re
+
+    assert re.fullmatch(r"[0-9a-f]{32}", seeded_tags[1])
+
+
 def test_cli_execute_plan_file_rejects_mismatched_hypothesis_id(capsys, monkeypatch, tmp_path):
     db_path = str(tmp_path / "test.db")
     plan_file = tmp_path / "plan.json"
