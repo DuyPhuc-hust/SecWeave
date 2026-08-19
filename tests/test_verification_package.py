@@ -218,6 +218,20 @@ def test_package_rejects_empty_next_action():
         VerificationPackage(**_base_package_kwargs(next_action=""))
 
 
+@pytest.mark.parametrize("field", ["package_id", "target_id", "revision", "authorization_reference"])
+def test_package_rejects_empty_identifier_and_reference_fields(field):
+    # Real gap found via independent review: these 4 fields had NO
+    # min_length constraint, unlike their siblings (scenario/limitations/
+    # next_action, above) — `secweave assemble-package --target-id ""
+    # --target-revision-id "" --authorization-reference "" ...` built and
+    # printed a fully "valid" VerificationPackage with 3 empty required-
+    # judgment fields, and an empty package_id is equally nonsensical for
+    # a field whose stated purpose is "định danh duy nhất, dùng để trích
+    # dẫn" (SPEC §7 field #1).
+    with pytest.raises(ValidationError):
+        VerificationPackage(**_base_package_kwargs(**{field: ""}))
+
+
 @pytest.mark.parametrize(
     "field",
     ["identities", "action_record", "raw_evidence_references", "artifact_hashes", "normalized_observations"],

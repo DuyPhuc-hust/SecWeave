@@ -49,7 +49,21 @@ class AgentBridgeLLMClient(HypothesisLLMClient):
 
         if not response_path.exists():
             raise RuntimeError(f"Không tìm thấy file response tại '{response_path}'")
-        return response_path.read_text(encoding="utf-8")
+        try:
+            return response_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # Real gap found via independent review: this file is hand-
+            # written/edited by a HUMAN (or another agent) in an arbitrary
+            # editor, not produced by this codebase — a BOM, smart quotes
+            # pasted from a non-UTF-8 source, or any stray invalid byte
+            # raises UnicodeDecodeError, a ValueError subclass that neither
+            # `RuntimeError` nor `httpx.HTTPError` (the 2 exception types
+            # every cli.py call site catches around generate()/generate_
+            # many()) would catch — same class of gap already fixed once
+            # for `--source` file reading in cli.py, never mirrored here.
+            raise RuntimeError(
+                f"File response '{response_path}' không phải UTF-8 hợp lệ: {exc}"
+            ) from exc
 
     def generate_many(self, prompts: List[str]) -> List[str]:
         """Merges multiple prompts into 1 file, waiting for the agent to
@@ -117,7 +131,13 @@ class AgentBridgeLLMClient(HypothesisLLMClient):
         if not response_path.exists():
             raise RuntimeError(f"Không tìm thấy file response tại '{response_path}'")
 
-        raw = response_path.read_text(encoding="utf-8")
+        try:
+            raw = response_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # See generate()'s identical fix for why this is needed.
+            raise RuntimeError(
+                f"File response '{response_path}' không phải UTF-8 hợp lệ: {exc}"
+            ) from exc
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:

@@ -110,6 +110,25 @@ Xác nhận bằng dữ liệu THẬT (không chỉ mock): chạy trên các art
 
 Review độc lập tìm 2 lỗi thật + 1 gap UX nhỏ, cả 3 đã sửa: (1) cả 3 chỗ đọc JSON (`--package-file`, `--retest-summary`'s `results`, `actions.json`) chỉ bắt `JSONDecodeError`/`ValidationError` — 1 file JSON hợp lệ nhưng SAI KIỂU ở tầng ngoài cùng (list thay vì object, hoặc ngược lại) khiến `Model(**data)`/`entry.get(...)` crash bằng `TypeError`/`AttributeError` thô, không qua được contract `error: ...` + exit 1 của lệnh — sửa bằng kiểm `isinstance` tường minh trước khi unpack, cho cả 3 chỗ; (2) khi KHÔNG lần retest nào trong `--retest-summary` đối chiếu được với raw artifact (vd `--storage-dir` sai, hoặc artifact đã bị dọn), `cross_checked_against_raw_artifact: 0` trông HỆT như "đã đối chiếu và khớp hoàn toàn" ở output JSON — không có field nào phân biệt "đã kiểm tra, khớp" với "chưa kiểm tra được gì cả" — sửa bằng thêm field cảnh báo riêng `WARNING_could_not_cross_check_any_run` + in cảnh báo ra stderr, cùng nguyên tắc với `actions_outside_allowlist_count` đã báo chuỗi "N/A" thay vì số `0` khi không có `--allowed-action`; (3) `--allowed-action` truyền mà không có `--execution-id` bị âm thầm bỏ qua, không cảnh báo gì — sửa bằng in cảnh báo rõ ràng. 5 test mới cho 3 gap trên (14 test tổng cho `measure`), 592/592 test pass.
 
+**`secweave report` — xuất Verification Package ra Markdown (2026-08-19)**: `assemble-package`/`review-package --format json` chỉ ra được JSON 19 trường thô — không phải thứ đưa cho Sponsor/owner đọc trực tiếp được (SPEC §7: "hợp đồng đầu ra của toàn hệ thống"). Lệnh mới `report` đọc lại 1 package đã lắp, render ra Markdown, KHÔNG tính lại gì (`verification_package/report.py::render_markdown_report()`, thuần trình bày lại dữ liệu đã có). 2 quyết định thiết kế cố ý, ghi rõ trong docstring: field #17 (Limitations) đặt NGAY sau verdict, trước mọi chi tiết khác — đúng câu SPEC "trường nên đọc đầu tiên"; `action_record.parameters` giữ nguyên giá trị THẬT, không tự redact thêm — vì đây là "kế hoạch đã thực thi" (field #9 yêu cầu "đủ để lặp lại", vd cần mật khẩu thật của bước login), khác với raw evidence transcript (thứ SPEC §4.3.5 nói tới) — và dự án có nguyên tắc sẵn (`_redact_body` trong `evidence_harness/harness.py`): chỉ che theo khai báo tường minh, không đoán theo tên trường. Thay vào đó in 1 cảnh báo rõ ràng ngay trên bảng action record. Xác nhận bằng dữ liệu THẬT: render lại đúng package `CONFIRMED` từ lượt chạy full-pipeline thật trong phiên này (IDOR notes app) — hiển thị đúng toàn bộ predicate/observation/action, kể cả marker thật khớp đúng theo từng vai trò.
+
+Review độc lập tìm 3 lỗi thật, cả 3 đã sửa: (1) `action.method` là ô duy nhất trong bảng action record KHÔNG qua `_escape_cell()` trong khi các ô liền kề (target/description/parameters) đều có — 1 giá trị method chứa `|` (field này là `str` không ràng buộc, nội dung từ LLM/plan tự soạn) làm bảng lệch cột; (2) `raw_evidence_hash` vừa không escape vừa bọc trong code span 1 backtick — 1 giá trị chứa backtick đóng span sớm, cộng thêm cùng lỗi lệch cột `|` như trên — sửa bằng bỏ backtick, dùng `_escape_cell()` giống hệt `raw_evidence_ref` ngay cạnh nó (Markdown không có cách escape backtick tin cậy bên trong 1 code span 1-backtick); (3) nhánh đọc `--package-file` được che chắn đầy đủ (FileNotFoundError/JSONDecodeError/sai kiểu top-level/ValidationError đều thành `CliError` sạch) nhưng nhánh GHI `--out` thì không — ghi vào thư mục cha chưa tồn tại crash traceback thô, không theo đúng contract lỗi của lệnh. 9 test mới (6 cho `render_markdown_report()`, 3 cho gap còn lại + CLI), 606/606 test pass.
+
+**Soát toàn bộ dự án (kiến trúc + toàn bộ code) — 4 review độc lập song song theo mảng (2026-08-19)**: theo yêu cầu "kiểm tra thật kĩ toàn bộ dự án", dispatch 4 agent review độc lập chạy song song, mỗi agent phụ trách 1 mảng khác nhau (khác các lượt review trước — mỗi lượt trước chỉ soát 1 tính năng mới, lần này đọc TOÀN BỘ 1 mảng để tìm lỗi chỉ lộ ra khi đọc nhiều phần cùng lúc): (1) `cli.py` toàn bộ 2600+ dòng — tìm chỗ 1 fix an toàn áp cho lệnh này nhưng quên áp cho lệnh anh em cùng loại input; (2) `shared/` (cost/kill-switch/policy/models) — các cơ chế an toàn lõi; (3) `hypothesis_engine`+`exploit_agent` — nơi dữ liệu LLM không tin cậy đi vào hệ thống; (4) `evidence_harness`+`verdict_oracle`+`context_store`+`verification_package` — lõi thu bằng chứng/phán quyết.
+
+Cấu trúc thư mục/file: không có file rác, không untracked lạ, migration idempotent, không SQL injection, redaction chạy đúng mọi nhánh — điểm đáng chú ý duy nhất là `cli.py` đã 2600+ dòng cho 13 subcommand, nhưng review kết luận tách thành package sẽ PHÂN MẢNH nhiều hơn là giúp ích (hầu hết lệnh dùng chung `CliError`/`_open_context_store`/`_load_hypothesis_from_context_store`/`_build_local_test_authorization`) — không tách.
+
+Cả 4 agent tìm được lỗi thật (đúng thông lệ project này: mọi vòng review độc lập từ trước tới giờ đều tìm ra ít nhất 1 lỗi thật) — tổng 13 lỗi/gap thật, tất cả đã sửa + có regression test:
+
+- **`cli.py` (7 gap)**: `review-package` là lệnh DUY NHẤT đọc package JSON còn thiếu guard `isinstance(dict)` mà `measure`/`report` (đọc CÙNG loại artifact) đã có — sửa đồng bộ; `assemble-package`, `_persist_actions` (đọc lại `actions.json` khi `execute` tái dùng execution_id), và `_read_verdict_for_execution` (dùng chung bởi `retest`/`measure`) đều thiếu guard hình dạng JSON tương tự cho `actions.json`/`observations.jsonl` — cùng sửa; `--identity-logins` chỉ kiểm tầng NGOÀI là object, không kiểm từng entry BÊN TRONG cũng phải là object; việc bắt `OSError` không nhất quán giữa các lệnh (1 số chỉ bắt `FileNotFoundError`, bỏ sót `IsADirectoryError`/`PermissionError`) — chuẩn hoá lại tất cả theo 1 mẫu (`FileNotFoundError` báo rõ "không tìm thấy", `OSError` khác báo "không đọc được"); nhiều lượt ghi file trong `execute`/`retest` (persist actions, append observations.jsonl, ghi execution_status.json, ghi retest summary) chưa được bọc như `report --out` đã làm — bọc lại toàn bộ, hỏng đĩa giữa chừng giờ báo lỗi sạch thay vì traceback thô (và không còn nuốt mất verdict/tỷ lệ vừa tính được); `--target-id` rỗng chỉ tình cờ bị chặn ở nhánh KHÔNG dùng `--plan-file` của `execute` (nhánh `--plan-file`, đường được khuyến nghị dùng, không hề kiểm) — chặn tường minh, áp dụng mọi nhánh; `--execution-id` rỗng ở `kill`/`resume`/`assemble-package` khiến `Path(storage_dir) / ""` trỏ về CHÍNH storage_dir thay vì báo lỗi cờ gõ sai — chặn tường minh cho cả 3 lệnh; `VerificationPackage` thiếu `min_length=1` cho 4 trường định danh (`package_id`/`target_id`/`revision`/`authorization_reference`) trong khi các trường phán đoán khác (scenario/limitations/next_action) đã có từ trước.
+- **`shared/` (3 gap, 1 nghiêm trọng)**: **`shared/kill_switch.py`** — audit log có 1 dòng JSON HỢP LỆ nhưng thiếu key `sequence`/`event` (log cũ từ trước khi field này tồn tại, hoặc bị sửa tay) làm `_recover_from_audit_log()` crash `KeyError` thay vì fail-safe về STOPPED như thiết kế — vì `secweave kill`/`secweave resume` mỗi lần đều dựng KillSwitch MỚI, lỗi này đồng nghĩa lệnh dừng khẩn cấp có thể tự crash thay vì dừng được gì cả, đi ngược đúng nguyên tắc "Agent hoặc model không có quyền từ chối lệnh dừng" — sửa bằng coi dòng thiếu key/không phải object hệt như dòng hỏng đã xử lý sẵn. **`shared/policy.py`** — `_decode_path_safely()` (đã qua 2 vòng hardening trước cho percent-encoding/backslash) vẫn lọt ký tự Unicode giống dấu `/` (vd U+FF0F FULLWIDTH SOLIDUS) — không phải `/`/`.`/`\` literal nên qua được mọi kiểm tra hiện có, nhưng backend kiểu IIS/ASP.NET hoặc framework tự NFKC-normalize sẽ quy nó về `/` thật trước khi route, mở lại đúng path traversal đã tưởng đóng — sửa bằng chuẩn hoá NFKC rồi kiểm tra lại y hệt 3 điều kiện cũ (chỉ dùng để PHÁT HIỆN, việc khớp allowlist vẫn dùng chuỗi decode gốc, đúng thứ thật sự gửi lên target). **`verdict_oracle/predicates.py`** — chưa từng có gì kiểm identity của 3 role bắt buộc phải khác nhau: nếu `positive_control` trùng identity với `main` thì "main satisfied" chỉ là chủ sở hữu tự đọc dữ liệu của mình, không chứng minh được ranh giới phân quyền nào bị vượt qua; nếu trùng với `denied_control` thì 1 identity không thể vừa "được cấp đúng" vừa "bị từ chối đúng" một cách có ý nghĩa — sửa bằng hạ `INSUFFICIENT_DATA` cho các role liên quan khi phát hiện trùng (CỐ Ý KHÔNG so `main` với `denied_control` — 1 thiết kế kịch bản hợp lệ có thể tái dùng cùng 1 identity attacker cho cả 2 role này trên 2 resource khác nhau). Kèm sửa 1 chỗ tài liệu sai: docstring `KillSwitch` khẳng định "mỗi execution_id chỉ 1 instance trong 1 process" nhưng chính `kill`/`resume` của `cli.py` lại cố ý dựng instance MỚI ở process KHÁC cho cùng execution_id — đã viết lại cho khớp thực tế (đây chính là kịch bản cơ chế `sequence` sinh ra để xử lý).
+- **`hypothesis_engine` (1 gap)**: `AgentBridgeLLMClient` (chế độ `--llm-mode agent`, người/agent khác tự tay gõ JSON trả lời vào file) đọc file response bằng `read_text(encoding="utf-8")` không bọc — 1 byte không hợp lệ UTF-8 (BOM, dấu ngoặc kép thông minh dán từ nguồn khác...) crash `UnicodeDecodeError` thô, không phải `RuntimeError`/`httpx.HTTPError` mà mọi nơi gọi hàm này ở `cli.py` bắt — cùng lớp lỗi đã sửa 1 lần cho `--source` nhưng chưa từng áp cho file này, dù file này còn dễ gặp lỗi encoding hơn (người thật tự gõ tay).
+- **`evidence_harness` (1 gap)**: `capture()`'s `except RuntimeError: pass` (ghi Context Store best-effort, tài liệu rõ ràng "không bao giờ được làm hỏng capture() đang thành công") không bắt được `ValueError` từ `_require_revision()` khi `target_revision_id` rỗng — sửa tận gốc bằng kiểm rỗng `target_id`/`target_revision_id` ngay tại `EvidenceHarness.__init__`, để MỌI caller (không chỉ `cli.py`, nơi tình cờ đã tự kiểm riêng) đều được bảo vệ, không chỉ nơi crash xảy ra.
+
+25 test mới cho 13 gap trên, 631/631 test pass. Một số fixture test cũ (dùng chung 1 identity mặc định cho cả 3 role — hợp lệ trước khi có invariant mới) được cập nhật để phản ánh đúng cách 1 lượt chạy 3-role thật phải cấp identity khác nhau cho `positive_control`.
+
+**Tách `cli.py` thành package `cli/` (2026-08-19)**: đánh giá kiến trúc ở vòng review ngay phía trên (2026-08-19) khuyến nghị giữ nguyên 1 file — nhưng sau khi đối chiếu với quy ước thực tế của các CLI nhiều subcommand phổ biến (`pip`'s `commands/` + `base_command.py`, Django's `management/commands/`, Poetry, `gh`, `kubectl`/cobra — đều tách 1 file/lệnh + 1 module "common" dùng chung), quyết định tách theo đúng mẫu đó. `cli.py` (2730 dòng, 13 subcommand) → `cli/common.py` (helper dùng bởi ≥2 lệnh: `CliError`, `_open_context_store`, `_parse_enum_arg`, `_load_signals`, `_build_llm_client`, `_load_hypothesis_from_context_store`, `_build_local_test_authorization`, `_read_verdict_for_execution` — xác định bằng grep đếm số nơi gọi thật, không đoán), `cli/parser.py` (`build_parser()` + 4 helper `_add_*_arg`), `cli/commands/*.py` (mỗi subcommand 1 file, phần logic riêng của nó ở nguyên chỗ cũ — vd `_load_frozen_plan` chỉ `execute` dùng nên nằm trong `cli/commands/execute.py`, không phải common). Xác nhận KHÔNG có gì thay đổi hành vi (đối chiếu danh sách tên hàm/class top-level cũ với mới bằng `diff` — khớp tuyệt đối 100%, không thiếu không thừa 1 tên nào), chỉ có logic di chuyển vị trí. `python cli.py ...` không chạy được nữa (không thể chạy 1 thư mục như script) — thay bằng `python -m cli ...`, cùng quy ước với `python -m pip`/`python -m pytest`. `tests/test_cli.py` không cần sửa gì (chỉ dùng `import cli; cli.main([...])`, `cli/__init__.py` vẫn export `main` y hệt). Xác nhận: 631/631 test pass không đổi, `python -m cli --help`/`python -m cli execute --help` ra đúng help text như cũ, và chạy thật `python -m cli report --package-file <package thật từ lượt full-pipeline demo>` ra đúng kết quả như khi còn là 1 file.
+
 ## Cài đặt
 
 Yêu cầu Python 3.10+.
@@ -132,25 +151,25 @@ pytest
 
 ## Dùng CLI
 
-11 lệnh, dùng report mẫu có sẵn trong `tests/fixtures/` để thử ngay.
+13 lệnh, dùng report mẫu có sẵn trong `tests/fixtures/` để thử ngay.
 
 Các file mẫu trong `tests/fixtures/` là output **thật** (không tự viết tay) từ Semgrep/Trivy/OWASP ZAP chạy thật vào SecWeave/OWASP Juice Shop — xem chú thích trong từng file. Ví dụ dưới dùng `zap_sample_report.json` vì nó có URL thật, đi được hết cả 4 bước; `semgrep_sample_report.json`/`trivy_sample_report.json` là whitebox (SAST/SCA, không có URL) nên `plan` sẽ trả `NOT_PLANNABLE` — đúng hành vi mong đợi, không phải lỗi (xem `--tool` bên dưới để thử các file đó).
 
 **1. Chuẩn hoá report thô thành `NormalizedSignal`** (không cần API key):
 ```bash
-python cli.py normalize --signal tests/fixtures/zap_sample_report.json --tool owasp_zap --tool-version 2.17.0
+python -m cli normalize --signal tests/fixtures/zap_sample_report.json --tool owasp_zap --tool-version 2.17.0
 ```
 `--tool` nhận `semgrep` / `trivy` / `owasp_zap`. Thêm `--format json` để lấy output JSON.
 
 **2. Sinh `Hypothesis` từ report** (gọi LLM thật, cần `.env`):
 ```bash
-python cli.py hypothesize --signal tests/fixtures/zap_sample_report.json --tool owasp_zap --tool-version 2.17.0 --context-db .secweave/context.db
+python -m cli hypothesize --signal tests/fixtures/zap_sample_report.json --tool owasp_zap --tool-version 2.17.0 --context-db .secweave/context.db
 ```
 Không có API key thì thêm `--llm-mode agent` để bắc cầu qua agent đang chat cùng bạn thay vì gọi API.
 
 **3. Soạn `ActionPlan` từ 1 hypothesis đã lưu, kiểm duyệt qua allowlist** (chưa thực thi request thật nào):
 ```bash
-python cli.py plan --hypothesis-id <hyp_...> \
+python -m cli plan --hypothesis-id <hyp_...> \
   --allowed-action "GET http://host.docker.internal:3000" \
   --context-db .secweave/context.db
 ```
@@ -158,12 +177,12 @@ python cli.py plan --hypothesis-id <hyp_...> \
 
 **4. Tra lại hypothesis đã sinh:**
 ```bash
-python cli.py show-hypothesis --hypothesis-id <hyp_...>
+python -m cli show-hypothesis --hypothesis-id <hyp_...>
 ```
 
 **5. Thực thi plan đã duyệt, thu bằng chứng thật (`execute`)** — SẼ GỬI REQUEST THẬT, chỉ chạy khi thực sự được phép trên target đó:
 ```bash
-python cli.py execute --hypothesis-id <hyp_...> \
+python -m cli execute --hypothesis-id <hyp_...> \
   --allowed-action "GET http://host.docker.internal:3000" \
   --target-id tgt_juiceshop --target-revision-id rev_local_docker \
   --execution-id exec_demo_1 \
@@ -175,11 +194,11 @@ Kịch bản đủ 3-role (main/positive_control/denied_control, nhiều identit
 
 **6. Đo tính lặp lại — chạy lại ĐÚNG 1 plan nhiều lần độc lập (`retest`, SPEC §8.1)** — tuỳ chọn, cần đóng băng plan trước:
 ```bash
-python cli.py plan --hypothesis-id <hyp_...> \
+python -m cli plan --hypothesis-id <hyp_...> \
   --allowed-action "GET http://host.docker.internal:3000" \
   --context-db .secweave/context.db --format json > plan.json
 
-python cli.py retest --hypothesis-id <hyp_...> --plan-file plan.json \
+python -m cli retest --hypothesis-id <hyp_...> --plan-file plan.json \
   --allowed-action "GET http://host.docker.internal:3000" \
   --target-id tgt_juiceshop --target-revision-id rev_local_docker \
   --storage-dir .secweave/evidence --context-db .secweave/context.db --runs 3
@@ -188,7 +207,7 @@ python cli.py retest --hypothesis-id <hyp_...> --plan-file plan.json \
 
 **7. Lắp Verification Package đủ 19 trường (`assemble-package`)**:
 ```bash
-python cli.py assemble-package --execution-id exec_demo_1 \
+python -m cli assemble-package --execution-id exec_demo_1 \
   --storage-dir .secweave/evidence \
   --target-id tgt_juiceshop --target-revision-id rev_local_docker \
   --environment sandbox --authorization-reference auth_local_test_1 \
@@ -200,7 +219,7 @@ python cli.py assemble-package --execution-id exec_demo_1 \
 
 **8. Con người review, quyết định release (`review-package`, Gate 4)**:
 ```bash
-python cli.py review-package --package-file package.json \
+python -m cli review-package --package-file package.json \
   --context-db .secweave/context.db \
   --reviewer "<tên người review>" --decision release \
   --reason "Đã đối chiếu raw evidence, khớp normalized observation." \
@@ -210,27 +229,27 @@ In ra danh sách raw evidence reference cần tự tay đối chiếu TRƯỚC k
 
 **9. Dừng khẩn 1 execution đang chạy, từ terminal KHÁC (`kill`, SPEC §6.3)**:
 ```bash
-python cli.py kill --execution-id exec_demo_1 --storage-dir .secweave/evidence \
+python -m cli kill --execution-id exec_demo_1 --storage-dir .secweave/evidence \
   --source operator --reason "Phát hiện hành vi ngoài dự kiến, dừng ngay để kiểm tra."
 ```
 `--source` nhận 1 trong 6 nguồn SPEC §6.3 (`operator`/`target_owner`/`infra_owner`/`data_isms_owner`/`incident_responder`/`automatic_threshold` — nguồn cuối bắt buộc kèm `--automatic-threshold-reason`).
 
 **10. Cho 1 execution đã STOPPED chạy lại (`resume`, đường DUY NHẤT)**:
 ```bash
-python cli.py resume --execution-id exec_demo_1 --storage-dir .secweave/evidence \
+python -m cli resume --execution-id exec_demo_1 --storage-dir .secweave/evidence \
   --authorization-reference "Owner đã duyệt lại qua email lúc 14:00 20/08/2026"
 ```
 
 **11. Đánh dấu 1 verified fact trong Context Store là đã cũ (`mark-stale`, SPEC §4.6)**:
 ```bash
-python cli.py mark-stale --target-id tgt_juiceshop \
+python -m cli mark-stale --target-id tgt_juiceshop \
   --reason "Target đã đổi revision, ngữ cảnh cũ có thể không còn đúng." \
   --context-db .secweave/context.db
 ```
 
 **12. Tổng hợp chỉ số SPEC §8.1 vào 1 báo cáo (`measure`)**:
 ```bash
-python cli.py measure \
+python -m cli measure \
   --package-file package.json \
   --retest-summary .secweave/evidence/exec_demo_1_retest_summary.json \
   --execution-id exec_demo_1 \
@@ -239,6 +258,12 @@ python cli.py measure \
   --format json
 ```
 Mỗi input tuỳ chọn (đo được gì thì đo, không có gì báo N/A chứ không giả định) — không cần chạy đúng 1 lần với đủ cả 3, có thể gọi riêng lẻ để đo từng chỉ số. `--execution-id` không truyền thì `--allowed-action` bị bỏ qua (chỉ dùng để đối chiếu allowlist với `actions.json` của 1 execution cụ thể).
+
+**13. Xuất Verification Package ra Markdown đọc được trực tiếp (`report`)**:
+```bash
+python -m cli report --package-file package.json --out report.md
+```
+Không truyền `--out` thì in thẳng ra stdout. Không tính lại gì — chỉ trình bày lại đúng 19 trường đã có trong package, xem đoạn "Trạng thái" ở trên để biết 2 quyết định thiết kế cố ý (thứ tự Limitations, không tự redact `action_record`).
 
 Mỗi lệnh có `--help` riêng để xem đầy đủ tuỳ chọn.
 

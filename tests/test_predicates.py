@@ -179,15 +179,16 @@ def test_evaluate_predicates_returns_all_three_groups_when_fully_satisfied(tmp_p
         _observation_with_real_evidence(
             tmp_path,
             role=ObservationRole.MAIN,
+            identity="attacker",
             access_result=AccessResult.GRANTED,
             response_contains_marker=True,
             request_contains_marker=False,
         ),
         _observation_with_real_evidence(
-            tmp_path, role=ObservationRole.POSITIVE_CONTROL, access_result=AccessResult.GRANTED
+            tmp_path, role=ObservationRole.POSITIVE_CONTROL, identity="owner", access_result=AccessResult.GRANTED
         ),
         _observation_with_real_evidence(
-            tmp_path, role=ObservationRole.DENIED_CONTROL, access_result=AccessResult.DENIED
+            tmp_path, role=ObservationRole.DENIED_CONTROL, identity="stranger", access_result=AccessResult.DENIED
         ),
     ]
     results = evaluate_predicates(observations)
@@ -207,12 +208,13 @@ def test_evaluate_predicates_reports_insufficient_data_for_missing_role_without_
         _observation_with_real_evidence(
             tmp_path,
             role=ObservationRole.MAIN,
+            identity="attacker",
             access_result=AccessResult.GRANTED,
             response_contains_marker=True,
             request_contains_marker=False,
         ),
         _observation_with_real_evidence(
-            tmp_path, role=ObservationRole.POSITIVE_CONTROL, access_result=AccessResult.GRANTED
+            tmp_path, role=ObservationRole.POSITIVE_CONTROL, identity="owner", access_result=AccessResult.GRANTED
         ),
         # No denied_control observation at all.
     ]
@@ -253,10 +255,10 @@ def test_evaluate_predicates_treats_duplicate_role_as_insufficient_data_not_last
             request_contains_marker=False,
         ),
         _observation_with_real_evidence(
-            tmp_path, role=ObservationRole.POSITIVE_CONTROL, access_result=AccessResult.GRANTED
+            tmp_path, role=ObservationRole.POSITIVE_CONTROL, identity="owner", access_result=AccessResult.GRANTED
         ),
         _observation_with_real_evidence(
-            tmp_path, role=ObservationRole.DENIED_CONTROL, access_result=AccessResult.DENIED
+            tmp_path, role=ObservationRole.DENIED_CONTROL, identity="stranger", access_result=AccessResult.DENIED
         ),
     ]
     results = evaluate_predicates(observations)
@@ -315,3 +317,93 @@ def test_evaluate_predicates_treats_missing_raw_evidence_file_as_insufficient_da
     assert by_group["denied_control"] == PredicateStatus.INSUFFICIENT_DATA
     reason = next(r.reason for r in results if r.group == ObservationRole.DENIED_CONTROL)
     assert "Không đọc được raw evidence" in reason
+
+
+def test_evaluate_predicates_treats_positive_control_sharing_mains_identity_as_insufficient_data(tmp_path):
+    # Real gap found via independent review: nothing previously checked
+    # that positive_control used a genuinely different identity from main —
+    # if it's the SAME identity, "main satisfied" just means the resource's
+    # own owner read their own data, not evidence of any access-control
+    # boundary being crossed. An operator forgetting a `--role-identity`
+    # mapping (falling back to the single shared --identity for every
+    # role) is a realistic way to reach this silently.
+    observations = [
+        _observation_with_real_evidence(
+            tmp_path,
+            role=ObservationRole.MAIN,
+            identity="same-identity",
+            access_result=AccessResult.GRANTED,
+            response_contains_marker=True,
+            request_contains_marker=False,
+        ),
+        _observation_with_real_evidence(
+            tmp_path, role=ObservationRole.POSITIVE_CONTROL, identity="same-identity", access_result=AccessResult.GRANTED
+        ),
+        _observation_with_real_evidence(
+            tmp_path, role=ObservationRole.DENIED_CONTROL, identity="stranger", access_result=AccessResult.DENIED
+        ),
+    ]
+    results = evaluate_predicates(observations)
+    by_group = {r.group: r.status for r in results}
+    assert by_group["main"] == PredicateStatus.INSUFFICIENT_DATA
+    assert by_group["positive_control"] == PredicateStatus.INSUFFICIENT_DATA
+    assert by_group["denied_control"] == PredicateStatus.SATISFIED  # unaffected — no identity collision involving it
+    for role in (ObservationRole.MAIN, ObservationRole.POSITIVE_CONTROL):
+        reason = next(r.reason for r in results if r.group == role)
+        assert "SAME identity" in reason
+
+
+def test_evaluate_predicates_treats_positive_control_sharing_denied_controls_identity_as_insufficient_data(tmp_path):
+    observations = [
+        _observation_with_real_evidence(
+            tmp_path,
+            role=ObservationRole.MAIN,
+            identity="attacker",
+            access_result=AccessResult.GRANTED,
+            response_contains_marker=True,
+            request_contains_marker=False,
+        ),
+        _observation_with_real_evidence(
+            tmp_path, role=ObservationRole.POSITIVE_CONTROL, identity="same-identity", access_result=AccessResult.GRANTED
+        ),
+        _observation_with_real_evidence(
+            tmp_path, role=ObservationRole.DENIED_CONTROL, identity="same-identity", access_result=AccessResult.DENIED
+        ),
+    ]
+    results = evaluate_predicates(observations)
+    by_group = {r.group: r.status for r in results}
+    assert by_group["main"] == PredicateStatus.SATISFIED  # unaffected — no identity collision involving it
+    assert by_group["positive_control"] == PredicateStatus.INSUFFICIENT_DATA
+    assert by_group["denied_control"] == PredicateStatus.INSUFFICIENT_DATA
+
+
+def test_evaluate_predicates_allows_main_and_denied_control_to_deliberately_share_an_identity(tmp_path):
+    # Deliberately NOT flagged as a collision: a valid scenario design can
+    # reuse the SAME identity for main and denied_control — e.g. the
+    # attacker identity under test in `main` (unauthorized access to the
+    # resource under test) also serving as `denied_control` against a
+    # DIFFERENT, unrelated resource (proving the system isn't simply wide
+    # open to that identity everywhere, just broken for this one
+    # resource). Only positive_control's identity is structurally required
+    # to be unique.
+    observations = [
+        _observation_with_real_evidence(
+            tmp_path,
+            role=ObservationRole.MAIN,
+            identity="attacker",
+            access_result=AccessResult.GRANTED,
+            response_contains_marker=True,
+            request_contains_marker=False,
+        ),
+        _observation_with_real_evidence(
+            tmp_path, role=ObservationRole.POSITIVE_CONTROL, identity="owner", access_result=AccessResult.GRANTED
+        ),
+        _observation_with_real_evidence(
+            tmp_path, role=ObservationRole.DENIED_CONTROL, identity="attacker", access_result=AccessResult.DENIED
+        ),
+    ]
+    results = evaluate_predicates(observations)
+    by_group = {r.group: r.status for r in results}
+    assert by_group["main"] == PredicateStatus.SATISFIED
+    assert by_group["positive_control"] == PredicateStatus.SATISFIED
+    assert by_group["denied_control"] == PredicateStatus.SATISFIED

@@ -33,6 +33,34 @@ def _harness(tmp_path, handler) -> EvidenceHarness:
     )
 
 
+def test_init_rejects_an_empty_target_id(tmp_path):
+    # Real gap found via independent review: capture()'s own best-effort
+    # Context Store write only ever caught RuntimeError around
+    # record_unverified_observation() — but nothing validated target_id
+    # itself anywhere in this class or in Context Store, so an empty
+    # target_id silently flowed into every observation/Context Store write
+    # for the whole run. The CLI layer (cli.py's `execute`) separately
+    # rejects this upfront, but that's a caller-side convenience check,
+    # not something every OTHER caller of this class automatically gets.
+    with pytest.raises(ValueError, match="target_id"):
+        EvidenceHarness(execution_id="exec_1", target_id="", target_revision_id="rev_1", storage_dir=str(tmp_path))
+
+
+def test_init_rejects_an_empty_target_revision_id(tmp_path):
+    # Real gap found via independent review: capture()'s `except
+    # RuntimeError: pass` around the best-effort Context Store write does
+    # NOT catch the plain ValueError that context_store/store.py's
+    # _require_revision() raises for an empty revision — so capture()
+    # crashed instead of degrading gracefully, contradicting its own
+    # documented "a Context Store hiccup must never make an otherwise-
+    # successful capture() look like it failed" promise. Validating here,
+    # once, at construction, means ANY caller (not just cli.py, which
+    # happens to check this separately) gets a clear, load-bearing error
+    # up front instead of a crash buried deep in a best-effort path.
+    with pytest.raises(ValueError, match="target_revision_id"):
+        EvidenceHarness(execution_id="exec_1", target_id="tgt_1", target_revision_id="", storage_dir=str(tmp_path))
+
+
 def test_capture_granted_populates_observation_from_real_response(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"id": 42, "owner": "alice"})

@@ -157,9 +157,9 @@ def test_full_pipeline_from_raw_scanner_json_to_confirmed_verdict(tmp_path):
         http_client=client,
     )
 
-    obs_main = harness.capture(main_action, role=ObservationRole.MAIN, marker=marker)
-    obs_positive = harness.capture(positive_action, role=ObservationRole.POSITIVE_CONTROL)
-    obs_denied = harness.capture(denied_action, role=ObservationRole.DENIED_CONTROL)
+    obs_main = harness.capture(main_action, role=ObservationRole.MAIN, marker=marker, identity="attacker")
+    obs_positive = harness.capture(positive_action, role=ObservationRole.POSITIVE_CONTROL, identity="owner")
+    obs_denied = harness.capture(denied_action, role=ObservationRole.DENIED_CONTROL, identity="attacker")
     harness.close()
 
     assert len(calls) == 3  # exactly the 3 approved actions were sent, nothing more/fewer

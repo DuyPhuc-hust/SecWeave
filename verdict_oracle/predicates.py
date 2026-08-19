@@ -187,8 +187,9 @@ def evaluate_predicates(observations: List[NormalizedObservation]) -> List[Predi
     for observation in observations:
         by_role.setdefault(observation.role, []).append(observation)
 
-    results = []
-    for role, check_fn in _CHECKS:
+    results: List[Optional[PredicateResult]] = []
+    single_observation_by_role: Dict[ObservationRole, NormalizedObservation] = {}
+    for role, _check_fn in _CHECKS:
         matches = by_role.get(role, [])
         if not matches:
             results.append(
@@ -214,12 +215,63 @@ def evaluate_predicates(observations: List[NormalizedObservation]) -> List[Predi
                 )
             )
         else:
-            observation = matches[0]
-            hash_problem = _hash_mismatch_reason(observation)
-            if hash_problem is not None:
-                results.append(
-                    PredicateResult(group=role, status=PredicateStatus.INSUFFICIENT_DATA, reason=hash_problem)
-                )
-            else:
-                results.append(check_fn(observation))
+            results.append(None)  # placeholder — filled in below, once identity collisions are known
+            single_observation_by_role[role] = matches[0]
+
+    # Real gap found via independent review: nothing previously checked
+    # that positive_control used a genuinely DIFFERENT identity from the
+    # other 2 roles. SPEC §4.4.1: positive_control's whole point is "đúng
+    # identity phải đọc được" (the LEGITIMATE owner) as the contrasting
+    # case to main's suspected-unauthorized read and denied_control's
+    # confirmed-unauthorized read — if positive_control used the SAME
+    # identity as main, "main" satisfied would just mean the owner read
+    # their own data (not evidence of any access-control boundary being
+    # crossed at all); if positive_control used the SAME identity as
+    # denied_control, that one identity can't coherently be BOTH
+    # "correctly allowed" and "correctly denied" for a meaningful test.
+    # Nothing about the blind-marker check itself (request/response marker
+    # presence) can detect this — it's purely an identity-bookkeeping fact
+    # the check functions never see. An operator forgetting a
+    # `--role-identity` mapping (cli.py) — falling back to the single
+    # shared --identity for every role — is a realistic, not just
+    # theoretical, way to reach this silently.
+    #
+    # main and denied_control are DELIBERATELY NOT compared against each
+    # other here: a valid scenario design can reuse the SAME identity for
+    # both — e.g. the attacker identity under test in `main` (unauthorized
+    # access to the resource under test) also serving as `denied_control`
+    # against a DIFFERENT, unrelated resource (proving the system isn't
+    # simply wide open to that identity everywhere, just broken for this
+    # one resource). Only positive_control's identity is structurally
+    # required to be unique.
+    colliding_roles: set = set()
+    role_pairs = [
+        (ObservationRole.MAIN, ObservationRole.POSITIVE_CONTROL),
+        (ObservationRole.POSITIVE_CONTROL, ObservationRole.DENIED_CONTROL),
+    ]
+    for role_a, role_b in role_pairs:
+        obs_a = single_observation_by_role.get(role_a)
+        obs_b = single_observation_by_role.get(role_b)
+        if obs_a is not None and obs_b is not None and obs_a.identity == obs_b.identity:
+            colliding_roles.add(role_a)
+            colliding_roles.add(role_b)
+
+    for i, (role, check_fn) in enumerate(_CHECKS):
+        if results[i] is not None:
+            continue  # missing/ambiguous placeholder from the first pass — already final
+        observation = single_observation_by_role[role]
+        if role in colliding_roles:
+            results[i] = PredicateResult(
+                group=role,
+                status=PredicateStatus.INSUFFICIENT_DATA,
+                reason=f"identity='{observation.identity}' is the SAME identity used for another required "
+                "role in this run — cannot prove an access-control boundary when 2 roles that must "
+                "represent different identities collapse into 1.",
+            )
+            continue
+        hash_problem = _hash_mismatch_reason(observation)
+        if hash_problem is not None:
+            results[i] = PredicateResult(group=role, status=PredicateStatus.INSUFFICIENT_DATA, reason=hash_problem)
+        else:
+            results[i] = check_fn(observation)
     return results

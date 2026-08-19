@@ -327,6 +327,26 @@ class EvidenceHarness:
         cost_service: Optional[CostService] = None,
         context_store: Optional[SecurityContextStore] = None,
     ) -> None:
+        # Real gap found via independent review: capture()'s own best-
+        # effort Context Store write (below) only ever caught RuntimeError
+        # around record_unverified_observation() — but an empty
+        # target_revision_id makes that call raise a plain ValueError (from
+        # context_store/store.py's _require_revision), which escapes
+        # uncaught, contradicting this exact call site's own documented
+        # promise ("a Context Store hiccup... must never make an otherwise-
+        # successful capture() look like it failed"). The CLI layer
+        # (cli.py's `execute`) already rejects an empty --target-revision-id
+        # before any real HTTP request — but that's a caller-side
+        # convenience check, not something every OTHER caller of this class
+        # (a test, a future command, direct programmatic use) automatically
+        # gets. Validating once here, at construction, means the mistake is
+        # always caught at the same, single, load-bearing point regardless
+        # of caller — fixed loudly (a clear ValueError before anything ever
+        # runs), not silently swallowed deep inside a best-effort path.
+        if not target_id:
+            raise ValueError("EvidenceHarness: target_id không được để trống.")
+        if not target_revision_id:
+            raise ValueError("EvidenceHarness: target_revision_id không được để trống.")
         self._execution_id = execution_id
         self._target_id = target_id
         self._target_revision_id = target_revision_id

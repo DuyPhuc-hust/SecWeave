@@ -1288,6 +1288,392 @@ def test_cli_execute_rejects_an_empty_target_revision_id(capsys, monkeypatch, tm
     assert "Traceback" not in captured.err
 
 
+def test_cli_execute_rejects_an_empty_target_id(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review (whole-project audit,
+    # 2026-08-19): --target-revision-id got this exact emptiness check
+    # (above), but --target-id never did — the only place that happened to
+    # reject "" was `_load_hypothesis_from_context_store`'s own staleness
+    # cross-check, which only runs on the non---plan-file branch. The
+    # documented, RECOMMENDED --plan-file path silently accepted
+    # --target-id "" and baked it into every observation/Context Store
+    # write for the run. Checked uniformly now, regardless of branch.
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--target-id" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_kill_rejects_an_empty_execution_id(capsys, tmp_path):
+    # Real gap found via independent review: `Path(storage_dir) / ""`
+    # evaluates to storage_dir itself — an empty --execution-id silently
+    # pointed KillSwitch at the storage_dir ROOT instead of erroring on the
+    # obviously-mistyped flag.
+    exit_code = cli.main(
+        [
+            "kill",
+            "--execution-id",
+            "",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--source",
+            "operator",
+            "--reason",
+            "test",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--execution-id" in captured.err
+
+
+def test_cli_resume_rejects_an_empty_execution_id(capsys, tmp_path):
+    exit_code = cli.main(
+        [
+            "resume",
+            "--execution-id",
+            "",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--authorization-reference",
+            "test",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--execution-id" in captured.err
+
+
+def test_cli_assemble_package_rejects_an_empty_execution_id(capsys, tmp_path):
+    exit_code = cli.main(
+        [
+            "assemble-package",
+            "--execution-id",
+            "",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--target-id",
+            "tgt_1",
+            "--target-revision-id",
+            "rev_1",
+            "--environment",
+            "sandbox",
+            "--authorization-reference",
+            "a",
+            "--scenario",
+            "s",
+            "--limitations",
+            "l",
+            "--next-action",
+            "n",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--execution-id" in captured.err
+
+
+def test_cli_review_package_fails_cleanly_when_package_top_level_is_not_an_object(capsys, tmp_path):
+    # Real gap found via independent review: `report`/`measure` (which read
+    # the exact same VerificationPackage JSON artifact) both guard against
+    # a wrong-shaped-but-valid-JSON top level — this command never got the
+    # same guard, so `package_data.get(...)` raised a raw AttributeError.
+    package_file = tmp_path / "bad.json"
+    package_file.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+    exit_code = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(package_file),
+            "--reviewer",
+            "qa1",
+            "--decision",
+            "reject",
+            "--reason",
+            "x",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "JSON object" in captured.err
+
+
+def _real_execute_artifacts(capsys, monkeypatch, tmp_path, execution_id: str, storage_dir):
+    """Runs a real (mock-transport) `execute` and returns the execution
+    directory holding its real observations.jsonl/actions.json/
+    execution_status.json — shared setup for the malformed-artifact tests
+    below, which corrupt one of these 3 files afterward."""
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+    assert (
+        cli.main(
+            [
+                "execute",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--allowed-action",
+                "GET http://host.docker.internal:3000",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    return Path(storage_dir) / execution_id
+
+
+def test_cli_assemble_package_fails_cleanly_when_actions_json_top_level_is_not_a_list(
+    capsys, monkeypatch, tmp_path
+):
+    # Real gap found via independent review: this parsing went straight
+    # from json.loads() into ActionSpec(**item) with no shape check — a
+    # hand-edited actions.json (an operator-editable file by design, see
+    # `review-package`'s own docstring on this exact risk) whose top level
+    # is a dict instead of a list crashed with a raw TypeError.
+    storage_dir = tmp_path / "evidence"
+    execution_dir = _real_execute_artifacts(capsys, monkeypatch, tmp_path, "exec_bad_actions_shape", storage_dir)
+    (execution_dir / "actions.json").write_text(json.dumps({"not": "a list"}), encoding="utf-8")
+
+    exit_code = cli.main(
+        [
+            "assemble-package",
+            "--execution-id",
+            "exec_bad_actions_shape",
+            "--storage-dir",
+            str(storage_dir),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--environment",
+            "sandbox",
+            "--authorization-reference",
+            "a",
+            "--scenario",
+            "s",
+            "--limitations",
+            "l",
+            "--next-action",
+            "n",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "bị sửa tay" in captured.err
+
+
+def test_cli_assemble_package_fails_cleanly_when_an_observation_line_is_not_an_object(
+    capsys, monkeypatch, tmp_path
+):
+    storage_dir = tmp_path / "evidence"
+    execution_dir = _real_execute_artifacts(capsys, monkeypatch, tmp_path, "exec_bad_obs_shape", storage_dir)
+    (execution_dir / "observations.jsonl").write_text('"just a string"\n', encoding="utf-8")
+
+    exit_code = cli.main(
+        [
+            "assemble-package",
+            "--execution-id",
+            "exec_bad_obs_shape",
+            "--storage-dir",
+            str(storage_dir),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--environment",
+            "sandbox",
+            "--authorization-reference",
+            "a",
+            "--scenario",
+            "s",
+            "--limitations",
+            "l",
+            "--next-action",
+            "n",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "bị sửa tay" in captured.err
+
+
+def test_cli_execute_persist_actions_fails_cleanly_when_existing_actions_json_is_malformed(
+    capsys, monkeypatch, tmp_path
+):
+    # Real gap found via independent review: actions.json is operator-
+    # editable between 2 `execute` calls reusing the same execution_id (a
+    # supported pattern) — an accidental hand-edit that breaks its
+    # list-of-objects shape crashed `item["action_id"]` with a raw
+    # TypeError/KeyError instead of a clean CliError.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+    storage_dir = tmp_path / "evidence"
+    execution_id = "exec_reused_bad_actions"
+    execution_dir = storage_dir / execution_id
+    execution_dir.mkdir(parents=True)
+    (execution_dir / "actions.json").write_text(json.dumps({"not": "a list"}), encoding="utf-8")
+
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "bị sửa tay" in captured.err
+
+
+def test_cli_identity_logins_rejects_a_non_object_entry(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: only the OUTER shape (dict)
+    # was checked — a value that isn't itself a JSON object reached
+    # `_IdentityLoginSpec(**cfg)` unguarded, raising a raw TypeError.
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _multi_identity_plan_file(tmp_path, hypothesis_id)
+
+    logins_file = tmp_path / "bad_logins.json"
+    logins_file.write_text(json.dumps({"owner": "typo'd string, not an object"}), encoding="utf-8")
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--identity-logins",
+            str(logins_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "phải là 1 JSON object" in captured.err
+
+
+def test_cli_execute_fails_cleanly_when_execution_status_write_fails(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: unguarded, unlike `report`
+    # --out's write — a disk-full/permission failure here happens AFTER
+    # every real HTTP request of the run already completed, so a raw
+    # traceback would also swallow the verdict printout.
+    import httpx
+    from pathlib import Path as _Path
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+    storage_dir = tmp_path / "evidence"
+
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+
+    real_write_text = _Path.write_text
+
+    def _broken_write_text(self, *args, **kwargs):
+        if self.name == "execution_status.json":
+            raise OSError("simulated disk failure")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "write_text", _broken_write_text)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            "exec_status_write_fails",
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "execution_status.json" in captured.err
+
+
 def test_cli_execute_without_plan_file_warns_when_revision_differs(capsys, monkeypatch, tmp_path):
     # Same _load_hypothesis_from_context_store warning already tested for
     # `plan` — this confirms `execute`'s OWN non---plan-file branch (its
@@ -4628,6 +5014,8 @@ def test_cli_retest_reports_disagreement_when_verdicts_actually_differ(capsys, m
             "POST http://host.docker.internal:3000/notes params:content",
             "--allowed-action",
             "GET http://host.docker.internal:3000/notes/1",
+            "--role-identity",
+            "positive_control=owner",
             "--target-id",
             "tgt_test",
             "--target-revision-id",
@@ -5278,3 +5666,266 @@ def test_cli_measure_warns_when_allowed_action_is_passed_without_execution_id(ca
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "không có tác dụng" in captured.err
+
+
+def test_cli_report_renders_a_real_package_to_stdout(capsys, monkeypatch, tmp_path):
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_report_test"
+    storage_dir = tmp_path / "evidence"
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+
+    assert (
+        cli.main(
+            [
+                "execute",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--allowed-action",
+                "GET http://host.docker.internal:3000",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    package_file = tmp_path / "package.json"
+    assert (
+        cli.main(
+            [
+                "assemble-package",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--environment",
+                "sandbox",
+                "--authorization-reference",
+                "auth_local_test_1",
+                "--scenario",
+                "X-Content-Type-Options header missing on GET /",
+                "--limitations",
+                "Chỉ có role=main, thiếu positive/denied control.",
+                "--next-action",
+                "Không cần thêm.",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    package_file.write_text(capsys.readouterr().out, encoding="utf-8")
+
+    exit_code = cli.main(["report", "--package-file", str(package_file)])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "# Verification Package" in captured.out
+    assert "tgt_test" in captured.out
+    assert "X-Content-Type-Options header missing on GET /" in captured.out
+    assert "Limitations (đọc trước tiên" in captured.out
+
+
+def test_cli_report_writes_to_a_file_when_out_is_passed(capsys, monkeypatch, tmp_path):
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_report_out_test"
+    storage_dir = tmp_path / "evidence"
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+
+    assert (
+        cli.main(
+            [
+                "execute",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--allowed-action",
+                "GET http://host.docker.internal:3000",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    package_file = tmp_path / "package.json"
+    assert (
+        cli.main(
+            [
+                "assemble-package",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--environment",
+                "sandbox",
+                "--authorization-reference",
+                "auth_local_test_1",
+                "--scenario",
+                "s",
+                "--limitations",
+                "l",
+                "--next-action",
+                "n",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    package_file.write_text(capsys.readouterr().out, encoding="utf-8")
+
+    out_path = tmp_path / "report.md"
+    exit_code = cli.main(["report", "--package-file", str(package_file), "--out", str(out_path)])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == ""  # written to file, not stdout
+    assert "Đã ghi báo cáo Markdown" in captured.err
+    assert out_path.exists()
+    assert "# Verification Package" in out_path.read_text(encoding="utf-8")
+
+
+def test_cli_report_fails_cleanly_on_a_missing_file(capsys, tmp_path):
+    exit_code = cli.main(["report", "--package-file", str(tmp_path / "nope.json")])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "không tìm thấy" in captured.err
+
+
+def test_cli_report_fails_cleanly_when_package_top_level_is_not_an_object(capsys, tmp_path):
+    package_file = tmp_path / "bad.json"
+    package_file.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+    exit_code = cli.main(["report", "--package-file", str(package_file)])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "JSON object" in captured.err
+
+
+def test_cli_report_fails_cleanly_on_invalid_package_content(capsys, tmp_path):
+    package_file = tmp_path / "bad.json"
+    package_file.write_text(json.dumps({"package_id": "pkg_1"}), encoding="utf-8")
+    exit_code = cli.main(["report", "--package-file", str(package_file)])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "không phải VerificationPackage hợp lệ" in captured.err
+
+
+def test_cli_report_fails_cleanly_when_out_directory_does_not_exist(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: the --package-file read path
+    # is fully hardened (FileNotFoundError/JSONDecodeError/non-dict-shape/
+    # ValidationError all become a clean CliError), but the --out WRITE
+    # path had no equivalent handling — writing to a parent directory that
+    # doesn't exist crashed with a raw, uncaught FileNotFoundError instead
+    # of the command's own error/exit-1 contract.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_report_out_failure"
+    storage_dir = tmp_path / "evidence"
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+
+    assert (
+        cli.main(
+            [
+                "execute",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--allowed-action",
+                "GET http://host.docker.internal:3000",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    package_file = tmp_path / "package.json"
+    assert (
+        cli.main(
+            [
+                "assemble-package",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--environment",
+                "sandbox",
+                "--authorization-reference",
+                "auth_local_test_1",
+                "--scenario",
+                "s",
+                "--limitations",
+                "l",
+                "--next-action",
+                "n",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    package_file.write_text(capsys.readouterr().out, encoding="utf-8")
+
+    out_path = tmp_path / "no_such_directory" / "report.md"
+    exit_code = cli.main(["report", "--package-file", str(package_file), "--out", str(out_path)])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "không ghi được báo cáo" in captured.err

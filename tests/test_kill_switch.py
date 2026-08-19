@@ -366,6 +366,53 @@ def test_recovery_fails_safe_to_stopped_when_the_audit_log_has_a_corrupted_line(
     assert len(ks2.read_audit_log()) == 1
 
 
+def test_recovery_fails_safe_to_stopped_when_a_valid_json_line_is_missing_required_keys(tmp_path):
+    # Real gap found via independent review: a line can be VALID JSON yet
+    # still not a usable StopEvent — e.g. a log written by an older version
+    # of this module before `sequence` existed (added in a LATER review
+    # round than the original event shape), or a hand-edited log. Recovery
+    # used to index `e["sequence"]`/`e["event"]` directly once no line
+    # failed json.loads(), so a syntactically-valid-but-incomplete line
+    # crashed __init__ with a raw, uncaught KeyError instead of the
+    # documented fail-safe-to-STOPPED behavior malformed lines are supposed
+    # to get — worse than the already-fixed corrupted-line case, since it
+    # meant an operator's emergency `secweave kill` against an execution
+    # whose log has this shape would itself crash instead of stopping
+    # anything.
+    execution_id = "exec_missing_keys"
+    ks1 = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    ks1.start()
+
+    audit_log_path = ks1._audit_log_path
+    with open(audit_log_path, "a", encoding="utf-8") as f:
+        # Valid JSON, missing "sequence" entirely.
+        f.write('{"event": "start", "execution_id": "exec_missing_keys", "at": "2026-08-19T00:00:00Z"}\n')
+
+    ks2 = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))  # must not raise KeyError
+    assert ks2.status == ExecutionStatus.STOPPED  # fail safe, not RUNNING/PREPARED
+    assert ks2.is_stopped is True
+    assert len(ks2.read_audit_log()) == 2  # the malformed line is kept (not silently dropped), just flagged
+
+
+def test_recovery_fails_safe_to_stopped_when_a_line_is_valid_json_but_not_an_object(tmp_path):
+    # Same class of gap as the missing-keys case above, but for a line that
+    # parses as valid JSON yet isn't even a JSON OBJECT (e.g. a bare
+    # string) — `e.get("sequence", 0)` on a non-dict entry would itself
+    # crash with AttributeError inside the "already failed safe" recovery
+    # branch if such an entry were kept around uninspected.
+    execution_id = "exec_non_dict_line"
+    ks1 = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    ks1.start()
+
+    audit_log_path = ks1._audit_log_path
+    with open(audit_log_path, "a", encoding="utf-8") as f:
+        f.write('"just a string, not an object"\n')
+
+    ks2 = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))  # must not raise
+    assert ks2.status == ExecutionStatus.STOPPED
+    assert len(ks2.read_audit_log()) == 1  # the non-dict line is dropped, not kept
+
+
 def test_recovery_fails_safe_to_stopped_on_a_genuine_sequence_tie(tmp_path):
     # Real gap found via independent review: `sequence` is a LOCAL counter
     # per instance, recovered from "current max in the log" — not a

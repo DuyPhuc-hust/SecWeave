@@ -107,13 +107,24 @@ class KillSwitch:
     only. It does NOT make it safe for multiple instances to be alive and
     mutating state AT THE SAME TIME — `self._lock` is a plain in-process
     `threading.Lock`, so it provides mutual exclusion only between calls made
-    through the SAME instance, never across two different instances (even in
-    the same process, let alone two OS processes both pointed at the same
-    storage_dir). Every call site in this codebase constructs exactly one
-    KillSwitch per execution_id within a single process, matching this
-    constraint; true cross-process concurrent safety (e.g. an OS-level file
-    lock, or an external coordination store) is a bigger mechanism this MVP
-    increment does not attempt.
+    through the SAME instance, never across two different instances, even
+    across 2 OS processes pointed at the same storage_dir/execution_id.
+
+    That last case is NOT hypothetical — this codebase's own `cli.py`
+    deliberately constructs a SEPARATE KillSwitch instance, in a SEPARATE
+    process, for `secweave kill`/`secweave resume` against an execution_id
+    that a DIFFERENT, already-running `secweave execute` process may still
+    hold its own instance for (an operator's emergency stop from another
+    terminal is the whole point of `kill` existing as its own command). The
+    `sequence`-based tie-break documented below exists specifically to make
+    STATUS RECOVERY correct across exactly that scenario (each instance's
+    audit-log write is still a single atomic OS-level append, and a genuine
+    sequence tie fails safe to STOPPED rather than guessing). What remains
+    genuinely out of scope is true fine-grained mutual exclusion DURING a
+    concurrent mutation across processes (e.g. an OS-level file lock, or an
+    external coordination store) — this MVP increment does not attempt that;
+    it only guarantees each instance's own recovery/append sequence is
+    internally correct and fails safe when ambiguous.
     """
 
     def __init__(
@@ -413,7 +424,7 @@ class KillSwitch:
             if not line:
                 continue
             try:
-                entries.append(json.loads(line))
+                entry = json.loads(line)
             except json.JSONDecodeError:
                 # Real gap found via independent review: __init__ used to
                 # call json.loads unconditionally through read_audit_log(),
@@ -424,6 +435,32 @@ class KillSwitch:
                 # crash is worse than one that recovers conservatively —
                 # see _recover_from_audit_log's fail-safe-to-STOPPED logic.
                 had_corrupt_line = True
+                continue
+            # Real gap found via independent review: a line can be VALID
+            # JSON yet still not a usable StopEvent — either not a JSON
+            # OBJECT at all (a bare string/number/list is valid JSON), or
+            # an object missing "sequence"/"event" (e.g. a hand-edited log,
+            # or a log written by an older version of this module before
+            # `sequence` existed — added in a later review round than the
+            # original event shape). `_recover_from_audit_log` indexes
+            # `e["sequence"]`/`e["event"]` directly on every entry in this
+            # list once `had_corrupt_line` is False, so either case used to
+            # raise a raw, uncaught KeyError/AttributeError instead of the
+            # documented fail-safe-to-STOPPED behavior malformed lines are
+            # supposed to get.
+            if not isinstance(entry, dict):
+                # Nothing dict-shaped to keep around — same treatment as a
+                # truly unparseable line just above.
+                had_corrupt_line = True
+                continue
+            if "sequence" not in entry or "event" not in entry:
+                # Still APPENDED (unlike the non-dict case above) — the
+                # STOPPED branch's own sequence counter (`e.get("sequence",
+                # 0)`, already defensive against a missing key) needs this
+                # entry's sequence counted too, or a legitimate entry
+                # logged after this one could collide with it.
+                had_corrupt_line = True
+            entries.append(entry)
         return entries, had_corrupt_line
 
     def _append_audit_log(self, event: StopEvent) -> None:

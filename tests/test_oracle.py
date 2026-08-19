@@ -238,12 +238,17 @@ def test_decide_runs_evaluate_predicates_and_assemble_verdict_together(tmp_path)
         _observation(
             tmp_path,
             role=ObservationRole.MAIN,
+            identity="attacker",
             access_result=AccessResult.GRANTED,
             response_contains_marker=True,
             request_contains_marker=False,
         ),
-        _observation(tmp_path, role=ObservationRole.POSITIVE_CONTROL, access_result=AccessResult.GRANTED),
-        _observation(tmp_path, role=ObservationRole.DENIED_CONTROL, access_result=AccessResult.DENIED),
+        _observation(
+            tmp_path, role=ObservationRole.POSITIVE_CONTROL, identity="owner", access_result=AccessResult.GRANTED
+        ),
+        _observation(
+            tmp_path, role=ObservationRole.DENIED_CONTROL, identity="stranger", access_result=AccessResult.DENIED
+        ),
     ]
     result = decide(observations, execution_status=COMPLETED)
     assert result.verdict == Verdict.CONFIRMED
@@ -260,12 +265,17 @@ def test_decide_is_inconclusive_when_execution_status_is_stopped_even_if_fully_s
         _observation(
             tmp_path,
             role=ObservationRole.MAIN,
+            identity="attacker",
             access_result=AccessResult.GRANTED,
             response_contains_marker=True,
             request_contains_marker=False,
         ),
-        _observation(tmp_path, role=ObservationRole.POSITIVE_CONTROL, access_result=AccessResult.GRANTED),
-        _observation(tmp_path, role=ObservationRole.DENIED_CONTROL, access_result=AccessResult.DENIED),
+        _observation(
+            tmp_path, role=ObservationRole.POSITIVE_CONTROL, identity="owner", access_result=AccessResult.GRANTED
+        ),
+        _observation(
+            tmp_path, role=ObservationRole.DENIED_CONTROL, identity="stranger", access_result=AccessResult.DENIED
+        ),
     ]
     result = decide(observations, execution_status=ExecutionStatus.STOPPED)
     assert result.verdict == Verdict.INCONCLUSIVE

@@ -104,17 +104,19 @@ class VerificationPackage(BaseModel):
     doc line by line without re-deriving a mapping.
     """
 
-    package_id: str  # 1. Package ID
-    target_id: str  # 2. Target
+    # Real gap found via independent review: these 4 identifier/reference
+    # fields had NO min_length constraint, unlike their siblings below
+    # (scenario/verdict_reason/limitations/next_action) — `secweave
+    # assemble-package --target-id "" --target-revision-id "" --authorization-
+    # reference "" ...` built and printed a fully "valid" VerificationPackage
+    # with 3 empty required-judgment fields, and package_id="" is equally
+    # nonsensical for a field whose stated purpose is "định danh duy nhất,
+    # dùng để trích dẫn" (SPEC §7 field #1). Same class of gap, same fix.
+    package_id: str = Field(min_length=1)  # 1. Package ID
+    target_id: str = Field(min_length=1)  # 2. Target
     environment: Environment  # 3. Environment
-    revision: str  # 4. Revision (target_revision_id)
-    authorization_reference: str  # 5. Authorization reference
-    # Real gap found via independent review: this required-judgment field
-    # was missing the min_length=1 constraint its siblings (verdict_reason/
-    # limitations/next_action, below) all have — an empty scenario silently
-    # passed straight through, including via `secweave assemble-package`'s
-    # --scenario flag (itself deliberately required with no CLI-level
-    # emptiness check either, relying on this model to be the real gate).
+    revision: str = Field(min_length=1)  # 4. Revision (target_revision_id)
+    authorization_reference: str = Field(min_length=1)  # 5. Authorization reference
     scenario: str = Field(min_length=1)  # 6. Scenario
     identities: List[str] = Field(min_length=1)  # 7. Identity (plural — a real run needs >=2 to have
     # a meaningful positive_control/denied_control pair; SPEC names this

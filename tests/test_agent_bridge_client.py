@@ -30,6 +30,36 @@ def test_generate_raises_if_agent_never_writes_response(tmp_path, monkeypatch):
         client.generate("some prompt")
 
 
+def test_generate_raises_a_clean_runtime_error_for_a_non_utf8_response_file(tmp_path, monkeypatch):
+    # Real gap found via independent review: this response file is hand-
+    # written/edited by a HUMAN (or another agent) in an arbitrary editor,
+    # not produced by this codebase — a BOM, smart quotes pasted from a
+    # non-UTF-8 source, or any stray invalid byte used to raise a raw,
+    # uncaught UnicodeDecodeError instead of the RuntimeError every cli.py
+    # call site around generate()/generate_many() actually catches.
+    client = AgentBridgeLLMClient(work_dir=str(tmp_path))
+
+    def _fake_wait(prompt_path, response_path):
+        response_path.write_bytes(b"\xff\xfe garbage \x80\x81")
+
+    monkeypatch.setattr(client, "_wait_for_agent", _fake_wait)
+
+    with pytest.raises(RuntimeError, match="UTF-8"):
+        client.generate("some prompt")
+
+
+def test_generate_many_raises_a_clean_runtime_error_for_a_non_utf8_response_file(tmp_path, monkeypatch):
+    client = AgentBridgeLLMClient(work_dir=str(tmp_path))
+
+    def _fake_wait(prompt_path, response_path):
+        response_path.write_bytes(b"\xff\xfe garbage \x80\x81")
+
+    monkeypatch.setattr(client, "_wait_for_agent", _fake_wait)
+
+    with pytest.raises(RuntimeError, match="UTF-8"):
+        client.generate_many(["prompt 1"])
+
+
 def test_generate_uses_incrementing_file_names_per_call(tmp_path, monkeypatch):
     client = AgentBridgeLLMClient(work_dir=str(tmp_path))
 

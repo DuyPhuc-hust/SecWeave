@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from urllib.parse import unquote, urlsplit
@@ -52,6 +53,20 @@ def _decode_path_safely(path: str) -> Optional[str]:
     a single {id}-style path segment). Denies outright if decoding hasn't
     stabilized within _MAX_DECODE_PASSES rounds, rather than risk matching
     against a still-partially-encoded string.
+
+    Also denies if Unicode NFKC normalization of the decoded path reveals a
+    "/", "\\", or "."/".." segment not present in the un-normalized form —
+    real bypass found via independent review: a compatibility-equivalent
+    character such as U+FF0F FULLWIDTH SOLIDUS ("／") contains no literal
+    ASCII "/"/"."/"\\", so the checks above pass it through unchanged as
+    one opaque {id}-style segment — but IIS/ASP.NET's "best-fit" mapping
+    and any NFKC-normalizing backend collapse it back to a literal "/"
+    before routing, letting "1／..／admin" reach the target as
+    "1/../admin", exactly the scope-escape this function exists to
+    prevent for the ASCII-encoding variants. Matching still happens
+    against the UN-normalized `decoded` (what actually goes out on the
+    wire via httpx) — normalization here is only used to DETECT a
+    lookalike separator, never to rewrite what's sent.
     """
     decoded = path
     for _ in range(_MAX_DECODE_PASSES):
@@ -66,6 +81,13 @@ def _decode_path_safely(path: str) -> Optional[str]:
     if "\\" in decoded:
         return None
     if any(segment in (".", "..") for segment in decoded.split("/")):
+        return None
+    normalized = unicodedata.normalize("NFKC", decoded)
+    if normalized.count("/") != decoded.count("/"):
+        return None
+    if "\\" in normalized:
+        return None
+    if any(segment in (".", "..") for segment in normalized.split("/")):
         return None
     return decoded
 

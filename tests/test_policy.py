@@ -338,6 +338,36 @@ def test_double_percent_encoded_but_harmless_id_segment_is_still_allowed():
     assert decision.allowed is True
 
 
+def test_unicode_fullwidth_solidus_traversal_segment_is_denied():
+    # Real bypass found via independent review: U+FF0F FULLWIDTH SOLIDUS
+    # ("／") contains no literal ASCII "/"/"."/"\\", so the existing checks
+    # (slash-count, backslash, dot-segment) all pass it through unchanged
+    # as one opaque {id}-style segment — but IIS/ASP.NET's "best-fit"
+    # mapping and any NFKC-normalizing backend collapse it back to a
+    # literal "/" before routing, so "1／..／admin" would actually reach the
+    # target as "1/../admin", exactly the scope-escape this function exists
+    # to prevent for the ASCII-encoding variants above.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id}"]
+    )
+    action = _action(target="https://staging.example.com/api/objects/1／..／admin")
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is False
+
+
+def test_ordinary_unicode_segment_that_does_not_normalize_into_a_separator_is_still_allowed():
+    # The NFKC-based lookalike-separator check must not deny an ordinary
+    # non-ASCII path segment that has nothing to do with a separator —
+    # e.g. a real full-width digit, which NFKC-normalizes to a plain ASCII
+    # digit but never introduces a new "/"/"."/"\\".
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id}"]
+    )
+    action = _action(target="https://staging.example.com/api/objects/１２３")  # "123" full-width
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is True
+
+
 def test_action_with_query_string_smuggled_directly_in_target_is_denied():
     # Real bypass found via review: the parameters-check above only looks at
     # ActionSpec.parameters — a query string embedded directly in
