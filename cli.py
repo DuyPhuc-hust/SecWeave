@@ -873,29 +873,32 @@ def _run_execute(args: argparse.Namespace) -> int:
     )
     harness_storage_dir = Path(args.storage_dir) / execution_id  # matches EvidenceHarness's own layout
 
-    # Persisted so a later, separate `secweave assemble-package` invocation
-    # can reconstruct VerificationPackage's `actions` input (SPEC §7 field
-    # #9) without needing the original --plan-file to still be lying
-    # around. MERGED with whatever's already on disk (by action_id), not
-    # overwritten — real gap found via independent review: reusing one
-    # execution_id across multiple `execute` calls with DIFFERENT plans is
-    # an explicitly supported pattern elsewhere in this codebase (kill-
-    # switch RUNNING-continuation branch, CostService cap accumulation —
-    # see this function's own comment above on kill_switch.status), and
-    # observations.jsonl already accumulates across such calls. Overwriting
-    # actions.json with only THIS invocation's actions permanently and
-    # unrecoverably broke `assemble-package` for exactly that pattern — an
-    # earlier call's ActionSpec, still referenced by an earlier
-    # observation's action_ref, would vanish from the file entirely.
     actions_path = harness_storage_dir / "actions.json"
-    existing_actions_raw = json.loads(actions_path.read_text(encoding="utf-8")) if actions_path.exists() else []
-    existing_action_ids = {item["action_id"] for item in existing_actions_raw}
-    merged_actions_raw = existing_actions_raw + [
-        action.model_dump(mode="json")
-        for action in plan_result.plan.actions
-        if action.action_id not in existing_action_ids
-    ]
-    actions_path.write_text(json.dumps(merged_actions_raw, indent=2), encoding="utf-8")
+
+    def _persist_actions(new_actions: List[ActionSpec]) -> None:
+        # Persisted so a later, separate `secweave assemble-package`
+        # invocation can reconstruct VerificationPackage's `actions` input
+        # (SPEC §7 field #9) without needing the original --plan-file to
+        # still be lying around. MERGED with whatever's already on disk (by
+        # action_id), not overwritten — real gap found via independent
+        # review: reusing one execution_id across multiple `execute` calls
+        # with DIFFERENT plans is an explicitly supported pattern elsewhere
+        # in this codebase (kill-switch RUNNING-continuation branch,
+        # CostService cap accumulation — see this function's own comment
+        # above on kill_switch.status), and observations.jsonl already
+        # accumulates across such calls. Overwriting actions.json with only
+        # THIS invocation's actions permanently and unrecoverably broke
+        # `assemble-package` for exactly that pattern — an earlier call's
+        # ActionSpec, still referenced by an earlier observation's
+        # action_ref, would vanish from the file entirely.
+        existing_actions_raw = json.loads(actions_path.read_text(encoding="utf-8")) if actions_path.exists() else []
+        existing_action_ids = {item["action_id"] for item in existing_actions_raw}
+        merged_actions_raw = existing_actions_raw + [
+            action.model_dump(mode="json") for action in new_actions if action.action_id not in existing_action_ids
+        ]
+        actions_path.write_text(json.dumps(merged_actions_raw, indent=2), encoding="utf-8")
+
+    _persist_actions(plan_result.plan.actions)
 
     print(f"-> execution_id: {execution_id}")
     role_identity_desc = ", ".join(f"{role.value}={label}" for role, label in role_identity.items())
@@ -958,16 +961,39 @@ def _run_execute(args: argparse.Namespace) -> int:
         identities_needing_login = sorted({args.identity, *relevant_labels} & identity_logins.keys())
         for label in identities_needing_login:
             login_spec = identity_logins[label]
+            login_action = ActionSpec(
+                type=ActionType.TEST_DATA_CREATION,
+                method=login_spec.method,
+                target=login_spec.target,
+                description=login_spec.description or f"Log in as identity '{label}'.",
+                parameters=login_spec.parameters,
+                # Real gap found while running this end-to-end: without
+                # this, ActionSpec.role defaulted to MAIN — but
+                # harness.login() ALWAYS internally captures with
+                # role=SETUP regardless of what the ActionSpec itself
+                # says, so the persisted action_record entry would claim
+                # role=main for an action whose own observation says
+                # role=setup — a confusing, misleading mismatch for
+                # anyone reading the assembled package later.
+                role=ObservationRole.SETUP,
+            )
+            # Real gap found while running this end-to-end: login_action's
+            # action_id is freshly auto-generated here (ActionSpec.action_id
+            # defaults to a new id, never supplied by the operator) and
+            # NEVER appeared anywhere in plan_result.plan.actions — so
+            # without this call, assemble-package would later reject the
+            # WHOLE package with "action_record thiếu ActionSpec cho
+            # action_ref" the moment it tried to reconstruct action_record
+            # for this login's own (role=setup) observation. Persisted
+            # (not just attempted) even if the login itself fails below —
+            # matches how plan_result.plan.actions is persisted regardless
+            # of whether every one of them ends up producing an
+            # observation.
+            _persist_actions([login_action])
             try:
                 login_observation = harness.login(
                     label,
-                    ActionSpec(
-                        type=ActionType.TEST_DATA_CREATION,
-                        method=login_spec.method,
-                        target=login_spec.target,
-                        description=login_spec.description or f"Log in as identity '{label}'.",
-                        parameters=login_spec.parameters,
-                    ),
+                    login_action,
                     token_json_path=login_spec.token_json_path,
                     token_header=login_spec.token_header,
                     token_prefix=login_spec.token_prefix,

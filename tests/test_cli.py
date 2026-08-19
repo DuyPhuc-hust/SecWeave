@@ -2840,6 +2840,123 @@ def test_cli_assemble_package_builds_a_real_package_from_a_real_execute_run(caps
     assert package["verdict"] == "inconclusive"  # only role=main, no controls
 
 
+def test_cli_assemble_package_works_after_a_multi_identity_execute_run(capsys, monkeypatch, tmp_path):
+    # Real gap found while running the whole pipeline live end-to-end
+    # (not caught by any prior unit/CLI test): login()'s own ActionSpec is
+    # built fresh inside _run_execute's login step with an
+    # auto-generated action_id that never appears in
+    # plan_result.plan.actions — before this fix, actions.json (persisted
+    # right after the harness is built) never included it, so
+    # assemble-package would reject the WHOLE package with "action_record
+    # thiếu ActionSpec cho action_ref" the moment a plan used
+    # --identity-logins at all. Also checks the login ActionSpec's OWN
+    # `role` field: it used to default to MAIN (ActionSpec's default) even
+    # though harness.login() always actually captures with role=SETUP —
+    # a misleading action_record entry claiming role=main for an action
+    # whose own observation says role=setup.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_assemble_multi_identity_test"
+    storage_dir = tmp_path / "evidence"
+    plan_file = _multi_identity_plan_file(tmp_path, hypothesis_id)
+
+    logins_file = tmp_path / "logins.json"
+    logins_file.write_text(
+        json.dumps(
+            {
+                "owner": {
+                    "method": "POST",
+                    "target": "http://host.docker.internal:3000/login",
+                    "parameters": {"email": "owner@test", "password": "pw1"},
+                    "token_json_path": "token",
+                },
+                "attacker": {
+                    "method": "POST",
+                    "target": "http://host.docker.internal:3000/login",
+                    "parameters": {"email": "attacker@test", "password": "pw2"},
+                    "token_json_path": "token",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            body = json.loads(request.content)
+            token = "owner-token" if body["email"] == "owner@test" else "attacker-token"
+            return httpx.Response(200, json={"token": token})
+        auth = request.headers.get("Authorization")
+        return httpx.Response(200 if auth == "Bearer owner-token" else 403, json={})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    execute_exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--role-identity",
+            "positive_control=owner",
+            "--role-identity",
+            "denied_control=attacker",
+            "--identity-logins",
+            str(logins_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert execute_exit_code == 0
+    capsys.readouterr()
+
+    exit_code = cli.main(
+        [
+            "assemble-package",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--environment",
+            "sandbox",
+            "--authorization-reference",
+            "auth_local_test_1",
+            "--scenario",
+            "IDOR via multi-identity 3-role scenario",
+            "--limitations",
+            "x",
+            "--next-action",
+            "x",
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    package = json.loads(captured.out)
+    assert len(package["action_record"]) == 4  # 2 plan actions + 2 login actions
+    login_actions = [a for a in package["action_record"] if a["method"] == "POST" and a["target"].endswith("/login")]
+    assert len(login_actions) == 2
+    assert all(a["role"] == "setup" for a in login_actions)
+
+
 def test_cli_assemble_package_fails_cleanly_when_execution_was_never_run(capsys, tmp_path):
     exit_code = cli.main(
         [
