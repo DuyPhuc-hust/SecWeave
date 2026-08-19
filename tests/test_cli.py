@@ -4737,4 +4737,544 @@ def test_cli_retest_surfaces_runs_that_captured_no_verdict_at_all(capsys, monkey
     assert summary["runs_with_no_verdict"] == 3
     assert summary["most_common_verdict"] is None
     assert summary["agreement_count"] == 0
-    assert summary["agreement_ratio"] == 0.0
+
+
+def test_cli_measure_requires_at_least_one_input(capsys):
+    exit_code = cli.main(["measure"])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "ít nhất 1" in captured.err
+
+
+def test_cli_measure_reports_schema_completeness_from_a_real_package_and_updates_after_release(
+    capsys, monkeypatch, tmp_path
+):
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_measure_schema"
+    storage_dir = tmp_path / "evidence"
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+
+    assert (
+        cli.main(
+            [
+                "execute",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--allowed-action",
+                "GET http://host.docker.internal:3000",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    package_file = tmp_path / "package.json"
+    assert (
+        cli.main(
+            [
+                "assemble-package",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--environment",
+                "sandbox",
+                "--authorization-reference",
+                "auth_local_test_1",
+                "--scenario",
+                "s",
+                "--limitations",
+                "l",
+                "--next-action",
+                "n",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    package_file.write_text(capsys.readouterr().out, encoding="utf-8")
+
+    # Freshly assembled — missing human_review_record + retest_reference.
+    exit_code = cli.main(["measure", "--package-file", str(package_file), "--format", "json"])
+    report = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert report["schema_completeness"]["is_release_ready"] is False
+    assert "human_review_record" in report["schema_completeness"]["missing_fields"]
+    assert "retest_reference" in report["schema_completeness"]["missing_fields"]
+    # ECS and "khả năng bàn giao" are always N/A, regardless of input.
+    assert report["ecs"]["status"].startswith("N/A")
+    assert report["khả_năng_bàn_giao"]["status"].startswith("N/A")
+
+    # Release it for real (Gate 4 minimal loop), then re-measure the SAME
+    # underlying execution — schema completeness must flip to ready.
+    assert (
+        cli.main(
+            [
+                "review-package",
+                "--package-file",
+                str(package_file),
+                "--reviewer",
+                "qa1",
+                "--decision",
+                "release",
+                "--reason",
+                "ok",
+                "--checked-raw-artifact",
+                "--context-db",
+                db_path,
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    reviewed_output = capsys.readouterr().out
+    # review-package doesn't persist retest_reference unless --decision retest;
+    # simulate a package that already carries one (as a real release-ready
+    # candidate would, per VerificationPackage field #19) by injecting it
+    # directly into the package JSON before re-measuring.
+    reviewed = json.loads(reviewed_output)
+    reviewed["retest_reference"] = "retest_dummy_1"
+    package_file.write_text(json.dumps(reviewed), encoding="utf-8")
+
+    exit_code = cli.main(["measure", "--package-file", str(package_file), "--format", "json"])
+    report = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert report["schema_completeness"] == {"is_release_ready": True, "missing_fields": []}
+
+
+def test_cli_measure_fails_cleanly_on_a_malformed_package_file(capsys, tmp_path):
+    package_file = tmp_path / "bad.json"
+    package_file.write_text("not json", encoding="utf-8")
+    exit_code = cli.main(["measure", "--package-file", str(package_file)])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "JSON hợp lệ" in captured.err
+
+
+def test_cli_measure_reports_reproducibility_from_a_real_retest_run_and_cross_checks_raw_artifact(
+    capsys, monkeypatch, tmp_path
+):
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+    storage_dir = tmp_path / "evidence"
+
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+
+    assert (
+        cli.main(
+            [
+                "retest",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--runs",
+                "2",
+                "--allowed-action",
+                "GET http://host.docker.internal:3000",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                "exec_measure_retest",
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    summary_path = storage_dir / "exec_measure_retest_retest_summary.json"
+    exit_code = cli.main(
+        [
+            "measure",
+            "--retest-summary",
+            str(summary_path),
+            "--storage-dir",
+            str(storage_dir),
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert exit_code == 0
+    assert report["reproducibility"]["cross_checked_against_raw_artifact"] == 2
+    assert report["reproducibility"]["agreement_ratio"] == 1.0
+    assert "WARNING_mismatch_with_raw_artifact" not in report["reproducibility"]
+    assert "CẢNH BÁO" not in captured.err
+    # control effectiveness untouched since --execution-id wasn't passed.
+    assert report["control_effectiveness"]["status"].startswith("N/A")
+
+
+def test_cli_measure_warns_on_a_tampered_retest_summary_without_hard_failing(capsys, monkeypatch, tmp_path):
+    # measure is a REPORTING command, not a release gate (that's
+    # review-package's job) — a mismatch between what the summary claims and
+    # what the raw artifact actually says must be surfaced loudly, but must
+    # NOT make the whole report unusable the way review-package's hard
+    # rejection would for a promotion decision.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+    storage_dir = tmp_path / "evidence"
+
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+
+    assert (
+        cli.main(
+            [
+                "retest",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--runs",
+                "2",
+                "--allowed-action",
+                "GET http://host.docker.internal:3000",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                "exec_measure_tampered",
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    summary_path = storage_dir / "exec_measure_tampered_retest_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["results"][0]["verdict"] = "confirmed"  # real verdict for a single GET, role=main run is inconclusive
+    summary["agreement_count"] = 2
+    summary["agreement_ratio"] = 1.0
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    exit_code = cli.main(
+        [
+            "measure",
+            "--retest-summary",
+            str(summary_path),
+            "--storage-dir",
+            str(storage_dir),
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert exit_code == 0  # a warning, not a hard failure
+    assert len(report["reproducibility"]["WARNING_mismatch_with_raw_artifact"]) == 1
+    assert report["reproducibility"]["WARNING_mismatch_with_raw_artifact"][0]["khai_trong_summary"] == "confirmed"
+    assert report["reproducibility"]["WARNING_mismatch_with_raw_artifact"][0]["tinh_lai_tu_raw_artifact"] == "inconclusive"
+    assert "CẢNH BÁO" in captured.err
+
+
+def test_cli_measure_rejects_a_retest_summary_missing_required_fields(capsys, tmp_path):
+    summary_path = tmp_path / "bad_summary.json"
+    summary_path.write_text(json.dumps({"runs": 2}), encoding="utf-8")
+    exit_code = cli.main(["measure", "--retest-summary", str(summary_path)])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "thiếu field" in captured.err
+
+
+def test_cli_measure_rejects_a_retest_summary_with_a_non_numeric_agreement_ratio(capsys, tmp_path):
+    summary_path = tmp_path / "bad_summary.json"
+    summary_path.write_text(
+        json.dumps({"runs": 2, "agreement_ratio": "lots", "meets_recommended_threshold": True, "results": []}),
+        encoding="utf-8",
+    )
+    exit_code = cli.main(["measure", "--retest-summary", str(summary_path)])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "agreement_ratio phải là số" in captured.err
+
+
+def test_cli_measure_reports_control_effectiveness_from_a_real_execute_run_and_flags_actions_outside_allowlist(
+    capsys, monkeypatch, tmp_path
+):
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_measure_control"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/",
+                                "description": "in-scope read",
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/other",
+                                "description": "NOT in the allowlist passed to `measure` below",
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+
+    assert (
+        cli.main(
+            [
+                "execute",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--allowed-action",
+                "GET http://host.docker.internal:3000/",
+                "--allowed-action",
+                "GET http://host.docker.internal:3000/other",
+                "--cap",
+                "5",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    # Re-verify against a NARROWER allowlist than the one execute actually
+    # used (simulating a later, stricter audit of what was allowed at the
+    # time) — the 2nd action must show up as outside allowlist.
+    exit_code = cli.main(
+        [
+            "measure",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/",
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert exit_code == 0
+    ce = report["control_effectiveness"]
+    assert ce["total_actions"] == 2
+    assert ce["actions_outside_allowlist_count"] == 1
+    assert ce["actions_outside_allowlist"] == ["GET http://host.docker.internal:3000/other"]
+    assert ce["cost"]["executed_action_count"] == 2
+    assert ce["cost"]["cap"] == 5
+    assert ce["kill_switch"]["automatic_threshold_stops"] == 0
+
+    # Without --allowed-action at all, the allowlist check is reported as
+    # not attempted (N/A), not silently 0 (which would look like "verified
+    # clean" when nothing was actually checked).
+    exit_code = cli.main(
+        [
+            "measure",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--format",
+            "json",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert report["control_effectiveness"]["actions_outside_allowlist_count"] == "N/A — không truyền --allowed-action"
+
+
+def test_cli_measure_fails_cleanly_when_execution_id_was_never_run(capsys, tmp_path):
+    exit_code = cli.main(
+        [
+            "measure",
+            "--execution-id",
+            "exec_never_ran",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "actions.json" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_measure_fails_cleanly_when_package_file_top_level_is_not_an_object(capsys, tmp_path):
+    # Real gap found via independent review: valid JSON whose top level is a
+    # list (not an object) crashed VerificationPackage(**package_data) with
+    # a raw, uncaught TypeError ("argument after ** must be a mapping, not
+    # list") instead of the command's own error/exit-1 contract — a
+    # realistic mistake for a reporting tool pointed at an arbitrary file
+    # (wrong file picked, hand-edited, truncated).
+    package_file = tmp_path / "not_an_object.json"
+    package_file.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+    exit_code = cli.main(["measure", "--package-file", str(package_file)])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "JSON object" in captured.err
+
+
+def test_cli_measure_fails_cleanly_when_retest_summary_results_entries_are_not_objects(capsys, tmp_path):
+    # Real gap found via independent review: "results" entries that parse as
+    # valid JSON but aren't dicts (e.g. plain strings) crashed
+    # entry.get("execution_id") with a raw, uncaught AttributeError instead
+    # of failing cleanly.
+    summary_path = tmp_path / "bad_results.json"
+    summary_path.write_text(
+        json.dumps(
+            {"runs": 1, "agreement_ratio": 1.0, "meets_recommended_threshold": True, "results": ["oops"]}
+        ),
+        encoding="utf-8",
+    )
+    exit_code = cli.main(["measure", "--retest-summary", str(summary_path)])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "results phải là" in captured.err
+
+
+def test_cli_measure_fails_cleanly_when_actions_json_top_level_is_not_a_list(capsys, tmp_path):
+    # Real gap found via independent review: an actions.json whose top level
+    # is a dict (not a list) iterated over its string KEYS in the list
+    # comprehension, crashing ActionSpec(**item) with a raw, uncaught
+    # TypeError instead of failing cleanly.
+    storage_dir = tmp_path / "evidence"
+    execution_dir = storage_dir / "exec_bad_actions"
+    execution_dir.mkdir(parents=True)
+    (execution_dir / "actions.json").write_text(json.dumps({"not": "a list"}), encoding="utf-8")
+    exit_code = cli.main(
+        ["measure", "--execution-id", "exec_bad_actions", "--storage-dir", str(storage_dir)]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "danh sách ActionSpec" in captured.err
+
+
+def test_cli_measure_warns_explicitly_when_reproducibility_cross_check_finds_no_matching_execution_dir(
+    capsys, tmp_path
+):
+    # Real gap found via independent review: if --storage-dir doesn't
+    # contain ANY of the execution dirs a retest summary references (wrong
+    # dir passed, or artifacts since cleaned up), cross_checked_against_
+    # raw_artifact silently comes out as 0 with no WARNING key and no
+    # distinguishing signal from "checked everything, 100% agreement" — a
+    # JSON consumer would misread an entirely UNVERIFIED summary as
+    # confirmed. Must surface this loudly instead.
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "runs": 2,
+                "agreement_ratio": 1.0,
+                "meets_recommended_threshold": True,
+                "results": [
+                    {"execution_id": "exec_a", "verdict": "confirmed"},
+                    {"execution_id": "exec_b", "verdict": "confirmed"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    empty_storage_dir = tmp_path / "totally_empty"
+    empty_storage_dir.mkdir()
+
+    exit_code = cli.main(
+        [
+            "measure",
+            "--retest-summary",
+            str(summary_path),
+            "--storage-dir",
+            str(empty_storage_dir),
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert exit_code == 0
+    assert report["reproducibility"]["cross_checked_against_raw_artifact"] == 0
+    assert "WARNING_could_not_cross_check_any_run" in report["reproducibility"]
+    assert "CẢNH BÁO" in captured.err
+
+
+def test_cli_measure_warns_when_allowed_action_is_passed_without_execution_id(capsys, tmp_path):
+    # Real gap found via independent review: --allowed-action silently had
+    # zero effect if --execution-id wasn't also passed (the whole control-
+    # effectiveness block is skipped) — an operator could believe their
+    # allowlist was checked when it never was.
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps({"runs": 0, "agreement_ratio": 0, "meets_recommended_threshold": True, "results": []}),
+        encoding="utf-8",
+    )
+    exit_code = cli.main(
+        ["measure", "--retest-summary", str(summary_path), "--allowed-action", "GET https://host/x"]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "không có tác dụng" in captured.err

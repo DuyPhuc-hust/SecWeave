@@ -104,6 +104,12 @@ Review độc lập tìm 1 lỗi thật + 1 gap liền kề đáng ghi nhận + 
 
 Review độc lập tìm 2 gap nhỏ, cả 2 đã sửa: (1) `plan` chấp nhận `--target-id ""`/`--target-revision-id ""` (chuỗi rỗng) và âm thầm bỏ qua luôn việc đối chiếu — giống hệt None, không có cách nào phân biệt "cố tình không đối chiếu" với "lỗi script quên gán biến" — sửa bằng từ chối tường minh (`CliError`) ngay trong `_load_hypothesis_from_context_store()`, áp dụng chung cho cả `plan` lẫn `execute`; (2) chưa có test nào cho trường hợp CẢ target_id lẫn revision cùng khác (ca thực tế nhất — 1 target khác hẳn tự nhiên có revision không liên quan) để xác nhận đúng cảnh báo target_id thắng, không phải revision. 9 test mới, 578/578 test pass.
 
+**`secweave measure` — gộp báo cáo chỉ số SPEC §8.1 (2026-08-19)**: SPEC §8.1 liệt kê 5 dòng chỉ số (dù header ghi "bốn nhóm") nằm rải rác ở nhiều nơi khác nhau — lệnh mới `measure` gộp lại thành 1 báo cáo, KHÔNG tính lại logic ở bất kỳ đâu (chỉ đọc lại số liệu THẬT đã có sẵn, đúng nguyên tắc "ưu tiên nguồn có sẵn"): (1) schema completeness đọc `--package-file`, gọi thẳng `VerificationPackage.missing_fields_for_release()` đã có; (2) ECS luôn báo N/A — SPEC ghi rõ "Proposed/TBD", không có rubric nào để tính; (3) reproducibility đọc `--retest-summary` (file `secweave retest` sinh ra), đối chiếu lại (best-effort, chỉ CẢNH BÁO không chặn cứng — đây là báo cáo chứ không phải gate như `review-package`) verdict khai trong summary với verdict tính lại từ raw artifact thật qua `_read_verdict_for_execution()`; (4) control effectiveness đọc `--execution-id`, dùng lại ĐÚNG `is_allowed()` của Policy Service thật (không viết lại logic khớp allowlist) để đối chiếu `actions.json`, cộng với đọc `kill_switch_audit_log.jsonl`/`cost_audit_log.jsonl`; (5) "khả năng bàn giao" luôn N/A — cần runbook/con người test thật. Mỗi input tuỳ chọn, đo được gì thì đo.
+
+Xác nhận bằng dữ liệu THẬT (không chỉ mock): chạy trên các artifact có sẵn từ những lượt `execute`/`retest` thật trước đó trong phiên này — allowlist đầy đủ tham số đúng báo 0 action ngoài phạm vi, allowlist cố tình hẹp hơn báo đúng số action bị loại (kể cả phát hiện đúng rằng `is_allowed()` từ chối request có body non-rỗng nếu allowlist không khai `params:...` — hành vi ĐÚNG của Policy Service thật, không phải bug của `measure`).
+
+Review độc lập tìm 2 lỗi thật + 1 gap UX nhỏ, cả 3 đã sửa: (1) cả 3 chỗ đọc JSON (`--package-file`, `--retest-summary`'s `results`, `actions.json`) chỉ bắt `JSONDecodeError`/`ValidationError` — 1 file JSON hợp lệ nhưng SAI KIỂU ở tầng ngoài cùng (list thay vì object, hoặc ngược lại) khiến `Model(**data)`/`entry.get(...)` crash bằng `TypeError`/`AttributeError` thô, không qua được contract `error: ...` + exit 1 của lệnh — sửa bằng kiểm `isinstance` tường minh trước khi unpack, cho cả 3 chỗ; (2) khi KHÔNG lần retest nào trong `--retest-summary` đối chiếu được với raw artifact (vd `--storage-dir` sai, hoặc artifact đã bị dọn), `cross_checked_against_raw_artifact: 0` trông HỆT như "đã đối chiếu và khớp hoàn toàn" ở output JSON — không có field nào phân biệt "đã kiểm tra, khớp" với "chưa kiểm tra được gì cả" — sửa bằng thêm field cảnh báo riêng `WARNING_could_not_cross_check_any_run` + in cảnh báo ra stderr, cùng nguyên tắc với `actions_outside_allowlist_count` đã báo chuỗi "N/A" thay vì số `0` khi không có `--allowed-action`; (3) `--allowed-action` truyền mà không có `--execution-id` bị âm thầm bỏ qua, không cảnh báo gì — sửa bằng in cảnh báo rõ ràng. 5 test mới cho 3 gap trên (14 test tổng cho `measure`), 592/592 test pass.
+
 ## Cài đặt
 
 Yêu cầu Python 3.10+.
@@ -221,6 +227,18 @@ python cli.py mark-stale --target-id tgt_juiceshop \
   --reason "Target đã đổi revision, ngữ cảnh cũ có thể không còn đúng." \
   --context-db .secweave/context.db
 ```
+
+**12. Tổng hợp chỉ số SPEC §8.1 vào 1 báo cáo (`measure`)**:
+```bash
+python cli.py measure \
+  --package-file package.json \
+  --retest-summary .secweave/evidence/exec_demo_1_retest_summary.json \
+  --execution-id exec_demo_1 \
+  --storage-dir .secweave/evidence \
+  --allowed-action "GET https://host.docker.internal:3000/rest/user/whoami" \
+  --format json
+```
+Mỗi input tuỳ chọn (đo được gì thì đo, không có gì báo N/A chứ không giả định) — không cần chạy đúng 1 lần với đủ cả 3, có thể gọi riêng lẻ để đo từng chỉ số. `--execution-id` không truyền thì `--allowed-action` bị bỏ qua (chỉ dùng để đối chiếu allowlist với `actions.json` của 1 execution cụ thể).
 
 Mỗi lệnh có `--help` riêng để xem đầy đủ tuỳ chọn.
 
