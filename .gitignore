@@ -13,3 +13,4 @@ venv/
 .secweave_agent_bridge/
 .env
 .DS_Store
+.vscode/
