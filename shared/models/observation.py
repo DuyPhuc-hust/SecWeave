@@ -60,13 +60,6 @@ redesign knows what to scrutinize hardest):
   Naming the other 4 here is cheap and keeps the schema from silently
   assuming HTTP is the only channel that will ever exist, but constructing
   an observation for one of them would need real Harness work first.
-- UPDATE (2026-08-19): the "no field says which role an action serves"
-  gap described above is now closed — ActionSpec.role (shared/models/
-  action.py) lets Exploit Agent tag main/positive_control/denied_control/
-  setup when it designs a 3-role plan; cli.py's `execute` reads it instead
-  of hardcoding role=main. ActionSpec.action_id (also shared/models/
-  action.py) was already closed before that — it's what Evidence Harness
-  writes into action_ref.
 """
 
 BLIND_MARKER_PLACEHOLDER = "{{SECWEAVE_BLIND_MARKER}}"
@@ -215,16 +208,16 @@ REQUIRED_PREDICATE_GROUPS = frozenset(
 
 
 def predicate_results_cover_all_required_groups(results: "List[PredicateResult]") -> bool:
-    """Real gap found via independent review: VerdictResult/VerificationPackage's
-    own "CONFIRMED requires all groups satisfied" validators only ever checked
-    `all(r.status == SATISFIED for r in results)` — vacuously true for a list
-    that's missing a group entirely (e.g. only MAIN, no positive_control/
-    denied_control at all), since there's nothing in a shorter list to be
-    anything OTHER than satisfied. verdict_oracle/oracle.py::assemble_verdict()
-    already enforces "exactly these 3 groups, no duplicates" for every verdict
-    it produces — this reproduces that same check as an independent model-level
-    backstop for any OTHER code path that builds/reloads these models directly
-    (a refactor, a JSON reload, a hand-built fixture) without going through
+    """VerdictResult/VerificationPackage's own "CONFIRMED requires all
+    groups satisfied" validators check `all(r.status == SATISFIED for r in
+    results)`, which is vacuously true for a list that's missing a group
+    entirely (e.g. only MAIN, no positive_control/denied_control at all) —
+    there's nothing in a shorter list to be anything OTHER than satisfied.
+    verdict_oracle/oracle.py::assemble_verdict() already enforces "exactly
+    these 3 groups, no duplicates" for every verdict it produces — this is
+    the same check as an independent model-level backstop for any OTHER
+    code path that builds/reloads these models directly (a refactor, a
+    JSON reload, a hand-built fixture) without going through
     assemble_verdict().
     """
     groups = [r.group for r in results]
@@ -256,11 +249,10 @@ class VerdictResult(BaseModel):
 
     @model_validator(mode="after")
     def _check_confirmed_requires_all_groups_satisfied(self) -> "VerdictResult":
-        # Real gap found via independent review: unlike PlanCheckResult/
-        # CostDecision/ActionPlanResult/HypothesisResult/RuntimeCostDecision/
-        # StopEvent (all of which enforce their own safety-critical field
-        # against the data it's derived from), VerdictResult had NO
-        # independent check at all — nothing stopped constructing
+        # Like PlanCheckResult/CostDecision/ActionPlanResult/
+        # HypothesisResult/RuntimeCostDecision/StopEvent, this model
+        # enforces its own safety-critical field against the data it's
+        # derived from — nothing else stops constructing
         # VerdictResult(verdict=CONFIRMED, predicate_results=[...an
         # UNSATISFIED positive_control...]), the exact failure mode SPEC
         # treats as never acceptable ("thiếu positive control thì không có

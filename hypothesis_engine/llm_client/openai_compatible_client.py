@@ -47,13 +47,12 @@ class OpenAICompatibleLLMClient(HypothesisLLMClient):
                 timeout=self._timeout,
             )
         except httpx.InvalidURL as exc:
-            # Real gap found via independent review: a malformed
-            # LLM_BASE_URL (a bad port, a stray control character) raises
-            # httpx.InvalidURL — NOT a subclass of httpx.HTTPError, so none
-            # of cli.py's `except (RuntimeError, httpx.HTTPError)` handlers
-            # caught it, crashing with a raw traceback instead of this
-            # module's otherwise-clean failure path. Same httpx quirk
-            # already found and fixed once in evidence_harness/harness.py.
+            # A malformed LLM_BASE_URL (a bad port, a stray control
+            # character) raises httpx.InvalidURL — NOT a subclass of
+            # httpx.HTTPError, so none of cli.py's
+            # `except (RuntimeError, httpx.HTTPError)` handlers catch it,
+            # which would otherwise crash with a raw traceback instead of
+            # this module's clean failure path.
             raise RuntimeError(f"LLM_BASE_URL không hợp lệ ('{self._base_url}'): {exc}") from exc
         response.raise_for_status()
         try:
@@ -65,14 +64,13 @@ class OpenAICompatibleLLMClient(HypothesisLLMClient):
                 f"(thiếu choices[0].message.content): {exc}"
             ) from exc
         if not isinstance(content, str):
-            # Real gap found via independent review: a spec-compliant
-            # response where the assistant message carries content=null
-            # (e.g. a tool-call-only message, or a provider quirk) has the
-            # key PRESENT with value None — the dict access above succeeds
-            # with no exception, so this used to silently return None
-            # instead of a string, crashing every downstream caller
-            # (strip_markdown_json_fence) with an unrelated, confusing
-            # TypeError instead of this module's own clean RuntimeError.
+            # A spec-compliant response where the assistant message carries
+            # content=null (e.g. a tool-call-only message, or a provider
+            # quirk) has the key PRESENT with value None — the dict access
+            # above succeeds with no exception, so without this check a
+            # caller like strip_markdown_json_fence would get an unrelated,
+            # confusing TypeError instead of this module's own clean
+            # RuntimeError.
             raise RuntimeError(
                 f"Response từ LLM provider có choices[0].message.content không phải string "
                 f"(kiểu thực tế: {type(content).__name__}) — provider có thể trả tool-call thay vì text."

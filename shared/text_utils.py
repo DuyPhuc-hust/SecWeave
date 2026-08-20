@@ -40,26 +40,14 @@ def strip_markdown_json_fence(text: str, expected_keys: Optional[Iterable[str]] 
     whose parsed JSON is an object containing at least one of these keys —
     resolving ambiguity using information the CALLER already has (what
     shape its own real answer takes), rather than guessing from fence
-    position alone, which independent review found is not reliable in
-    either direction (see history below). Falls back to the position-only
-    heuristic when no fence's keys match (or `expected_keys` isn't given).
-
-    History of real gaps found via 2 rounds of independent review, both now
-    closed by the `expected_keys` mechanism above:
-    - Originally always took the FIRST fence unconditionally. A model can
-      legitimately quote suspicious text it noticed in untrusted input
-      (e.g. a hypothesis prompt's `source_snippet`, which the prompt itself
-      warns may contain adversarial content) BEFORE giving its real,
-      considered answer — a fake fence first, real answer second, had the
-      fake one extracted.
-    - The first fix (prefer the LAST fence that merely parses as valid
-      JSON, on the theory that "final answer last" is the common LLM
-      convention) just moved the failure to the OPPOSITE ordering: a real
-      answer first, followed by an unrelated-but-also-valid-JSON reference
-      example or illustration fence, had the trailing irrelevant block
-      win instead. Neither fence *position* is a reliable signal on its
-      own — whether a fence actually contains the field names the caller
-      is looking for is.
+    position alone. Neither "first fence" nor "last fence" is reliable on
+    its own: a model can legitimately quote suspicious text it noticed in
+    untrusted input (e.g. a hypothesis prompt's `source_snippet`, which the
+    prompt itself warns may contain adversarial content) before giving its
+    real answer, and a real answer can equally be followed by an
+    unrelated-but-also-valid-JSON reference/illustration fence. Falls back
+    to the position-only heuristic (last fence that's valid JSON) when no
+    fence's keys match (or `expected_keys` isn't given).
     """
     matches = list(_FENCE_PATTERN.finditer(text))
     if not matches:

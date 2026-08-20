@@ -3,11 +3,6 @@ predicate-group results from predicates.py into exactly one of the 3
 required verdicts. Pure rule code, no LLM (SPEC §4.4: "Rule code thuần,
 không gọi LLM").
 
-Until now this final combination step didn't exist anywhere in the codebase
-— evaluate_predicates() only produced the 3 per-group results, never the
-actual CONFIRMED/NOT_REPRODUCED/INCONCLUSIVE verdict the tier is named
-after. This module is that missing step.
-
 Mapping used below — grounded in SPEC §4.4.1/§4.4.2, with one interpretive
 call flagged explicitly:
 - Any group INSUFFICIENT_DATA -> INCONCLUSIVE. Directly matches §4.4.2's own
@@ -36,22 +31,17 @@ call flagged explicitly:
   CONFIRMED" (no exceptions) — satisfied here by construction, since
   reaching this branch already required positive_control SATISFIED.
 
-Two gaps found via a whole-project independent review (2026-08-15/16), fixed
-here and in predicates.py — neither had been caught by any prior review
-because no prior review had looked at this module from the specific angle
-of "what SPEC controls does this violate," only "is the predicate logic
-correct" (which it always was):
+Two more SPEC controls are enforced here, beyond the predicate-group mapping
+above:
 
 - SPEC §3.4's execution_status matrix: only `COMPLETED` can produce a final
   CONFIRMED/NOT_REPRODUCED verdict; `PREPARED`/`RUNNING` means no verdict
   yet, and `BLOCKED`/`STOPPED`/`ERROR` means no FINAL verification verdict —
-  "nếu một biểu mẫu buộc phải ghi gì đó thì chỉ được ghi INCONCLUSIVE."
-  `assemble_verdict()` didn't take execution_status as input at all before
-  this fix, so a run stopped by the kill-switch (shared/kill_switch.py)
-  could still produce CONFIRMED on whatever observations happened to be
-  captured before the stop. Now REQUIRED (no default) so no caller can
-  silently skip thinking about it — see the check right after group
-  validation below.
+  "nếu một biểu mẫu buộc phải ghi gì đó thì chỉ được ghi INCONCLUSIVE." A run
+  stopped by the kill-switch (shared/kill_switch.py) must not be able to
+  produce CONFIRMED on whatever observations happened to be captured before
+  the stop, so `execution_status` is REQUIRED (no default) — see the check
+  right after group validation below.
 - SPEC §6.4 control #8: "Hash không khớp thì không được CONFIRMED" — no
   exceptions in MVP. Implemented in predicates.py's evaluate_predicates(),
   not here: a hash mismatch (or unreadable raw evidence file) on any of the
@@ -94,8 +84,7 @@ def assemble_verdict(results: List[PredicateResult], execution_status: Execution
     callers, not only through evaluate_predicates() — a `by_group` dict
     built from a malformed list (a duplicate group, or one missing) must
     never silently pick an arbitrary interpretation for a verdict this
-    consequential (this codebase has a documented history of exactly this
-    dict-comprehension-silently-keeps-last-duplicate bug elsewhere).
+    consequential.
 
     `execution_status` is REQUIRED, not optional/defaulted — see this
     module's docstring for why (SPEC §3.4).

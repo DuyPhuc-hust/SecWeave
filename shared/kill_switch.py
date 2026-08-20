@@ -44,18 +44,16 @@ flagged here so a future reviewer knows what to scrutinize:
 
 - Every audit-log entry carries a `sequence` number, assigned atomically
   under `self._lock` at the moment of the real status transition — NOT the
-  same thing as physical file-append order. Real bug found via a second
-  independent review pass, after the first review's fix for the "slow
-  cleanup blocks other callers" problem (see stop()'s docstring) moved the
-  audit-log WRITE outside the lock: since a STOP's write only happens after
-  its (possibly slow) cleanup finishes, a concurrent RESUME on another
-  thread can have its write land in the file FIRST even though the STOP's
-  real transition happened first — so physical last-line-in-file is not a
-  safe proxy for "what happened last." `sequence` fixes this by being
-  assigned at transition time (fast, under the lock), decoupled from
-  whenever the slow I/O for that entry actually happens to complete; status
-  recovery (_recover_status_from_audit_log) picks the entry with the
-  MAX `sequence`, never just the physically-last line.
+  same thing as physical file-append order. Since stop()'s audit-log WRITE
+  happens outside the lock (see stop()'s docstring for why), and a STOP's
+  write only happens after its (possibly slow) cleanup finishes, a
+  concurrent RESUME on another thread can have its write land in the file
+  FIRST even though the STOP's real transition happened first — physical
+  last-line-in-file is not a safe proxy for "what happened last." `sequence`
+  fixes this by being assigned at transition time (fast, under the lock),
+  decoupled from whenever the slow I/O for that entry actually happens to
+  complete; status recovery (_recover_status_from_audit_log) picks the
+  entry with the MAX `sequence`, never just the physically-last line.
 """
 
 import json
@@ -148,16 +146,12 @@ class KillSwitch:
         self._audit_log_path = self._storage_dir / "kill_switch_audit_log.jsonl"
         self._cleanup = cleanup
         self._lock = threading.Lock()
-        # Real gap found via independent review: this used to hardcode
-        # PREPARED unconditionally, ignoring any audit log already on disk
-        # for this execution_id — so simply constructing a SECOND KillSwitch
-        # instance for an execution that was already STOPPED (a crash
-        # recovery, a separate CLI/API process, a worker restart — all
-        # explicitly anticipated by read_audit_log()'s own docstring) would
-        # silently reset it to PREPARED, letting start() succeed with zero
-        # record of authorization. Status is now derived from the audit
-        # log's last (by `sequence`, not file position — see module
-        # docstring) event, instead of always assuming "brand new".
+        # Derived from the audit log's last event (by `sequence`, not file
+        # position — see module docstring), not assumed PREPARED — a SECOND
+        # KillSwitch constructed for an execution that was already STOPPED
+        # (a crash recovery, a separate CLI/API process, a worker restart)
+        # must not silently reset to PREPARED and let start() succeed with
+        # zero record of authorization.
         self._status, self._sequence = self._recover_from_audit_log()
 
     def _recover_from_audit_log(self) -> Tuple[ExecutionStatus, int]:
@@ -180,25 +174,18 @@ class KillSwitch:
         max_sequence = max(e["sequence"] for e in entries)
         tied = [e for e in entries if e["sequence"] == max_sequence]
         if len(tied) > 1:
-            # Real gap found via independent review: `sequence` is a LOCAL
-            # counter per instance, recovered from "current max in the log"
-            # at construction/refresh() time — it is NOT a globally unique
-            # counter shared across instances. Two DIFFERENT KillSwitch
-            # instances (e.g. this process's own instance auto-stopping via
-            # CostService, racing an independent `secweave kill` CLI
-            # invocation pointed at the same execution_id/storage_dir) can
-            # each recover the SAME "last known sequence" before either has
-            # written its own next event, and independently compute the
-            # SAME next value — the exact ambiguity `sequence` was invented
-            # to eliminate, just recurring one layer up (at assignment time
-            # across instances, not just at write time within one). Picking
-            # via `max(entries, key=...)` in that case silently broke the
-            # tie by PHYSICAL FILE ORDER (Python's max() keeps the first-
-            # seen maximal element) — correlated with nothing meaningful.
-            # Fail safe the same way a corrupted line already does: treat a
-            # genuine sequence tie as an unresolvable ambiguity and assume
-            # the worst, STOPPED — a kill switch must never silently prefer
-            # RUNNING when it cannot actually tell which transition is real.
+            # `sequence` is a LOCAL counter per instance, recovered from
+            # "current max in the log" at construction/refresh() time — NOT
+            # a globally unique counter shared across instances. Two
+            # DIFFERENT KillSwitch instances (e.g. this process's own
+            # instance auto-stopping via CostService, racing an independent
+            # `secweave kill` CLI invocation) can each recover the SAME
+            # "last known sequence" before either has written its own next
+            # event, and independently compute the SAME next value. Fail
+            # safe the same way a corrupted line does: treat a genuine
+            # sequence tie as an unresolvable ambiguity and assume the
+            # worst, STOPPED — never silently prefer RUNNING when it can't
+            # actually tell which transition is real.
             return ExecutionStatus.STOPPED, max_sequence
         last = tied[0]
         if last["event"] in (AuditEventType.START.value, AuditEventType.RESUME.value):
@@ -284,19 +271,16 @@ class KillSwitch:
         StopSource.AUTOMATIC_THRESHOLD` (which of SPEC §6.3's 5 automatic
         conditions fired) and must be omitted for every human source, whose
         reason is free text instead — checked explicitly HERE, at the very
-        top, before touching `_status` or running cleanup. Real gap found
-        via independent review: StopEvent's own model validator enforces
-        the same rule, but only at CONSTRUCTION time — which used to happen
-        AFTER this method had already flipped `_status` to STOPPED and run
-        `self._cleanup()`. A caller that got the two arguments wrong (e.g.
-        forgot `automatic_threshold_reason`) would trigger real, irreversible
-        cleanup, yet the raised ValueError meant `_append_audit_log` was
-        never reached — so the audit log has NO record the stop (or cleanup)
-        ever happened, and a freshly-reconstructed KillSwitch for the same
-        execution_id would recover whatever status preceded this call,
-        silently resurrecting a run whose cleanup had already, irreversibly,
-        run. Validating here, before any state mutation at all, means a
-        misused call raises cleanly with NOTHING having happened yet.
+        top, before touching `_status` or running cleanup, not left to
+        StopEvent's own model validator at CONSTRUCTION time: by then this
+        method would already have flipped `_status` to STOPPED and run
+        `self._cleanup()`, so a caller that got the arguments wrong would
+        trigger real, irreversible cleanup with no audit-log record it ever
+        happened (`_append_audit_log` never reached) — a freshly-
+        reconstructed KillSwitch would recover whatever status preceded
+        this call, silently resurrecting a run whose cleanup had already
+        run. Validating here means a misused call raises cleanly with
+        NOTHING having happened yet.
 
         Thread-safe: if two sources call stop() at nearly the same time, the
         first to acquire the lock while status is not yet STOPPED wins — it
@@ -308,13 +292,11 @@ class KillSwitch:
 
         The lock is held ONLY for the atomic check-and-flip of `_status` (and
         assigning this event's `sequence` number — see module docstring), not
-        for running cleanup or writing the audit log. Real gap found via
-        independent review: holding the lock across `self._cleanup()` meant
-        a slow or hanging cleanup from the WINNING caller would block every
-        OTHER source's stop() call from returning or being logged at all,
-        for as long as that cleanup took — exactly the failure mode a kill
-        switch must never have (a second source trying to stop things should
-        never be made to wait on the first source's cleanup).
+        for running cleanup or writing the audit log — holding it across
+        `self._cleanup()` would let a slow or hanging cleanup from the
+        WINNING caller block every OTHER source's stop() call from
+        returning or being logged, exactly the failure mode a kill switch
+        must never have.
         """
         if source == StopSource.AUTOMATIC_THRESHOLD and automatic_threshold_reason is None:
             raise ValueError(
@@ -426,28 +408,21 @@ class KillSwitch:
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
-                # Real gap found via independent review: __init__ used to
-                # call json.loads unconditionally through read_audit_log(),
-                # so ANY corrupted line (e.g. a write torn by a hard crash —
-                # the exact scenario recovery exists for) made it impossible
-                # to even CONSTRUCT a KillSwitch for that execution_id again.
-                # A safety mechanism that can't be instantiated after a
-                # crash is worse than one that recovers conservatively —
-                # see _recover_from_audit_log's fail-safe-to-STOPPED logic.
+                # A corrupted line (e.g. a write torn by a hard crash) must
+                # not make it impossible to even CONSTRUCT a KillSwitch for
+                # that execution_id again — a safety mechanism that can't
+                # be instantiated after a crash is worse than one that
+                # recovers conservatively (see _recover_from_audit_log's
+                # fail-safe-to-STOPPED logic).
                 had_corrupt_line = True
                 continue
-            # Real gap found via independent review: a line can be VALID
-            # JSON yet still not a usable StopEvent — either not a JSON
-            # OBJECT at all (a bare string/number/list is valid JSON), or
-            # an object missing "sequence"/"event" (e.g. a hand-edited log,
-            # or a log written by an older version of this module before
-            # `sequence` existed — added in a later review round than the
-            # original event shape). `_recover_from_audit_log` indexes
-            # `e["sequence"]`/`e["event"]` directly on every entry in this
-            # list once `had_corrupt_line` is False, so either case used to
-            # raise a raw, uncaught KeyError/AttributeError instead of the
-            # documented fail-safe-to-STOPPED behavior malformed lines are
-            # supposed to get.
+            # A line can be VALID JSON yet still not a usable StopEvent —
+            # either not a JSON OBJECT at all, or an object missing
+            # "sequence"/"event" (e.g. a hand-edited log, or one written by
+            # an older schema). `_recover_from_audit_log` indexes
+            # `e["sequence"]`/`e["event"]` directly on every entry once
+            # `had_corrupt_line` is False, so either case must be caught
+            # here rather than raising a raw KeyError/AttributeError there.
             if not isinstance(entry, dict):
                 # Nothing dict-shaped to keep around — same treatment as a
                 # truly unparseable line just above.
@@ -490,22 +465,19 @@ class KillSwitch:
             with open(self._audit_log_path, "a", encoding="utf-8") as f:
                 f.write(line)
         except OSError as exc:
-            # Real gap found via independent review: this had ZERO exception
-            # handling — a bare OSError (disk full, permission lost) used to
-            # escape uncaught out of start()/stop()/resume() with no context.
             # Deliberately NOT the same fix shape as CostService's analogous
-            # gap (write first, advance in-memory state only after success):
-            # by the time THIS is called, self._status has already flipped
-            # (start()/stop()/resume() all update _status INSIDE their own
-            # lock, before ever calling this) — for a kill switch specifically,
-            # that's the correct order regardless of persistence outcome, since
-            # this process's own in-memory `is_stopped` must never be blocked
-            # on a disk write succeeding. The real consequence of a failed
-            # write here is narrower but still real: a DIFFERENT instance
-            # (a restart, a separate `secweave kill`/`resume` invocation)
-            # reconstructing from this log later would have no record this
-            # transition ever happened. Re-raised as a clear RuntimeError so
-            # a caller sees that risk explicitly instead of a bare OSError.
+            # write-failure handling (write first, advance in-memory state
+            # only after success): by the time THIS is called, self._status
+            # has already flipped (start()/stop()/resume() update _status
+            # INSIDE their own lock, before ever calling this) — for a kill
+            # switch, that's the correct order regardless of persistence
+            # outcome, since this process's own in-memory `is_stopped` must
+            # never be blocked on a disk write succeeding. The real
+            # consequence of a failed write here is narrower but still
+            # real: a DIFFERENT instance (a restart, a separate `secweave
+            # kill`/`resume` invocation) reconstructing from this log later
+            # would have no record this transition ever happened — re-
+            # raised as a clear RuntimeError so a caller sees that risk.
             raise RuntimeError(
                 f"KillSwitch cho execution '{self._execution_id}': không ghi được audit log cho "
                 f"event '{event.event.value}' — {type(exc).__name__}: {exc}. Trạng thái trong bộ "

@@ -35,38 +35,33 @@ _MAX_DECODE_PASSES = 5
 
 def _decode_path_safely(path: str) -> Optional[str]:
     """Percent-decodes a URL path before matching it against an allowlist
-    path template. Real bypass found via independent review: matching the
-    RAW (still percent-encoded) path let a segment like "%2e%2e%2fadmin"
-    satisfy a "{id}" placeholder's `[^/]+` regex (no literal "/" in the raw
-    text) — but httpx sends the raw encoded path unchanged on the wire, and
-    the real target (or any proxy in front of it) may decode+normalize it
-    into "/api/objects/../admin" -> "/api/admin", escaping the allowlisted
-    scope entirely. Returns None (caller must deny) if decoding (up to
-    _MAX_DECODE_PASSES rounds, to also catch double-encoding like
-    "%252e%252e%252fadmin" — a second real bypass an independent review
-    found in the first, single-pass version of this function) reveals a
-    "/" that wasn't literally present in the ORIGINAL raw path (an encoded
+    path template. Matching the RAW (still percent-encoded) path would let
+    a segment like "%2e%2e%2fadmin" satisfy a "{id}" placeholder's `[^/]+`
+    regex (no literal "/" in the raw text) — but httpx sends the raw
+    encoded path unchanged on the wire, and the real target (or any proxy
+    in front of it) may decode+normalize it into "/api/objects/../admin"
+    -> "/api/admin", escaping the allowlisted scope entirely. Returns None
+    (caller must deny) if decoding (up to _MAX_DECODE_PASSES rounds, to
+    also catch double-encoding like "%252e%252e%252fadmin") reveals a "/"
+    that wasn't literally present in the ORIGINAL raw path (an encoded
     slash would change the segment structure the template was matched
-    against), a backslash (never legitimate here, and the exact separator
-    a Windows/IIS-style backend would treat as a path boundary — the
-    review's second finding), or a "."/".." segment (never legitimate for
+    against), a backslash (the separator a Windows/IIS-style backend would
+    treat as a path boundary), or a "."/".." segment (never legitimate for
     a single {id}-style path segment). Denies outright if decoding hasn't
     stabilized within _MAX_DECODE_PASSES rounds, rather than risk matching
     against a still-partially-encoded string.
 
     Also denies if Unicode NFKC normalization of the decoded path reveals a
     "/", "\\", or "."/".." segment not present in the un-normalized form —
-    real bypass found via independent review: a compatibility-equivalent
-    character such as U+FF0F FULLWIDTH SOLIDUS ("／") contains no literal
-    ASCII "/"/"."/"\\", so the checks above pass it through unchanged as
-    one opaque {id}-style segment — but IIS/ASP.NET's "best-fit" mapping
-    and any NFKC-normalizing backend collapse it back to a literal "/"
-    before routing, letting "1／..／admin" reach the target as
-    "1/../admin", exactly the scope-escape this function exists to
-    prevent for the ASCII-encoding variants. Matching still happens
-    against the UN-normalized `decoded` (what actually goes out on the
-    wire via httpx) — normalization here is only used to DETECT a
-    lookalike separator, never to rewrite what's sent.
+    a compatibility-equivalent character such as U+FF0F FULLWIDTH SOLIDUS
+    ("／") contains no literal ASCII "/"/"."/"\\", so the checks above pass
+    it through unchanged as one opaque {id}-style segment — but IIS/
+    ASP.NET's "best-fit" mapping and any NFKC-normalizing backend collapse
+    it back to a literal "/" before routing, letting "1／..／admin" reach
+    the target as "1/../admin". Matching still happens against the
+    UN-normalized `decoded` (what actually goes out on the wire via httpx)
+    — normalization here is only used to DETECT a lookalike separator,
+    never to rewrite what's sent.
     """
     decoded = path
     for _ in range(_MAX_DECODE_PASSES):
@@ -99,12 +94,11 @@ def _split_top_level_commas(text: str) -> List[str]:
     """Splits on commas that aren't nested inside {}, (), or [] — so a
     bounded-repetition quantifier like the "2,4" in "^a{2,4}$" (the single
     most natural way to write "N-digit id") survives intact instead of
-    being cut in half. Real bug found via independent review: a naive
-    text.split(",") silently mangled any key=regex pair using such a
-    quantifier into a near-useless truncated pattern (`^a{2`) AND created a
-    bogus extra allowlist key from the leftover text (`4}$`, mapped to "no
-    value constraint") — corrupting the operator's allowlist without ever
-    raising an error.
+    being cut in half. A naive text.split(",") would silently mangle any
+    key=regex pair using such a quantifier into a near-useless truncated
+    pattern (`^a{2`) AND create a bogus extra allowlist key from the
+    leftover text (`4}$`, mapped to "no value constraint") — corrupting
+    the operator's allowlist without ever raising an error.
     """
     parts = []
     depth = 0
@@ -161,32 +155,27 @@ def _parse_allowed_params(extra_tokens: List[str]) -> Optional[Dict[str, Optiona
 
 def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
     # allowed_action MUST be a full URL with scheme+host, in the form
-    # "METHOD https://host/path/template/{param}" — NOT just a path. Matching
-    # only the path (ignoring host) would let an action target any host as
-    # long as the path matches — equivalent to a scope-escape/SSRF
-    # vulnerability inside Policy Service itself (found and fixed — see
-    # tests/test_policy.py).
+    # "METHOD https://host/path/template/{param}" — NOT just a path.
+    # Matching only the path (ignoring host) would let an action target any
+    # host as long as the path matches — equivalent to a scope-escape/SSRF
+    # vulnerability inside Policy Service itself (see tests/test_policy.py).
     #
     # An optional 3rd token, "params:key1,key2", declares which
-    # ActionSpec.parameters keys this entry permits. Real gap found via
-    # full-codebase review: parameters were never checked at all — an action
-    # matching the URL/method could carry ANY key/value in its body or query
-    # string (e.g. {"debug_bypass_auth": "1"}), since ActionSpec.parameters
-    # is built directly from unvalidated LLM JSON (exploit_agent/agent.py)
-    # and sent as-is by evidence_harness/harness.py. Omitting the clause
-    # means the entry permits an EMPTY parameters dict only — not "anything"
-    # — matching this project's deny-by-default default in every other gate.
+    # ActionSpec.parameters keys this entry permits — without it, an action
+    # matching the URL/method could carry ANY key/value in its body or
+    # query string (e.g. {"debug_bypass_auth": "1"}), since
+    # ActionSpec.parameters is built directly from unvalidated LLM JSON and
+    # sent as-is by evidence_harness/harness.py. Omitting the clause means
+    # the entry permits an EMPTY parameters dict only — not "anything" —
+    # matching this project's deny-by-default default everywhere else.
     #
     # A key can optionally be paired with a value pattern, "key=regex" (e.g.
-    # "params:userId=^\d+$"), checked against str(value) with fullmatch.
-    # Real gap found via independent review of the value channel itself:
-    # checking only parameter NAMES still let ANY value through for an
-    # already-allowed key — an LLM-authored plan could put a completely
-    # different identity's id, an injection payload, or control characters
-    # into a parameter whose name happens to be on the allowlist. A
-    # name-only key (no "=regex") keeps the previous behaviour (any value
-    # permitted) — this is opt-in stricter checking, not a breaking change
-    # to existing allowlist strings.
+    # "params:userId=^\d+$"), checked against str(value) with fullmatch —
+    # checking only parameter NAMES would still let ANY value through for
+    # an already-allowed key (a different identity's id, an injection
+    # payload, control characters). A name-only key (no "=regex") keeps the
+    # simpler behaviour (any value permitted) — opt-in stricter checking,
+    # not a breaking change to existing allowlist strings.
     tokens = allowed_action.split()
     if len(tokens) < 2:
         return False
@@ -203,11 +192,10 @@ def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
             continue
         raw_value = action.parameters[key]
         # A JSON null stringifies to the literal text "None", which can
-        # satisfy an otherwise-reasonable pattern like "^[A-Za-z]+$" — a
-        # real footgun an independent review found: an operator declaring
-        # a value pattern for a string field would not expect null to pass
-        # it. A declared pattern is a promise that the value is real data
-        # of a specific shape — null is never that, regardless of pattern.
+        # satisfy an otherwise-reasonable pattern like "^[A-Za-z]+$" — an
+        # operator declaring a value pattern for a string field would not
+        # expect null to pass it. A declared pattern is a promise that the
+        # value is real data of a specific shape — null is never that.
         if raw_value is None or not value_pattern.fullmatch(str(raw_value)):
             return False
 
@@ -215,28 +203,23 @@ def _matches_allowed_action(action: ActionSpec, allowed_action: str) -> bool:
     template_url = urlsplit(template)
 
     if action_url.query:
-        # Real bypass found via review: the params check above only looks at
-        # action.parameters — it says nothing about a query string smuggled
-        # directly inside action.target itself (e.g.
-        # "https://host/api/objects/123?debug_bypass_auth=1"), which
-        # evidence_harness/harness.py sends to the real target completely
-        # unfiltered (httpx keeps a URL's own query string when params=None).
-        # Since ActionSpec.parameters is the one designated, checked channel
-        # for extra data, a target that already carries its own query string
-        # is always denied — no legitimate action needs both.
+        # The params check above only looks at action.parameters — a query
+        # string smuggled directly inside action.target itself (e.g.
+        # "https://host/api/objects/123?debug_bypass_auth=1") is sent to
+        # the real target completely unfiltered by evidence_harness/
+        # harness.py (httpx keeps a URL's own query string when
+        # params=None). Since ActionSpec.parameters is the one designated,
+        # checked channel for extra data, a target that already carries
+        # its own query string is always denied — no legitimate action
+        # needs both.
         return False
     if not template_url.netloc:
         # Allowlist entry missing a host — treat as misconfiguration and deny
-        # outright, instead of silently falling back to matching path only
-        # (that's exactly the vulnerability that was fixed).
+        # outright, instead of silently falling back to matching path only.
         return False
     if action_url.scheme.lower() != template_url.scheme.lower():
-        # .lower() on both sides — real nitpick found via independent
-        # review: URL schemes are case-insensitive per RFC 3986, but this
-        # compared them case-sensitively while netloc (below) was already
-        # lowercased. Fails SAFE as-is (a legitimate "HTTPS://..." action
-        # was wrongly DENIED, not wrongly allowed), so not a bypass, but
-        # worth fixing for correctness rather than leaving an inconsistency.
+        # .lower() on both sides — URL schemes are case-insensitive per
+        # RFC 3986, and netloc (below) is already compared lowercased too.
         return False
     if action_url.netloc.lower() != template_url.netloc.lower():
         return False

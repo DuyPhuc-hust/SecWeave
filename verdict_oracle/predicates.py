@@ -19,10 +19,8 @@ from shared.models.observation import (
 
 # SPEC §4.4.3: "Tập predicate của một kịch bản có version, ghi vào package.
 # Khi rule thay đổi, package cũ không bị đánh giá lại âm thầm." Recorded into
-# the Verification Package's "Oracle rule / version" field (§7, field #13) —
-# until now nothing in the codebase actually carried a version string at
-# all, a real gap the assembler would otherwise have nowhere to source it
-# from. "v1-draft" because this predicate set itself is an explicit DRAFT
+# the Verification Package's "Oracle rule / version" field (§7, field #13).
+# "v1-draft" because this predicate set itself is an explicit DRAFT
 # (see this module's own docstring) — freezing happens at Gate 3, not yet
 # reached (still Chặng 1). Bump this string any time the logic in
 # check_main_predicate/check_positive_control/check_denied_control/
@@ -39,19 +37,15 @@ def _hash_mismatch_reason(observation: NormalizedObservation) -> Optional[str]:
     if the file can't even be read — an unreadable/missing artifact is at
     least as bad as a mismatched one, never treated as "assume it's fine").
     Called from evaluate_predicates() before a group's role-specific check
-    runs, so a failure here surfaces as INSUFFICIENT_DATA — real gap found
-    via independent review: this check did not exist anywhere in the
-    codebase before, so a tampered artifact would sail through unnoticed.
+    runs, so a failure here surfaces as INSUFFICIENT_DATA rather than
+    letting a tampered artifact sail through unnoticed.
 
     Catches ValueError alongside OSError — a `raw_evidence_ref` containing
     an embedded NUL byte (a corrupted or adversarially-crafted stored
     observation, not something the current EvidenceHarness ever produces
     itself, but this project's own hash-check exists precisely because
     stored evidence must be treated as possibly tampered) makes
-    `Path.read_bytes()` raise `ValueError`, not `OSError` — the same
-    recurring "narrow except clause misses a real failure mode" class of
-    gap already fixed once for httpx.InvalidURL and once more for a
-    closed-client RuntimeError elsewhere in this project.
+    `Path.read_bytes()` raise `ValueError`, not `OSError`.
     """
     try:
         raw_bytes = Path(observation.raw_evidence_ref).read_bytes()
@@ -218,8 +212,7 @@ def evaluate_predicates(observations: List[NormalizedObservation]) -> List[Predi
             results.append(None)  # placeholder — filled in below, once identity collisions are known
             single_observation_by_role[role] = matches[0]
 
-    # Real gap found via independent review: nothing previously checked
-    # that positive_control used a genuinely DIFFERENT identity from the
+    # positive_control must use a genuinely DIFFERENT identity from the
     # other 2 roles. SPEC §4.4.1: positive_control's whole point is "đúng
     # identity phải đọc được" (the LEGITIMATE owner) as the contrasting
     # case to main's suspected-unauthorized read and denied_control's

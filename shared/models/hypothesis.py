@@ -13,10 +13,7 @@ class HypothesisProvenance(BaseModel):
     # Keeps the original signal's location (URL for DAST, file+line for SAST,
     # package for SCA) — without this field, Exploit Agent only sees text
     # describing the behavior with no idea where to verify it, even though
-    # the original signal DID have a concrete location (found via live
-    # testing: all 4 real hypotheses were NOT_PLANNABLE for lack of exactly
-    # this information, including the ZAP case which already had a URL in
-    # its original signal).
+    # the original signal DID have a concrete location.
     location: Union[SastLocation, ScaLocation, DastLocation]
 
 
@@ -44,14 +41,13 @@ class HypothesisResult(BaseModel):
             raise ValueError("status=hypothesis requires a hypothesis")
         if self.status == HypothesisStatus.NOT_VERIFIABLE and not self.reason:
             raise ValueError("status=not_verifiable requires a reason")
-        # Real gap found via independent review: the same one-directional
-        # pattern already fixed in ActionPlanResult (NOT_PLANNABLE forbids a
-        # plan), PlanCheckResult, CostDecision, and PlanReviewResult — this
-        # sibling model was missing its own converse check. Without it,
+        # Same one-directional pattern as ActionPlanResult (NOT_PLANNABLE
+        # forbids a plan), PlanCheckResult, CostDecision, and
+        # PlanReviewResult — without this converse check,
         # HypothesisResult(status=not_verifiable, hypothesis=<a real
-        # Hypothesis>, reason="x") constructs without error: an ambiguous
-        # "not verifiable, but here's a hypothesis anyway" result a
-        # downstream reader could wrongly trust as a real hypothesis.
+        # Hypothesis>, reason="x") would construct without error: an
+        # ambiguous "not verifiable, but here's a hypothesis anyway" result
+        # a downstream reader could wrongly trust as a real hypothesis.
         if self.status == HypothesisStatus.NOT_VERIFIABLE and self.hypothesis is not None:
             raise ValueError("status=not_verifiable không được kèm theo hypothesis")
         return self

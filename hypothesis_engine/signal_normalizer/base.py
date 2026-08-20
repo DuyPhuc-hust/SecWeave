@@ -42,11 +42,11 @@ def container_as_list(
     wrong type" into the same silent case would hide real report corruption
     behind an ordinary, harmless shape.
 
-    Real crash found via independent review: `{"results": null}` made every
-    adapter raise `TypeError: 'NoneType' object is not iterable` from a bare
+    `{"results": null}` would otherwise make an adapter raise
+    `TypeError: 'NoneType' object is not iterable` from a bare
     `enumerate(raw_report.get("results", []))` — `dict.get(key, default)`
     only substitutes the default when the key is MISSING, not when it's
-    PRESENT with value `null`. That crash happened OUTSIDE any per-item
+    PRESENT with value `null`. Such a crash happens OUTSIDE any per-item
     try/except (the `enumerate()` call itself runs before the loop body,
     and its try/except, is ever entered), discarding every signal already
     parsed from the same report — not just skipping one bad entry, which

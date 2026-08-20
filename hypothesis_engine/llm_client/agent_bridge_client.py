@@ -52,15 +52,13 @@ class AgentBridgeLLMClient(HypothesisLLMClient):
         try:
             return response_path.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
-            # Real gap found via independent review: this file is hand-
-            # written/edited by a HUMAN (or another agent) in an arbitrary
-            # editor, not produced by this codebase — a BOM, smart quotes
-            # pasted from a non-UTF-8 source, or any stray invalid byte
-            # raises UnicodeDecodeError, a ValueError subclass that neither
-            # `RuntimeError` nor `httpx.HTTPError` (the 2 exception types
-            # every cli.py call site catches around generate()/generate_
-            # many()) would catch — same class of gap already fixed once
-            # for `--source` file reading in cli.py, never mirrored here.
+            # This file is hand-written/edited by a HUMAN (or another
+            # agent) in an arbitrary editor, not produced by this codebase
+            # — a BOM, smart quotes pasted from a non-UTF-8 source, or any
+            # stray invalid byte raises UnicodeDecodeError, a ValueError
+            # subclass that neither `RuntimeError` nor `httpx.HTTPError`
+            # (the 2 exception types every cli.py call site catches around
+            # generate()/generate_many()) would catch on its own.
             raise RuntimeError(
                 f"File response '{response_path}' không phải UTF-8 hợp lệ: {exc}"
             ) from exc
@@ -72,16 +70,14 @@ class AgentBridgeLLMClient(HypothesisLLMClient):
         findings only needs 1 interaction round instead of N.
 
         Response format is a JSON OBJECT keyed by string index ("1".."N"),
-        NOT a positional array — real gap found via independent review: the
-        previous array format only checked the response's LENGTH matched N,
-        never that element i actually answers signal i. This project's own
-        history already has a confirmed case of this exact LLM not reliably
-        following ordering instructions (Llama fabricating a URL elsewhere
-        in this codebase) — a same-length but reordered/mis-keyed response
-        would silently attach hypothesis i's content to signal j's
-        signal_id/location. Requiring an explicit key per answer removes
-        the ambiguity entirely instead of just hoping the model preserves
-        order: there is no "position" left to get wrong.
+        NOT a positional array — a positional array can only check that the
+        response's LENGTH matches N, never that element i actually answers
+        signal i. LLMs are not guaranteed to preserve ordering reliably, so
+        a same-length but reordered response would silently attach
+        hypothesis i's content to signal j's signal_id/location. Requiring
+        an explicit key per answer removes the ambiguity entirely instead
+        of just hoping the model preserves order: there is no "position"
+        left to get wrong.
         """
         self._counter += 1
         prompt_path = self._work_dir / f"prompt_{self._run_id}_batch{self._counter}.txt"
@@ -91,19 +87,15 @@ class AgentBridgeLLMClient(HypothesisLLMClient):
 
         # Random per-BATCH token (canary-token pattern, same idea as
         # engine.py's per-call data delimiter) embedded into every SIGNAL i/N
-        # separator below. Real gap found via a second independent review
-        # pass, dispatched specifically to verify fix #3/#4 above: those
-        # fixes closed forgery of the single-signal DỮ LIỆU delimiter
-        # (engine.py) and mis-keying of the response object (this file's
-        # key-set validation below) — but neither stopped attacker-controlled
-        # content EMBEDDED IN one signal's own source_snippet from forging a
-        # fake "===== SIGNAL i/N =====" boundary (that wrapper delimiter was
-        # still a fixed, fully guessable string), tricking the agent into
-        # attaching a fabricated answer to a LATER signal's key even though
-        # the JSON key-set itself came back well-formed. A random token
-        # unknown when the untrusted source content was originally authored
-        # can't be reproduced by that content, the same reasoning as the
-        # single-signal fix.
+        # separator below. Without it, attacker-controlled content EMBEDDED
+        # IN one signal's own source_snippet could forge a fake
+        # "===== SIGNAL i/N =====" boundary (a fixed, guessable wrapper
+        # delimiter), tricking the agent into attaching a fabricated answer
+        # to a LATER signal's key even though the JSON key-set itself comes
+        # back well-formed. A random token unknown when the untrusted
+        # source content was originally authored can't be reproduced by
+        # that content — same reasoning as the single-signal DỮ LIỆU
+        # delimiter in engine.py.
         batch_marker = secrets.token_hex(8)
 
         sections = [

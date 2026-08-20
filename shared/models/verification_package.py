@@ -104,14 +104,12 @@ class VerificationPackage(BaseModel):
     doc line by line without re-deriving a mapping.
     """
 
-    # Real gap found via independent review: these 4 identifier/reference
-    # fields had NO min_length constraint, unlike their siblings below
-    # (scenario/verdict_reason/limitations/next_action) — `secweave
-    # assemble-package --target-id "" --target-revision-id "" --authorization-
-    # reference "" ...` built and printed a fully "valid" VerificationPackage
-    # with 3 empty required-judgment fields, and package_id="" is equally
-    # nonsensical for a field whose stated purpose is "định danh duy nhất,
-    # dùng để trích dẫn" (SPEC §7 field #1). Same class of gap, same fix.
+    # These 4 identifier/reference fields need min_length=1 just like their
+    # judgment-field siblings below (scenario/verdict_reason/limitations/
+    # next_action) — an empty package_id/target_id/revision/
+    # authorization_reference is as nonsensical as an empty scenario, e.g.
+    # package_id's stated purpose is "định danh duy nhất, dùng để trích
+    # dẫn" (SPEC §7 field #1).
     package_id: str = Field(min_length=1)  # 1. Package ID
     target_id: str = Field(min_length=1)  # 2. Target
     environment: Environment  # 3. Environment
@@ -123,15 +121,14 @@ class VerificationPackage(BaseModel):
     # field singular but this codebase's own Evidence Harness already
     # requires multiple real identities per run to test anything real, so a
     # single-identity list would misrepresent what a real run actually used.
-    # Real gap found via independent review: this is a flat, undifferentiated
-    # list — it does NOT distinguish which identity played which role (the
-    # attacker/main identity, the positive_control owner, or a pure SETUP/
-    # infrastructure identity like a seed-data bot account), so a reader
-    # can't tell "3 identities were used in the privilege test itself" from
-    # "2 were, plus 1 was just a login helper." Not fixed in this increment
-    # — SPEC's own field #7 is a single unstructured value, and giving it
-    # real per-role structure is a bigger schema change than this pass
-    # attempts; flagged here so a future revision knows to scrutinize it.)
+    # This is a flat, undifferentiated list — it does NOT distinguish which
+    # identity played which role (the attacker/main identity, the
+    # positive_control owner, or a pure SETUP/infrastructure identity like
+    # a seed-data bot account), so a reader can't tell "3 identities were
+    # used in the privilege test itself" from "2 were, plus 1 was just a
+    # login helper." SPEC's own field #7 is a single unstructured value,
+    # and giving it real per-role structure is a bigger schema change than
+    # this model currently attempts.)
     execution_id: str  # 8. Execution ID
     action_record: List[ActionSpec] = Field(min_length=1)  # 9. Action record
     raw_evidence_references: List[str] = Field(min_length=1)  # 10. Raw evidence references
@@ -142,14 +139,14 @@ class VerificationPackage(BaseModel):
     oracle_rule_version: str  # 13. Oracle rule / version
     predicate_results: List[PredicateResult]  # 14. Predicate results
     verdict: Verdict  # 15. Verification verdict
-    verdict_reason: str = Field(min_length=1)  # 15 (cont'd) — real gap found via independent review:
-    # verdict alone can't explain an unusual-looking but CORRECT combination
-    # (e.g. all 3 predicate groups SATISFIED yet verdict=INCONCLUSIVE because
-    # execution_status wasn't COMPLETED) — that explanation lives ONLY in
-    # VerdictResult.reason (verdict_oracle/oracle.py), which the assembler
-    # used to silently discard. VerdictResult's OWN docstring states the
-    # traceability principle this violated: "a human reviewer... never has
-    # to re-derive why this verdict was reached from a separate lookup."
+    verdict_reason: str = Field(min_length=1)  # 15 (cont'd) — verdict alone
+    # can't explain an unusual-looking but CORRECT combination (e.g. all 3
+    # predicate groups SATISFIED yet verdict=INCONCLUSIVE because
+    # execution_status wasn't COMPLETED) — that explanation lives in
+    # VerdictResult.reason (verdict_oracle/oracle.py). VerdictResult's OWN
+    # docstring states the traceability principle: "a human reviewer...
+    # never has to re-derive why this verdict was reached from a separate
+    # lookup."
     human_review_record: Optional[HumanReviewRecord] = None  # 16. Human-review record (absent until Gate 4)
     limitations: str = Field(min_length=1)  # 17. Limitations — SPEC: "nên đọc đầu tiên", must never be
     # empty; an empty string would silently claim "nothing this package
@@ -159,18 +156,17 @@ class VerificationPackage(BaseModel):
 
     @model_validator(mode="after")
     def _evidence_references_and_hashes_must_match_observations(self) -> "VerificationPackage":
-        # Real gap found via independent review: the original version of
-        # this check only compared LENGTHS, which let raw_evidence_references
-        # and artifact_hashes be positionally SWAPPED relative to each other
-        # (or relative to normalized_observations, which already carries the
-        # authoritative raw_evidence_ref/raw_evidence_hash per observation —
-        # 3 redundant sources of truth, one weak check) — a reviewer trusting
-        # artifact_hashes[i] to verify raw_evidence_references[i]'s integrity
-        # (the entire point of SPEC field #11) would silently check the
-        # wrong hash against the wrong file. Now requires EXACT equality
-        # (same values, same order) against what normalized_observations
-        # itself says — the two fields carry no information independent of
-        # field #12, they exist only because SPEC names them separately.
+        # A LENGTHS-only check would let raw_evidence_references and
+        # artifact_hashes be positionally SWAPPED relative to each other
+        # (or relative to normalized_observations, which already carries
+        # the authoritative raw_evidence_ref/raw_evidence_hash per
+        # observation) — a reviewer trusting artifact_hashes[i] to verify
+        # raw_evidence_references[i]'s integrity (the entire point of SPEC
+        # field #11) would silently check the wrong hash against the wrong
+        # file. Requires EXACT equality (same values, same order) against
+        # what normalized_observations itself says — the two fields carry
+        # no information independent of field #12, they exist only because
+        # SPEC names them separately.
         expected_refs = [o.raw_evidence_ref for o in self.normalized_observations]
         expected_hashes = [o.raw_evidence_hash for o in self.normalized_observations]
         if self.raw_evidence_references != expected_refs or self.artifact_hashes != expected_hashes:
@@ -183,18 +179,14 @@ class VerificationPackage(BaseModel):
 
     @model_validator(mode="after")
     def _action_record_must_be_unique_and_cover_every_executed_action(self) -> "VerificationPackage":
-        # Real gap found via independent review, 2 distinct failure modes:
-        # (1) action_record used to be built by filtering a caller's action
-        #     list to matching IDs with no check that EVERY action_ref
-        #     actually appearing in normalized_observations had a match —
-        #     a caller passing an incomplete `actions` list produced a
-        #     package that looked complete (min_length=1 satisfied) while
-        #     silently missing the ActionSpecs a CONFIRMED verdict actually
-        #     rested on, directly undermining field #9's stated purpose
-        #     ("đủ để lặp lại" — sufficient to reproduce).
-        # (2) two different ActionSpecs sharing the same action_id (nothing
-        #     enforces uniqueness upstream) produced duplicate, AMBIGUOUS
-        #     entries for what was really one executed action.
+        # 2 distinct invariants: (1) a caller passing an incomplete
+        # `actions` list (missing an ActionSpec for some action_ref that
+        # DID produce an observation) must not look complete just because
+        # min_length=1 is satisfied — field #9's stated purpose is "đủ để
+        # lặp lại" (sufficient to reproduce). (2) two different ActionSpecs
+        # sharing the same action_id (nothing enforces uniqueness upstream)
+        # would be duplicate, AMBIGUOUS entries for what was really one
+        # executed action.
         action_ids = [action.action_id for action in self.action_record]
         if len(action_ids) != len(set(action_ids)):
             raise ValueError(
@@ -213,21 +205,18 @@ class VerificationPackage(BaseModel):
 
     @model_validator(mode="after")
     def _check_confirmed_requires_all_groups_satisfied(self) -> "VerificationPackage":
-        # Real gap found via independent review: VerdictResult (shared/
-        # models/observation.py) already has this exact check, since
-        # verdict/predicate_results independently constructible-out-of-sync
-        # is the one failure SPEC treats as never acceptable ("thiếu
-        # positive control thì không có CONFIRMED, không ngoại lệ"). But
-        # VerificationPackage stores verdict/predicate_results as its OWN
-        # 2 separate fields (matching SPEC's field-by-field layout, #14/#15)
-        # rather than embedding a VerdictResult, so that protection was
-        # lost here — anything constructing/reloading a package directly
-        # (not only through the assembler, which always derives both from
-        # one real VerdictResult) had no independent check at all. Same
-        # ONE-DIRECTIONAL reasoning as VerdictResult's own validator: a
-        # verdict=INCONCLUSIVE package can legitimately have all 3 groups
-        # SATISFIED (the execution_status gate overrides), so only the
-        # CONFIRMED direction is checked.
+        # VerdictResult (shared/models/observation.py) has this exact check
+        # too, since verdict/predicate_results independently constructible-
+        # out-of-sync is the one failure SPEC treats as never acceptable
+        # ("thiếu positive control thì không có CONFIRMED, không ngoại
+        # lệ"). VerificationPackage stores verdict/predicate_results as its
+        # OWN 2 separate fields (matching SPEC's field-by-field layout,
+        # #14/#15) rather than embedding a VerdictResult, so anything
+        # constructing/reloading a package directly (not only through the
+        # assembler) needs this same independent check. ONE-DIRECTIONAL
+        # like VerdictResult's own validator: a verdict=INCONCLUSIVE
+        # package can legitimately have all 3 groups SATISFIED (the
+        # execution_status gate overrides), so only CONFIRMED is checked.
         if self.verdict == Verdict.CONFIRMED and not all(
             r.status == PredicateStatus.SATISFIED for r in self.predicate_results
         ):
@@ -261,14 +250,13 @@ class VerificationPackage(BaseModel):
         ... không quy đổi thành điểm; thiếu → không release"). Checks not
         just PRESENCE of human_review_record/retest_reference (the 2 fields
         a freshly-assembled candidate is allowed to still be missing) but
-        also the CONTENT of human_review_record — real gap found via
-        independent review: the original version only checked "is this
-        field non-None," so a package where the reviewer explicitly chose
-        decision=REJECT, or never actually set checked_raw_artifact=True
-        (SPEC §4.5's own requirement that a real review means personally
-        cross-checking >=1 raw artifact, not just reading an AI summary),
-        still reported is_release_ready=True — the exact opposite of what
-        a human's own recorded decision said.
+        also the CONTENT of human_review_record — checking only "is this
+        field non-None" would report is_release_ready=True for a package
+        where the reviewer explicitly chose decision=REJECT, or never
+        actually set checked_raw_artifact=True (SPEC §4.5's own
+        requirement that a real review means personally cross-checking
+        >=1 raw artifact, not just reading an AI summary) — the exact
+        opposite of what a human's own recorded decision said.
         """
         missing = []
         if self.human_review_record is None:

@@ -62,10 +62,9 @@ class AuditEventType(str, Enum):
     # Logged so a NEW KillSwitch instance constructed later for the same
     # execution_id (crash recovery, a separate CLI/API process, a worker
     # restart) can tell RUNNING apart from PREPARED by reading the audit log
-    # alone — see KillSwitch.__init__'s status-recovery logic. Real gap found
-    # via independent review: without this, a reconstructed instance always
-    # started at PREPARED regardless of history, silently un-stopping a
-    # STOPPED execution the moment something re-created the object.
+    # alone, instead of always starting at PREPARED regardless of history
+    # and silently un-stopping a STOPPED execution — see KillSwitch.
+    # __init__'s status-recovery logic.
     START = "start"
     STOP = "stop"
     # A source called stop() after the run was already STOPPED — recorded so
@@ -87,15 +86,14 @@ class StopEvent(BaseModel):
     event: AuditEventType
     execution_id: str
     # Assigned atomically under KillSwitch's lock at the moment of the real
-    # status transition (not at the moment this line is physically written
-    # to disk). Real bug found via independent review: without this, status
-    # recovery (KillSwitch._recover_status_from_audit_log) used physical
-    # file-append order as a proxy for "what happened last" — but a slow
-    # cleanup() delays STOP's write, so a concurrent (fast) RESUME on
-    # another thread could write its line to disk FIRST even though the
-    # STOP's real transition happened first, making a freshly-reconstructed
-    # instance recover the wrong status. `sequence` decouples "true logical
-    # order" from "when the slow I/O happened to land."
+    # status transition, NOT at the moment this line is physically written
+    # to disk — status recovery (KillSwitch._recover_status_from_audit_log)
+    # cannot use physical file-append order as a proxy for "what happened
+    # last," since a slow cleanup() delays STOP's write, so a concurrent
+    # (fast) RESUME on another thread could write its line to disk FIRST
+    # even though the STOP's real transition happened first. `sequence`
+    # decouples "true logical order" from "when the slow I/O happened to
+    # land."
     sequence: int
     at: datetime
     source: Optional[StopSource] = None  # None for a "resume" event
@@ -105,12 +103,10 @@ class StopEvent(BaseModel):
     cleanup_status: Optional[CleanupStatus] = None  # only meaningful for "stop" events
     cleanup_error: Optional[str] = None
     # Which of SPEC §6.3's 5 automatic conditions triggered this stop — only
-    # meaningful when source=AUTOMATIC_THRESHOLD. Before Cost Service thật
-    # (the first real caller of source=AUTOMATIC_THRESHOLD), this enum
-    # existed in the model but nothing ever set it structurally — a caller
-    # could only embed it as free text in `reason`, which can't be reliably
-    # queried later (e.g. Tuần 8's "how many times did each of the 5
-    # automatic conditions fire across the whole project" measurement).
+    # meaningful when source=AUTOMATIC_THRESHOLD. Kept as a structured enum
+    # rather than embedded as free text in `reason` so it can be reliably
+    # queried later (e.g. "how many times did each of the 5 automatic
+    # conditions fire across the whole project").
     automatic_threshold_reason: Optional[AutomaticThresholdReason] = None
 
     @model_validator(mode="after")

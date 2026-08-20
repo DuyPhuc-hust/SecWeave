@@ -41,12 +41,11 @@ class HypothesisEngine:
         unverified_context: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         # Random per-call marker (canary-token pattern), not a fixed string —
-        # real gap found via independent review: the Signal itself is safe
-        # (model_dump_json() collapses it to one line, so it can't contain a
-        # real newline to fake a section break), but `source_snippet` below
-        # is embedded RAW to stay readable as code, preserving real
-        # newlines — so untrusted source code could previously reproduce the
-        # fixed delimiter text "===== DỮ LIỆU =====" verbatim and fake a
+        # the Signal itself is safe (model_dump_json() collapses it to one
+        # line, so it can't contain a real newline to fake a section break),
+        # but `source_snippet` below is embedded RAW to stay readable as
+        # code, preserving real newlines — so untrusted source code could
+        # otherwise reproduce a fixed delimiter text verbatim and fake a
         # second "data starts here" section indistinguishable from the real
         # one. A random token unknown in advance can't be reproduced by
         # content authored before this call, closing that gap without
@@ -135,14 +134,14 @@ class HypothesisEngine:
             try:
                 return HypothesisResult(status=HypothesisStatus.NOT_VERIFIABLE, reason=reason)
             except ValidationError as exc:
-                # Real gap found via independent review: `reason` comes
-                # straight from untrusted LLM JSON with no type check — a
-                # model returning {"reason": ["multiple", "reasons"]}
-                # (plausible when explaining more than one issue) made
-                # pydantic's strict str field raise ValidationError here,
-                # uncaught by any surrounding handler (cli.py only catches
-                # RuntimeError/httpx.HTTPError around this call) — a raw
-                # traceback instead of this module's own clean failure mode.
+                # `reason` comes straight from untrusted LLM JSON with no
+                # type check — a model returning
+                # {"reason": ["multiple", "reasons"]} (plausible when
+                # explaining more than one issue) makes pydantic's strict
+                # str field raise ValidationError here; cli.py only catches
+                # RuntimeError/httpx.HTTPError around this call, so this
+                # must be turned into a clean failure mode itself rather
+                # than surfacing as a raw traceback.
                 return HypothesisResult(
                     status=HypothesisStatus.NOT_VERIFIABLE,
                     reason=f"LLM output có field 'reason' sai kiểu (không phải string): {exc}",

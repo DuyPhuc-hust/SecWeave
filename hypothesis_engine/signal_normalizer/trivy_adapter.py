@@ -109,10 +109,9 @@ class TrivyAdapter(SignalAdapter):
             # Trivy's secret-detection results (Class=="secret") live in a
             # completely separate "Secrets" key with its own shape (RuleID/
             # Category/Title/StartLine/EndLine/Match, not VulnerabilityID/
-            # PkgName/...) — found via real Trivy output that this adapter
-            # was silently dropping actual secrets (including a real RSA
-            # private key in a scanned image) with no on_skip warning at all,
-            # since it only ever read "Vulnerabilities". Location reuses
+            # PkgName/...) — must be read explicitly, or real secrets
+            # (including an RSA private key in a scanned image) are silently
+            # dropped with no on_skip warning at all. Location reuses
             # SastLocation: a secret is a file+line finding, same shape as a
             # SAST result, not a package-version finding like ScaLocation.
             secrets = container_as_list(result, "Secrets", f"Results[{result_index}].Secrets", on_skip)

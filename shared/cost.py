@@ -103,17 +103,15 @@ class CostService:
         self._audit_log_path = self._storage_dir / "cost_audit_log.jsonl"
         self._lock = threading.Lock()
         self._count, recorded_cap = self._recover_count_from_audit_log()
-        # Real gap found via independent review: `cap` was never itself
-        # persisted or cross-checked — only the executed-action COUNT was
-        # recovered across a restart, so a later invocation reusing the
-        # same execution_id (the intended way cost accumulates "real
-        # meaning" across cmd_execute calls — see cli.py) could pass a
-        # DIFFERENT --cap and immediately get a widened effective budget,
-        # silently undermining SPEC §6.4 control #9's "never exceed the
-        # hard cap" as a durable per-execution property. Fails safe/closed:
-        # refuses to proceed rather than silently pick either value. A log
-        # with no recorded cap yet (first run, or a log from before this
-        # field existed) has nothing to conflict with, so it's accepted.
+        # `cap` itself is cross-checked, not just the executed-action
+        # COUNT — a later invocation reusing the same execution_id (the
+        # intended way cost accumulates "real meaning" across cmd_execute
+        # calls) must not be able to pass a DIFFERENT --cap and get a
+        # widened effective budget, which would undermine SPEC §6.4
+        # control #9's "never exceed the hard cap" as a durable per-
+        # execution property. Fails safe/closed: refuses to proceed rather
+        # than silently pick either value. A log with no recorded cap yet
+        # (first run) has nothing to conflict with, so it's accepted.
         if recorded_cap is not None and recorded_cap != cap:
             raise RuntimeError(
                 f"CostService cho execution '{execution_id}': cap trước đó đã ghi nhận là "
@@ -160,19 +158,16 @@ class CostService:
 
     def _ends_without_trailing_newline(self) -> bool:
         """True if the audit log file exists, is non-empty, and its last
-        byte is NOT a newline — real gap found via independent review: a
-        crash mid-write tears only the LAST line (see
-        _recover_count_from_audit_log's docstring), but a plain append
-        afterward would concatenate the NEXT entry directly onto that torn
-        line's tail with no separator, merging one perfectly valid,
-        recoverable entry into what recovery then sees as a SINGLE
-        unparseable line — permanently losing that valid entry from the
-        count (recovery only ever credits a corrupted line +1, never +2),
-        undercounting the true total across a SECOND restart and letting a
-        capped run silently exceed its true cap. Checked via a raw byte
-        read of just the last byte, not text-mode `tell()` semantics
-        (ambiguous in append mode), to avoid any doubt about what's
-        actually on disk.
+        byte is NOT a newline — a crash mid-write tears only the LAST line
+        (see _recover_count_from_audit_log's docstring), and a plain
+        append afterward would otherwise concatenate the NEXT entry
+        directly onto that torn line's tail with no separator, merging one
+        perfectly valid, recoverable entry into what recovery then sees as
+        a SINGLE unparseable line — permanently losing that valid entry
+        from the count (recovery only ever credits a corrupted line +1,
+        never +2), undercounting the true total across a SECOND restart.
+        Checked via a raw byte read of just the last byte, not text-mode
+        `tell()` semantics (ambiguous in append mode).
         """
         if not self._audit_log_path.exists():
             return False
@@ -195,13 +190,12 @@ class CostService:
 
         Raises RuntimeError (wrapping the underlying OSError) if the
         durable log write itself fails (disk full, permission lost, etc.)
-        — the in-memory count is NOT advanced in that case. Real gap found
-        via independent review: incrementing `self._count` BEFORE the
-        write used to leave the in-memory count permanently ahead of what
-        was actually persisted if the write then failed, for the rest of
-        this process's life (a later restart would recover the LOWER,
-        correct value, silently diverging from what this process believed
-        for however long it kept running). The durable write must succeed
+        — the in-memory count is NOT advanced in that case. Incrementing
+        `self._count` BEFORE the write would otherwise leave the in-memory
+        count permanently ahead of what was actually persisted if the
+        write then failed, for the rest of this process's life (a later
+        restart would recover the LOWER, correct value, silently diverging
+        from what this process believed). The durable write must succeed
         FIRST; only then does the in-memory count move to match it.
         """
         with self._lock:

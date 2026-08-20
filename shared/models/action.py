@@ -67,15 +67,12 @@ class ActionSpec(BaseModel):
 
 class ActionPlan(BaseModel):
     hypothesis_id: str
-    # min_length=1 — real gap found via independent review: an empty plan
-    # made check_plan()'s all(...) over zero checks vacuously True
-    # ("approved"), and check_planned_action_cap's count=0 is trivially
-    # within any cap — "approved, 0 actions" is never a meaningful state
-    # to report as safe, it should never be constructible in the first
-    # place. parse_plan() already only ever builds a non-empty ActionPlan
-    # today, so this is currently latent, not live — but the same "an
-    # ambiguous/empty state must never look identical to a verified-safe
-    # one" reasoning already applied to PlanCheckResult/CostDecision's new
+    # min_length=1 — an empty plan would make check_plan()'s all(...) over
+    # zero checks vacuously True ("approved"), and
+    # check_planned_action_cap's count=0 is trivially within any cap —
+    # "approved, 0 actions" is never a meaningful state to report as safe,
+    # same "an ambiguous/empty state must never look identical to a
+    # verified-safe one" reasoning as PlanCheckResult/CostDecision's own
     # validators.
     actions: List[ActionSpec] = Field(min_length=1)
 

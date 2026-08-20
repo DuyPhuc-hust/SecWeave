@@ -60,20 +60,18 @@ class Authorization(BaseModel):
     @field_validator("window_start", "window_end", "expiry")
     @classmethod
     def _require_timezone_aware(cls, value: Optional[datetime]) -> Optional[datetime]:
-        """Real gap found via independent review: a timezone-NAIVE datetime
-        used to be accepted silently, then made shared/policy.py::is_allowed
-        crash with an uncaught TypeError ("can't compare offset-naive and
-        offset-aware datetimes") instead of a clean deny — is_allowed()
-        always compares against datetime.now(timezone.utc). Currently
-        unreachable through this codebase's own call sites (cli.py only
-        ever sets approved_at via datetime.now(timezone.utc) and never sets
-        these 3 fields), but a landmine for the day real Gate 2/3 data
-        loads from an operator-authored file or API, where an omitted UTC
-        offset is a very natural mistake. Rejects outright rather than
-        silently assuming UTC — guessing wrong here means an authorization
-        window could look valid past its real expiry, or expire early,
-        which is exactly the kind of silent misinterpretation this
-        project's controls are designed to never allow.
+        """shared/policy.py::is_allowed always compares these fields against
+        datetime.now(timezone.utc), so a timezone-NAIVE value here would
+        crash that comparison with an uncaught TypeError instead of a clean
+        deny. Currently unreachable through this codebase's own call sites
+        (cli.py only ever sets approved_at via datetime.now(timezone.utc)
+        and never sets these 3 fields), but a landmine for the day real
+        Gate 2/3 data loads from an operator-authored file or API, where an
+        omitted UTC offset is a very natural mistake. Rejects outright
+        rather than silently assuming UTC — guessing wrong here means an
+        authorization window could look valid past its real expiry, or
+        expire early, which is exactly the kind of silent misinterpretation
+        this project's controls are designed to never allow.
         """
         if value is not None and value.tzinfo is None:
             raise ValueError(
