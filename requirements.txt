@@ -2,3 +2,9 @@ pydantic>=2.6
 httpx>=0.27
 pytest>=7.4
 python-dotenv>=1.0
+
+# Optional, not installed by default: pip install playwright && playwright
+# install chromium — only needed for EvidenceHarness.capture_ui_state()
+# (SPEC §4.3.2's UI_CAPTURE channel). Everything else in this project works
+# without it; tests/test_evidence_harness_ui_capture.py skips cleanly if
+# it's absent.

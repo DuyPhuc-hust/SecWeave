@@ -6,8 +6,11 @@ module only classifies mechanically (status code -> access_result), it never
 states a verdict.
 
 Scope of this increment — what this does NOT do yet:
-- Only the HTTP_TRANSACTION channel (SPEC §4.3.2's other 4 channels have no
-  producer yet — see shared/models/observation.py's module docstring).
+- HTTP_TRANSACTION (capture()) and UI_CAPTURE (capture_ui_state(),
+  screenshot only — see its own docstring for scope) have real producers;
+  SPEC §4.3.2's other 3 channels (process execution, application log,
+  data-state comparison) still don't — see shared/models/observation.py's
+  module docstring.
 - Blind marker (§4.3.4) is PARTIALLY here: generate_marker() generates this
   run's marker and persists it to a seed manifest (only this process and,
   once built, Verdict Oracle ever read that file — never Exploit Agent/any
@@ -154,6 +157,29 @@ def _redact_nested(value: Any, sensitive_keys: Set[str]) -> Any:
     if isinstance(value, list):
         return [_redact_nested(item, sensitive_keys) for item in value]
     return value
+
+
+def _sync_playwright():
+    """Lazily imports playwright's sync API, only when capture_ui_state()
+    is actually called — playwright + a Chromium install is a real,
+    heavier dependency (~200 MB) this module's other capabilities don't
+    need, so importing it at module load time would force every OTHER
+    capture()-only workflow to have it installed too. A plain
+    ImportError deep inside capture_ui_state() would be a confusing way
+    to discover this; raised as a clear RuntimeError with the exact
+    install command instead. Factored into its own function (rather than
+    inlined in capture_ui_state()) so a test can monkeypatch just this
+    call to exercise the "not installed" path without needing playwright
+    to be genuinely absent.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "capture_ui_state() cần package 'playwright' (pip install playwright && playwright "
+            "install chromium) — chưa cài trong môi trường này."
+        ) from exc
+    return sync_playwright
 
 
 def _strip_userinfo(netloc: str) -> str:
@@ -747,6 +773,192 @@ class EvidenceHarness:
                         f"[{role.value}] {action.method} {target_without_query} -> "
                         f"access_result={access_result.value}, status_code={status_code}"
                     ),
+                    revision=self._target_revision_id,
+                )
+            except RuntimeError:
+                pass
+
+        return observation
+
+    def capture_ui_state(self, action: ActionSpec, identity: str = "anonymous") -> NormalizedObservation:
+        """SPEC §4.3.2's UI_CAPTURE channel (Playwright): a real headless-
+        browser screenshot of what `action.target` renders — purely
+        presentational/human-corroboration, per SPEC's own explicit
+        statement: "Oracle không phán quyết dựa trên ảnh/video, verdict
+        luôn dựa trên bằng chứng máy đọc được." This NEVER feeds
+        evaluate_predicates() (verdict_oracle/predicates.py): the returned
+        observation's `role` is always ObservationRole.SETUP — the one
+        role that function already ignores entirely (see its own
+        docstring) — and `access_result` is always AMBIGUOUS, matching
+        NormalizedObservation's own documented guidance that a non-HTTP
+        channel has no granted/denied semantic and must not force a fit.
+
+        Scope of THIS increment: screenshot only. SPEC §4.3.2 lists
+        "Screenshot + screen recording" as one row, but screen recording
+        needs its own browser-context lifecycle (a video file only
+        finalizes once its context closes) and there's no field on
+        NormalizedObservation for a second raw-evidence artifact — left
+        for a follow-up rather than half-built here.
+
+        Reuses `identity`'s EXISTING httpx cookie jar (via _client_for) so
+        the rendered page reflects the SAME authenticated session an
+        HTTP-based observation for this identity would see — cookies are
+        copied INTO a fresh, isolated Playwright browser context, never
+        the other way around; Playwright never touches the real httpx
+        client/session. An identity that never logged in (the default
+        "anonymous") renders exactly what an unauthenticated visitor
+        would see, same as capture()'s own default.
+
+        Only `action.target` is navigated to (a real browser visit is a
+        page LOAD, not a form submission) — `action.parameters` is not
+        submitted here; a scenario needing an authenticated POST-then-view
+        flow should log in first via login() (populating the cookies this
+        method then reuses), not expect this method to replay parameters
+        itself.
+
+        A failed navigation (DNS failure, connection refused, timeout)
+        does not raise — Chromium still renders ITS OWN error page in
+        that case, and screenshotting it is still real evidence of what a
+        visitor would see (SPEC P2: "bằng chứng trước, phát biểu sau").
+        Only raises if the screenshot itself cannot be taken at all.
+
+        KNOWN LIMIT, stated plainly: nothing here redacts secrets that
+        might be visible ON SCREEN (e.g. a password rendered in cleartext,
+        a token shown in a UI element) — sensitive_body_keys-style
+        redaction only makes sense for structured request/response data,
+        not pixels. An operator using this on a scenario where the UI
+        itself displays a secret must account for that before treating
+        the image as shareable.
+
+        Same KillSwitch/CostService gating as capture() (checked
+        independently here, not by calling capture() internally — a
+        browser navigation is a different mechanism, not an httpx
+        request), for the same reasons: refuses instead of opening a real
+        browser once STOPPED, and counts against the same cost cap since
+        this is still a real action against the target.
+
+        Requires the `playwright` package + `playwright install
+        chromium` — NOT a dependency of this module's other capabilities,
+        imported lazily inside this method so every OTHER capture()-only
+        workflow keeps working without it installed. Raises RuntimeError
+        with a clear install hint instead of a raw ImportError deep in a
+        stack trace if it's missing.
+        """
+        if self._closed:
+            raise RuntimeError(
+                f"EvidenceHarness cho execution '{self._execution_id}' đã close() — không thể "
+                "capture_ui_state() thêm trên instance này. Tạo instance mới nếu cần tiếp tục thu "
+                "bằng chứng."
+            )
+        if self._kill_switch is not None:
+            # refresh() first — same reasoning as capture()'s own check: a
+            # stop() written by a SEPARATE KillSwitch instance must not be
+            # invisible here just because this method never calls capture().
+            self._kill_switch.refresh()
+            if self._kill_switch.is_stopped:
+                raise ExecutionStoppedError(
+                    f"Execution '{self._execution_id}' đã STOPPED — capture_ui_state() từ chối mở "
+                    f"trình duyệt thật cho action '{action.action_id}'. Xem "
+                    "kill_switch_audit_log.jsonl của execution này để biết ai/khi nào/vì sao đã dừng."
+                )
+
+        sync_playwright = _sync_playwright()
+
+        if self._cost_service is not None:
+            decision = self._cost_service.record_action(action.action_id)
+            if not decision.allowed:
+                if self._kill_switch is not None:
+                    self._kill_switch.stop(
+                        source=StopSource.AUTOMATIC_THRESHOLD,
+                        automatic_threshold_reason=AutomaticThresholdReason.ACTION_COUNT_EXCEEDED,
+                        reason=decision.reason,
+                    )
+                raise CostCapExceededError(
+                    f"Execution '{self._execution_id}': {decision.reason} Không mở trình duyệt "
+                    f"thật cho action '{action.action_id}'."
+                )
+
+        observation_id = generate_id("obs")
+        captured_at = datetime.now(timezone.utc)
+        client = self._client_for(identity)
+        # httpx's simple `.items()` view loses domain/path — Playwright
+        # needs `url` OR a non-empty `domain`+`path` to place a cookie
+        # correctly, so this reads the underlying cookiejar.Cookie objects
+        # directly instead. `cookie.domain` is `""` (not None) for a
+        # cookie set via `client.cookies.set(name, value)` with no
+        # `domain=` argument (a realistic pattern for pre-seeding a
+        # session without a full login() round-trip) — passing an empty
+        # string straight through makes Playwright's add_cookies() raise
+        # for the WHOLE list (it's all-or-nothing), dropping every
+        # cookie, not just the one missing a domain. Falls back to
+        # `url=action.target` for exactly those cookies — a reasonable
+        # default since that's where the cookie is about to be used
+        # anyway — while still using the real, precise domain+path for
+        # every cookie that has one.
+        playwright_cookies = []
+        for cookie in client.cookies.jar:
+            entry = {"name": cookie.name, "value": cookie.value, "secure": bool(cookie.secure)}
+            if cookie.domain:
+                entry["domain"] = cookie.domain
+                entry["path"] = cookie.path or "/"
+            else:
+                entry["url"] = action.target
+            playwright_cookies.append(entry)
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            try:
+                context = browser.new_context()
+                try:
+                    if playwright_cookies:
+                        context.add_cookies(playwright_cookies)
+                    page = context.new_page()
+                    try:
+                        page.goto(action.target, wait_until="load")
+                    except Exception:  # noqa: BLE001 - a failed navigation is still evidence
+                        pass
+                    screenshot_bytes = page.screenshot(full_page=True)
+                finally:
+                    context.close()
+            finally:
+                browser.close()
+
+        screenshot_path = self._storage_dir / f"{observation_id}_ui.png"
+        screenshot_path.write_bytes(screenshot_bytes)
+        raw_evidence_hash = "sha256:" + hashlib.sha256(screenshot_bytes).hexdigest()
+
+        observation = NormalizedObservation(
+            observation_id=observation_id,
+            action_ref=action.action_id,
+            role=ObservationRole.SETUP,
+            captured_at=captured_at,
+            identity=identity,
+            execution_id=self._execution_id,
+            target_id=self._target_id,
+            target_revision_id=self._target_revision_id,
+            channel=EvidenceChannel.UI_CAPTURE,
+            raw_evidence_size_bytes=len(screenshot_bytes),
+            raw_evidence_hash=raw_evidence_hash,
+            raw_evidence_ref=str(screenshot_path),
+            access_result=AccessResult.AMBIGUOUS,
+            status_code=None,
+            response_contains_marker=None,
+            request_contains_marker=None,
+        )
+
+        if self._context_store is not None:
+            # Same best-effort convention as capture()'s own Context Store
+            # write — see its comment for why a store hiccup must never
+            # fail an otherwise-successful capture.
+            target_url_parts = urlsplit(action.target)
+            target_without_query = urlunsplit(
+                target_url_parts._replace(netloc=_strip_userinfo(target_url_parts.netloc), query="", fragment="")
+            )
+            try:
+                self._context_store.record_unverified_observation(
+                    target_id=self._target_id,
+                    execution_id=self._execution_id,
+                    description=f"[setup] UI_CAPTURE {target_without_query} -> screenshot captured",
                     revision=self._target_revision_id,
                 )
             except RuntimeError:
