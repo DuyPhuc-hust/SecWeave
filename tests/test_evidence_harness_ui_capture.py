@@ -220,3 +220,86 @@ def test_capture_ui_state_converts_a_real_playwright_error_into_a_clean_runtime_
 
     with pytest.raises(RuntimeError, match="[Cc]hromium|Error"):
         harness.capture_ui_state(_action("http://127.0.0.1:1/"))
+
+
+def test_capture_ui_recording_writes_a_real_webm_with_correct_hash_and_size(tmp_path, real_server):
+    import hashlib
+    from pathlib import Path
+
+    harness = _harness(tmp_path)
+    observation = harness.capture_ui_recording(_action(real_server), record_seconds=0.3)
+
+    video_path = Path(observation.raw_evidence_ref)
+    assert video_path.exists()
+    assert video_path.suffix == ".webm"
+    real_bytes = video_path.read_bytes()
+    assert len(real_bytes) > 0
+    assert real_bytes[:4] == b"\x1a\x45\xdf\xa3"  # real WebM/Matroska file signature
+    assert observation.raw_evidence_size_bytes == len(real_bytes)
+    assert observation.raw_evidence_hash == "sha256:" + hashlib.sha256(real_bytes).hexdigest()
+
+
+def test_capture_ui_recording_leaves_no_scratch_files_behind(tmp_path, real_server):
+    harness = _harness(tmp_path)
+    harness.capture_ui_recording(_action(real_server), record_seconds=0.3)
+
+    # Only the final, renamed .webm should remain directly under the
+    # execution's storage dir — no leftover scratch directory/file from
+    # Playwright's own auto-named video output.
+    remaining = list(tmp_path.glob("exec_ui_test/*"))
+    scratch_dirs = [p for p in remaining if p.is_dir()]
+    assert scratch_dirs == []
+    webm_files = [p for p in remaining if p.suffix == ".webm"]
+    assert len(webm_files) == 1
+
+
+def test_capture_ui_recording_returns_setup_role_and_ambiguous_access_result(tmp_path, real_server):
+    harness = _harness(tmp_path)
+    observation = harness.capture_ui_recording(_action(real_server), identity="alice", record_seconds=0.3)
+
+    assert observation.role == ObservationRole.SETUP
+    assert observation.access_result == AccessResult.AMBIGUOUS
+    assert observation.channel == EvidenceChannel.UI_CAPTURE
+    assert observation.status_code is None
+    assert observation.identity == "alice"
+
+
+def test_capture_ui_recording_shares_the_identity_cookie_jar_with_the_real_browser(tmp_path, real_server):
+    client = httpx.Client()
+    client.cookies.set("session_token", "alice-recording-session-xyz", domain="127.0.0.1", path="/")
+    harness = _harness(tmp_path, http_client_factory=lambda: client)
+
+    harness.capture_ui_recording(_action(real_server), identity="alice", record_seconds=0.3)
+
+    assert any(
+        header is not None and "session_token=alice-recording-session-xyz" in header
+        for header in _Handler.seen_cookie_headers
+    )
+
+
+def test_capture_ui_recording_respects_kill_switch_stopped(tmp_path, real_server):
+    kill_switch = KillSwitch(execution_id="exec_ui_recording_stop", storage_dir=str(tmp_path / "kill_switch"))
+    kill_switch.start()
+    kill_switch.stop(source=StopSource.OPERATOR, reason="test stop before UI recording")
+
+    harness = _harness(tmp_path, execution_id="exec_ui_recording_stop", kill_switch=kill_switch)
+
+    with pytest.raises(ExecutionStoppedError):
+        harness.capture_ui_recording(_action(real_server))
+
+
+def test_capture_ui_recording_respects_cost_cap(tmp_path, real_server):
+    cost_service = CostService(execution_id="exec_ui_recording_cost", storage_dir=str(tmp_path / "cost"), cap=1)
+    harness = _harness(tmp_path, execution_id="exec_ui_recording_cost", cost_service=cost_service)
+
+    harness.capture_ui_recording(_action(real_server), record_seconds=0.3)
+    with pytest.raises(CostCapExceededError):
+        harness.capture_ui_recording(_action(real_server), record_seconds=0.3)
+
+
+def test_capture_ui_recording_converts_a_real_playwright_error_into_a_clean_runtime_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "empty_browsers_dir"))
+    harness = _harness(tmp_path)
+
+    with pytest.raises(RuntimeError, match="[Cc]hromium|Error"):
+        harness.capture_ui_recording(_action("http://127.0.0.1:1/"))

@@ -162,11 +162,12 @@ def build_parser() -> argparse.ArgumentParser:
             type=int,
             default=10,
             help="Cap số hành động — dùng CHUNG cho cả cost-check lúc lập plan lẫn CostService lúc thực "
-            "thi thật (mặc định: %(default)s). LƯU Ý: mỗi action_id trong --capture-ui-for THỰC SỰ "
-            "khớp 1 action trong plan tính THÊM 1 hành động thực tế vào cap này (ngoài HTTP capture "
-            "bình thường của chính action đó) — plan duyệt qua `plan --cap` không biết trước "
-            "--capture-ui-for (chỉ có ở execute/retest), nên cần tự cộng thêm khi ước lượng cap đủ "
-            "dùng.",
+            "thi thật (mặc định: %(default)s). LƯU Ý: mỗi action_id trong --capture-ui-for/"
+            "--capture-ui-video-for THỰC SỰ khớp 1 action trong plan tính THÊM 1 hành động thực tế "
+            "vào cap này cho MỖI flag (ngoài HTTP capture bình thường của chính action đó, và cả 2 "
+            "flag cùng lúc trên 1 action tính THÊM 2, không phải 1) — plan duyệt qua `plan --cap` "
+            "không biết trước 2 flag này (chỉ có ở execute/retest), nên cần tự cộng thêm khi ước "
+            "lượng cap đủ dùng.",
         )
         parser.add_argument("--target-id", required=True, help="target_id ghi vào evidence")
         parser.add_argument(
@@ -226,6 +227,25 @@ def build_parser() -> argparse.ArgumentParser:
             "--cap). Cần cài riêng `playwright` (pip install playwright && playwright install "
             "chromium) — kiểm tra ngay từ đầu, trước khi gửi bất kỳ action thật nào, nếu thiếu thì "
             "báo lỗi sạch thay vì crash giữa chừng.",
+        )
+        parser.add_argument(
+            "--capture-ui-video-for",
+            action="append",
+            help="Giống hệt --capture-ui-for nhưng quay 1 video ngắn (SPEC §4.3.2's phần 'screen "
+            "recording' của cùng kênh UI_CAPTURE) thay vì chụp ảnh tĩnh — lặp lại flag để khai nhiều "
+            "action, dùng CẢ HAI flag cho cùng 1 action_id nếu muốn có cả ảnh lẫn video. Cũng tính "
+            "THÊM 1 hành động thực tế vào --cap cho MỖI flag (dùng cả 2 flag cho cùng 1 action tính "
+            "THÊM 2, không phải 1). Video chỉ quay được phần VIEWPORT (giới hạn của Playwright), khác "
+            "với ảnh chụp toàn trang.",
+        )
+        parser.add_argument(
+            "--capture-ui-video-seconds",
+            type=float,
+            default=1.5,
+            help="Số giây quay video SAU KHI trang tải xong, áp dụng cho MỌI action trong "
+            "--capture-ui-video-for (mặc định: %(default)s giây) — tăng lên nếu trang cần thời gian "
+            "ổn định lâu hơn (animation, nội dung tải bất đồng bộ) trước khi hình ảnh đáng để làm "
+            "bằng chứng.",
         )
         _add_llm_mode_arg(parser)
         _add_context_db_arg(parser)

@@ -6,11 +6,11 @@ module only classifies mechanically (status code -> access_result), it never
 states a verdict.
 
 Scope of this increment — what this does NOT do yet:
-- HTTP_TRANSACTION (capture()) and UI_CAPTURE (capture_ui_state(),
-  screenshot only — see its own docstring for scope) have real producers;
-  SPEC §4.3.2's other 3 channels (process execution, application log,
-  data-state comparison) still don't — see shared/models/observation.py's
-  module docstring.
+- HTTP_TRANSACTION (capture()) and UI_CAPTURE (capture_ui_state() for
+  screenshots, capture_ui_recording() for video — see each one's own
+  docstring for scope) have real producers; SPEC §4.3.2's other 3
+  channels (process execution, application log, data-state comparison)
+  still don't — see shared/models/observation.py's module docstring.
 - Blind marker (§4.3.4) is PARTIALLY here: generate_marker() generates this
   run's marker and persists it to a seed manifest (only this process and,
   once built, Verdict Oracle ever read that file — never Exploit Agent/any
@@ -810,6 +810,104 @@ class EvidenceHarness:
 
         return observation
 
+    def _enforce_ui_capture_gates(self, action: ActionSpec, verb: str):
+        """Shared closed-instance / kill-switch / cost-cap checks for
+        capture_ui_state() and capture_ui_recording() — same 3 checks,
+        same order as capture()'s own gating, only `verb` (a Vietnamese
+        phrase describing the real browser action about to happen, e.g.
+        "mở trình duyệt thật" / "quay video thật") differs between the
+        two methods' error messages. Returns the `sync_playwright`
+        callable (from `_sync_playwright()`) so the caller doesn't need
+        a separate import-check call of its own — checked here, between
+        the kill-switch and cost checks, matching the original ordering:
+        a STOPPED execution fails fast without even checking playwright
+        is installed, and a missing playwright never consumes a cost-cap
+        slot for an action that was never going to run anyway.
+        """
+        if self._closed:
+            raise RuntimeError(
+                f"EvidenceHarness cho execution '{self._execution_id}' đã close() — không thể {verb} "
+                f"cho action '{action.action_id}'. Tạo instance mới nếu cần tiếp tục thu bằng chứng."
+            )
+        if self._kill_switch is not None:
+            # refresh() first — same reasoning as capture()'s own check: a
+            # stop() written by a SEPARATE KillSwitch instance must not be
+            # invisible here just because these methods never call capture().
+            self._kill_switch.refresh()
+            if self._kill_switch.is_stopped:
+                raise ExecutionStoppedError(
+                    f"Execution '{self._execution_id}' đã STOPPED — từ chối {verb} cho action "
+                    f"'{action.action_id}'. Xem kill_switch_audit_log.jsonl của execution này để biết "
+                    "ai/khi nào/vì sao đã dừng."
+                )
+
+        sync_playwright = _sync_playwright()
+
+        if self._cost_service is not None:
+            decision = self._cost_service.record_action(action.action_id)
+            if not decision.allowed:
+                if self._kill_switch is not None:
+                    self._kill_switch.stop(
+                        source=StopSource.AUTOMATIC_THRESHOLD,
+                        automatic_threshold_reason=AutomaticThresholdReason.ACTION_COUNT_EXCEEDED,
+                        reason=decision.reason,
+                    )
+                raise CostCapExceededError(
+                    f"Execution '{self._execution_id}': {decision.reason} Không {verb} cho action "
+                    f"'{action.action_id}'."
+                )
+        return sync_playwright
+
+    def _playwright_cookies_for(self, identity: str, action: ActionSpec) -> List[Dict[str, Any]]:
+        """Translates `identity`'s existing httpx cookie jar into
+        Playwright's expected cookie dict shape — shared by
+        capture_ui_state() and capture_ui_recording(). httpx's simple
+        `.items()` view loses domain/path — Playwright needs `url` OR a
+        non-empty `domain`+`path` to place a cookie correctly, so this
+        reads the underlying cookiejar.Cookie objects directly instead.
+        `cookie.domain` is `""` (not None) for a cookie set via
+        `client.cookies.set(name, value)` with no `domain=` argument (a
+        realistic pattern for pre-seeding a session without a full
+        login() round-trip) — passing an empty string straight through
+        makes Playwright's add_cookies() raise for the WHOLE list (it's
+        all-or-nothing), dropping every cookie, not just the one missing
+        a domain. Falls back to `url=action.target` for exactly those
+        cookies — a reasonable default since that's where the cookie is
+        about to be used anyway — while still using the real, precise
+        domain+path for every cookie that has one.
+        """
+        client = self._client_for(identity)
+        cookies = []
+        for cookie in client.cookies.jar:
+            entry = {"name": cookie.name, "value": cookie.value, "secure": bool(cookie.secure)}
+            if cookie.domain:
+                entry["domain"] = cookie.domain
+                entry["path"] = cookie.path or "/"
+            else:
+                entry["url"] = action.target
+            cookies.append(entry)
+        return cookies
+
+    def _record_ui_capture_in_context_store(self, action: ActionSpec, what: str) -> None:
+        """Same best-effort Context Store write convention as capture()'s
+        own — see its comment for why a store hiccup must never fail an
+        otherwise-successful capture. `what` names the artifact kind
+        (e.g. "screenshot captured" / "video recording captured")."""
+        if self._context_store is not None:
+            target_url_parts = urlsplit(action.target)
+            target_without_query = urlunsplit(
+                target_url_parts._replace(netloc=_strip_userinfo(target_url_parts.netloc), query="", fragment="")
+            )
+            try:
+                self._context_store.record_unverified_observation(
+                    target_id=self._target_id,
+                    execution_id=self._execution_id,
+                    description=f"[setup] UI_CAPTURE {target_without_query} -> {what}",
+                    revision=self._target_revision_id,
+                )
+            except RuntimeError:
+                pass
+
     def capture_ui_state(self, action: ActionSpec, identity: str = "anonymous") -> NormalizedObservation:
         """SPEC §4.3.2's UI_CAPTURE channel (Playwright): a real headless-
         browser screenshot of what `action.target` renders — purely
@@ -823,21 +921,22 @@ class EvidenceHarness:
         NormalizedObservation's own documented guidance that a non-HTTP
         channel has no granted/denied semantic and must not force a fit.
 
-        Scope of THIS increment: screenshot only. SPEC §4.3.2 lists
-        "Screenshot + screen recording" as one row, but screen recording
-        needs its own browser-context lifecycle (a video file only
-        finalizes once its context closes) and there's no field on
-        NormalizedObservation for a second raw-evidence artifact — left
-        for a follow-up rather than half-built here.
+        Screenshot only — see capture_ui_recording() for SPEC §4.3.2's
+        screen-recording half of the same UI_CAPTURE row. The two are
+        separate methods (each returning its OWN single
+        NormalizedObservation, one artifact each — SPEC's ER diagram is
+        Artifact ||--|| NormalizedObservation, a strict 1:1) rather than
+        one method trying to return two artifacts from a single call.
 
-        Reuses `identity`'s EXISTING httpx cookie jar (via _client_for) so
-        the rendered page reflects the SAME authenticated session an
-        HTTP-based observation for this identity would see — cookies are
-        copied INTO a fresh, isolated Playwright browser context, never
-        the other way around; Playwright never touches the real httpx
-        client/session. An identity that never logged in (the default
-        "anonymous") renders exactly what an unauthenticated visitor
-        would see, same as capture()'s own default.
+        Reuses `identity`'s EXISTING httpx cookie jar (via
+        _playwright_cookies_for) so the rendered page reflects the SAME
+        authenticated session an HTTP-based observation for this
+        identity would see — cookies are copied INTO a fresh, isolated
+        Playwright browser context, never the other way around;
+        Playwright never touches the real httpx client/session. An
+        identity that never logged in (the default "anonymous") renders
+        exactly what an unauthenticated visitor would see, same as
+        capture()'s own default.
 
         Only `action.target` is navigated to (a real browser visit is a
         page LOAD, not a form submission) — `action.parameters` is not
@@ -860,17 +959,16 @@ class EvidenceHarness:
         itself displays a secret must account for that before treating
         the image as shareable.
 
-        Same KillSwitch/CostService gating as capture() (checked
-        independently here, not by calling capture() internally — a
-        browser navigation is a different mechanism, not an httpx
-        request), for the same reasons: refuses instead of opening a real
-        browser once STOPPED, and counts against the same cost cap since
-        this is still a real action against the target. A caller pairing
-        this with an HTTP capture() call for the SAME action (the CLI's
-        own `execute --capture-ui-for` does exactly this) spends a
-        SECOND cost-cap slot on top of the HTTP capture's own — a real,
-        intentional cost, not a bug, but one a caller sizing `--cap`
-        needs to account for explicitly (see `--cap`'s own help text).
+        Same KillSwitch/CostService gating as capture() (see
+        _enforce_ui_capture_gates), for the same reasons: refuses instead
+        of opening a real browser once STOPPED, and counts against the
+        same cost cap since this is still a real action against the
+        target. A caller pairing this with an HTTP capture() call for the
+        SAME action (the CLI's own `execute --capture-ui-for` does
+        exactly this) spends a SECOND cost-cap slot on top of the HTTP
+        capture's own — a real, intentional cost, not a bug, but one a
+        caller sizing `--cap` needs to account for explicitly (see
+        `--cap`'s own help text).
 
         Requires the `playwright` package + `playwright install
         chromium` — NOT a dependency of this module's other capabilities,
@@ -879,66 +977,11 @@ class EvidenceHarness:
         with a clear install hint instead of a raw ImportError deep in a
         stack trace if it's missing.
         """
-        if self._closed:
-            raise RuntimeError(
-                f"EvidenceHarness cho execution '{self._execution_id}' đã close() — không thể "
-                "capture_ui_state() thêm trên instance này. Tạo instance mới nếu cần tiếp tục thu "
-                "bằng chứng."
-            )
-        if self._kill_switch is not None:
-            # refresh() first — same reasoning as capture()'s own check: a
-            # stop() written by a SEPARATE KillSwitch instance must not be
-            # invisible here just because this method never calls capture().
-            self._kill_switch.refresh()
-            if self._kill_switch.is_stopped:
-                raise ExecutionStoppedError(
-                    f"Execution '{self._execution_id}' đã STOPPED — capture_ui_state() từ chối mở "
-                    f"trình duyệt thật cho action '{action.action_id}'. Xem "
-                    "kill_switch_audit_log.jsonl của execution này để biết ai/khi nào/vì sao đã dừng."
-                )
-
-        sync_playwright = _sync_playwright()
-
-        if self._cost_service is not None:
-            decision = self._cost_service.record_action(action.action_id)
-            if not decision.allowed:
-                if self._kill_switch is not None:
-                    self._kill_switch.stop(
-                        source=StopSource.AUTOMATIC_THRESHOLD,
-                        automatic_threshold_reason=AutomaticThresholdReason.ACTION_COUNT_EXCEEDED,
-                        reason=decision.reason,
-                    )
-                raise CostCapExceededError(
-                    f"Execution '{self._execution_id}': {decision.reason} Không mở trình duyệt "
-                    f"thật cho action '{action.action_id}'."
-                )
+        sync_playwright = self._enforce_ui_capture_gates(action, "mở trình duyệt thật")
 
         observation_id = generate_id("obs")
         captured_at = datetime.now(timezone.utc)
-        client = self._client_for(identity)
-        # httpx's simple `.items()` view loses domain/path — Playwright
-        # needs `url` OR a non-empty `domain`+`path` to place a cookie
-        # correctly, so this reads the underlying cookiejar.Cookie objects
-        # directly instead. `cookie.domain` is `""` (not None) for a
-        # cookie set via `client.cookies.set(name, value)` with no
-        # `domain=` argument (a realistic pattern for pre-seeding a
-        # session without a full login() round-trip) — passing an empty
-        # string straight through makes Playwright's add_cookies() raise
-        # for the WHOLE list (it's all-or-nothing), dropping every
-        # cookie, not just the one missing a domain. Falls back to
-        # `url=action.target` for exactly those cookies — a reasonable
-        # default since that's where the cookie is about to be used
-        # anyway — while still using the real, precise domain+path for
-        # every cookie that has one.
-        playwright_cookies = []
-        for cookie in client.cookies.jar:
-            entry = {"name": cookie.name, "value": cookie.value, "secure": bool(cookie.secure)}
-            if cookie.domain:
-                entry["domain"] = cookie.domain
-                entry["path"] = cookie.path or "/"
-            else:
-                entry["url"] = action.target
-            playwright_cookies.append(entry)
+        playwright_cookies = self._playwright_cookies_for(identity, action)
 
         from playwright.sync_api import Error as PlaywrightError
 
@@ -967,14 +1010,14 @@ class EvidenceHarness:
                 finally:
                     browser.close()
         except PlaywrightError as exc:
-            # Real gap found via independent review: an unguarded
-            # pw.chromium.launch() (e.g. `playwright install chromium`
-            # never run) raises playwright's OWN Error type, not a
-            # RuntimeError — every caller of this method (the CLI's
-            # execute loop included) only ever catches RuntimeError,
-            # matching ExecutionStoppedError/CostCapExceededError above,
-            # so a raw playwright.sync_api.Error would otherwise crash
-            # the whole run instead of being handled the same way.
+            # An unguarded pw.chromium.launch() (e.g. `playwright install
+            # chromium` never run) raises playwright's OWN Error type,
+            # not a RuntimeError — every caller of this method (the
+            # CLI's execute loop included) only ever catches
+            # RuntimeError, matching ExecutionStoppedError/
+            # CostCapExceededError above, so a raw
+            # playwright.sync_api.Error would otherwise crash the whole
+            # run instead of being handled the same way.
             raise RuntimeError(
                 f"capture_ui_state() lỗi khi dùng trình duyệt thật cho action '{action.action_id}': "
                 f"{type(exc).__name__}: {exc}"
@@ -1002,25 +1045,133 @@ class EvidenceHarness:
             response_contains_marker=None,
             request_contains_marker=None,
         )
+        self._record_ui_capture_in_context_store(action, "screenshot captured")
+        return observation
 
-        if self._context_store is not None:
-            # Same best-effort convention as capture()'s own Context Store
-            # write — see its comment for why a store hiccup must never
-            # fail an otherwise-successful capture.
-            target_url_parts = urlsplit(action.target)
-            target_without_query = urlunsplit(
-                target_url_parts._replace(netloc=_strip_userinfo(target_url_parts.netloc), query="", fragment="")
-            )
+    def capture_ui_recording(
+        self, action: ActionSpec, identity: str = "anonymous", record_seconds: float = 1.5
+    ) -> NormalizedObservation:
+        """SPEC §4.3.2's UI_CAPTURE channel (Playwright), screen-recording
+        half — a real headless-browser video of what `action.target`
+        renders, from navigation through `record_seconds` afterward. See
+        capture_ui_state()'s own docstring for everything shared with
+        this method (never feeds evaluate_predicates(), role is always
+        SETUP, access_result always AMBIGUOUS, identity/cookie sharing,
+        KillSwitch/CostService gating, the on-screen-secrets redaction
+        limit, the lazy playwright import) — this docstring only covers
+        what's DIFFERENT about recording specifically.
+
+        Playwright only finalizes a video file once the PAGE that
+        produced it closes (`page.video.path()` blocks until the file is
+        fully written) — unlike capture_ui_state()'s single screenshot
+        call, this method deliberately keeps the page open for
+        `record_seconds` (default 1.5s) after navigation completes/fails,
+        so the clip shows the settled page state rather than a near-empty
+        first frame, then closes the page itself to flush the recording
+        before reading it back. The video only ever covers the browser's
+        VIEWPORT (Playwright's own limitation) — unlike
+        capture_ui_state()'s `full_page=True` screenshot, which captures
+        the full scrollable page; a long page's content below the fold
+        never appears in the recording.
+
+        Playwright writes the video to an auto-generated filename inside
+        a scratch directory (Playwright has no option to name it
+        directly) — this method reads those bytes back and writes them
+        under this harness's own `{observation_id}_ui.webm` naming
+        convention (matching every other artifact this class produces),
+        then removes the scratch file/directory so nothing beyond the
+        renamed copy under `raw_evidence_ref` lingers on disk.
+        """
+        sync_playwright = self._enforce_ui_capture_gates(action, "quay video thật")
+
+        observation_id = generate_id("obs")
+        captured_at = datetime.now(timezone.utc)
+        playwright_cookies = self._playwright_cookies_for(identity, action)
+
+        from playwright.sync_api import Error as PlaywrightError
+
+        video_scratch_dir = Path(tempfile.mkdtemp(dir=self._storage_dir, prefix=".ui_video_scratch_"))
+        try:
+            video_bytes: bytes
             try:
-                self._context_store.record_unverified_observation(
-                    target_id=self._target_id,
-                    execution_id=self._execution_id,
-                    description=f"[setup] UI_CAPTURE {target_without_query} -> screenshot captured",
-                    revision=self._target_revision_id,
-                )
-            except RuntimeError:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.launch()
+                    try:
+                        context = browser.new_context(record_video_dir=str(video_scratch_dir))
+                        try:
+                            if playwright_cookies:
+                                context.add_cookies(playwright_cookies)
+                            page = context.new_page()
+                            try:
+                                page.goto(action.target, wait_until="load")
+                            except PlaywrightError:
+                                # Same reasoning as capture_ui_state()'s
+                                # own navigation-failure handling — still
+                                # real evidence of what a visitor sees.
+                                pass
+                            page.wait_for_timeout(int(record_seconds * 1000))
+                            video = page.video
+                            page.close()  # flushes the video file to disk
+                            video_path = Path(video.path())
+                        finally:
+                            context.close()
+                    finally:
+                        browser.close()
+                video_bytes = video_path.read_bytes()
+            except (PlaywrightError, OSError) as exc:
+                # Real gap found via independent review: reading the
+                # video file back from disk (unlike capture_ui_state()'s
+                # screenshot, which comes back as in-memory bytes
+                # directly from Playwright) is a NEW failure surface this
+                # method has that capture_ui_state() doesn't — a
+                # `FileNotFoundError`/other `OSError` here (the scratch
+                # file removed or locked by something external, a
+                # disk-full mid-write) is not a PlaywrightError and would
+                # otherwise propagate raw past this method, uncaught by
+                # the CLI's `except RuntimeError` handling every other
+                # error path in this feature relies on.
+                raise RuntimeError(
+                    f"capture_ui_recording() lỗi khi dùng trình duyệt thật cho action "
+                    f"'{action.action_id}': {type(exc).__name__}: {exc}"
+                ) from exc
+        finally:
+            # Best-effort scratch cleanup — the real, durable copy is
+            # written under raw_evidence_ref below regardless of whether
+            # this succeeds; a leftover scratch file must never be
+            # allowed to fail an otherwise-successful capture.
+            for leftover in video_scratch_dir.glob("*"):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
+            try:
+                video_scratch_dir.rmdir()
+            except OSError:
                 pass
 
+        video_path_final = self._storage_dir / f"{observation_id}_ui.webm"
+        video_path_final.write_bytes(video_bytes)
+        raw_evidence_hash = "sha256:" + hashlib.sha256(video_bytes).hexdigest()
+
+        observation = NormalizedObservation(
+            observation_id=observation_id,
+            action_ref=action.action_id,
+            role=ObservationRole.SETUP,
+            captured_at=captured_at,
+            identity=identity,
+            execution_id=self._execution_id,
+            target_id=self._target_id,
+            target_revision_id=self._target_revision_id,
+            channel=EvidenceChannel.UI_CAPTURE,
+            raw_evidence_size_bytes=len(video_bytes),
+            raw_evidence_hash=raw_evidence_hash,
+            raw_evidence_ref=str(video_path_final),
+            access_result=AccessResult.AMBIGUOUS,
+            status_code=None,
+            response_contains_marker=None,
+            request_contains_marker=None,
+        )
+        self._record_ui_capture_in_context_store(action, "video recording captured")
         return observation
 
     def _rewrite_artifact_response_body(

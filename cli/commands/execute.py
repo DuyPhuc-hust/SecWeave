@@ -408,7 +408,12 @@ def _run_execute(args: argparse.Namespace) -> int:
     if not args.target_id:
         raise CliError("--target-id không được để trống.")
     capture_ui_for_ids = set(args.capture_ui_for or [])
-    if capture_ui_for_ids:
+    capture_ui_video_for_ids = set(args.capture_ui_video_for or [])
+    if args.capture_ui_video_seconds < 0:
+        raise CliError(
+            f"--capture-ui-video-seconds={args.capture_ui_video_seconds} không hợp lệ — phải >= 0."
+        )
+    if capture_ui_for_ids or capture_ui_video_for_ids:
         # Checked up front, before any real action runs — a run that
         # already sent real HTTP requests (consuming real cost-cap
         # budget) and only THEN discovered playwright/Chromium isn't
@@ -418,7 +423,8 @@ def _run_execute(args: argparse.Namespace) -> int:
         # (throwaway) browser — a plain import check alone can't detect
         # `pip install playwright` having been done WITHOUT the separate
         # `playwright install chromium` step, which is the far more
-        # common real misconfiguration.
+        # common real misconfiguration. One check covers both flags —
+        # screenshot and video both need the exact same real Chromium.
         try:
             verify_ui_capture_available()
         except RuntimeError as exc:
@@ -613,13 +619,15 @@ def _run_execute(args: argparse.Namespace) -> int:
     # _resolve_from_step_references). Empty for the overwhelming majority
     # of plans that never use {{FROM_STEP:...}} at all.
     step_responses: Dict[str, Any] = {}
-    # Every --capture-ui-for action_id that actually matched a real,
-    # executed action — used below to warn about any entry that never
-    # matched anything (a typo, or an action_id from a DIFFERENT plan)
-    # instead of silently costing nothing with no sign anything was
-    # wrong, the same "never silently ignore an operator's explicit flag"
-    # principle other flags in this file already follow.
+    # Every --capture-ui-for/--capture-ui-video-for action_id that
+    # actually matched a real, executed action — used below to warn
+    # about any entry that never matched anything (a typo, or an
+    # action_id from a DIFFERENT plan) instead of silently costing
+    # nothing with no sign anything was wrong, the same "never silently
+    # ignore an operator's explicit flag" principle other flags in this
+    # file already follow.
     matched_capture_ui_for_ids: set = set()
+    matched_capture_ui_video_for_ids: set = set()
 
     def _persist_observation(observation: NormalizedObservation) -> None:
         # Appended one JSON object per line (not a single array rewritten
@@ -792,6 +800,25 @@ def _run_execute(args: argparse.Namespace) -> int:
                         break
                     _persist_observation(ui_observation)
                     print(f"   [ui-capture] {resolved_action.target} -> {ui_observation.raw_evidence_ref}")
+                if resolved_action.action_id in capture_ui_video_for_ids:
+                    matched_capture_ui_video_for_ids.add(resolved_action.action_id)
+                    # Same reasoning as the screenshot branch above, just
+                    # the video-recording sibling method.
+                    try:
+                        ui_video_observation = harness.capture_ui_recording(
+                            resolved_action,
+                            identity=role_identity.get(resolved_action.role, args.identity),
+                            record_seconds=args.capture_ui_video_seconds,
+                        )
+                    except RuntimeError as exc:
+                        stopped_reason = str(exc)
+                        print(f"   DỪNG GIỮA CHỪNG (UI recording): {exc}", file=sys.stderr)
+                        break
+                    _persist_observation(ui_video_observation)
+                    print(
+                        f"   [ui-recording] {resolved_action.target} -> "
+                        f"{ui_video_observation.raw_evidence_ref}"
+                    )
     finally:
         harness.close()
         execution_context_store.close()
@@ -807,6 +834,14 @@ def _run_execute(args: argparse.Namespace) -> int:
             print(
                 f"CẢNH BÁO: --capture-ui-for không khớp action_id nào trong plan này: "
                 f"{sorted(unmatched_capture_ui_for_ids)} — không chụp screenshot nào cho (các) "
+                "action_id này, kiểm tra lại có gõ đúng action_id trong plan không.",
+                file=sys.stderr,
+            )
+        unmatched_capture_ui_video_for_ids = capture_ui_video_for_ids - matched_capture_ui_video_for_ids
+        if unmatched_capture_ui_video_for_ids:
+            print(
+                f"CẢNH BÁO: --capture-ui-video-for không khớp action_id nào trong plan này: "
+                f"{sorted(unmatched_capture_ui_video_for_ids)} — không quay video nào cho (các) "
                 "action_id này, kiểm tra lại có gõ đúng action_id trong plan không.",
                 file=sys.stderr,
             )

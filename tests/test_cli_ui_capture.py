@@ -127,6 +127,103 @@ def test_cli_execute_with_capture_ui_for_writes_a_real_screenshot(capsys, tmp_pa
     assert _Handler.request_count == 2
 
 
+def test_cli_execute_with_capture_ui_video_for_writes_a_real_webm(capsys, tmp_path, real_server):
+    plan_path = _plan_file(tmp_path, real_server, "act_ui_video_test_1")
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            "hyp_ui_capture_cli_test",
+            "--plan-file",
+            str(plan_path),
+            "--allowed-action",
+            f"GET {real_server}",
+            "--capture-ui-video-for",
+            "act_ui_video_test_1",
+            "--capture-ui-video-seconds",
+            "0.3",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            "exec_ui_video_capture_cli_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            str(tmp_path / "context.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "[ui-recording]" in captured.out
+
+    execution_dir = tmp_path / "evidence" / "exec_ui_video_capture_cli_test"
+    videos = list(execution_dir.glob("*_ui.webm"))
+    assert len(videos) == 1
+    assert videos[0].read_bytes()[:4] == b"\x1a\x45\xdf\xa3"
+
+    observation_lines = [
+        json.loads(line)
+        for line in (execution_dir / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    ui_observations = [o for o in observation_lines if o["channel"] == "ui_capture"]
+    assert len(ui_observations) == 1
+    assert ui_observations[0]["role"] == "setup"
+
+
+def test_cli_execute_with_both_capture_ui_flags_writes_both_a_png_and_a_webm(capsys, tmp_path, real_server):
+    # Both flags for the SAME action_id must produce BOTH artifacts, not
+    # one clobbering the other.
+    plan_path = _plan_file(tmp_path, real_server, "act_ui_both_test_1")
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            "hyp_ui_capture_cli_test",
+            "--plan-file",
+            str(plan_path),
+            "--allowed-action",
+            f"GET {real_server}",
+            "--capture-ui-for",
+            "act_ui_both_test_1",
+            "--capture-ui-video-for",
+            "act_ui_both_test_1",
+            "--capture-ui-video-seconds",
+            "0.3",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            "exec_ui_both_capture_cli_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            str(tmp_path / "context.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "[ui-capture]" in captured.out
+    assert "[ui-recording]" in captured.out
+
+    execution_dir = tmp_path / "evidence" / "exec_ui_both_capture_cli_test"
+    assert len(list(execution_dir.glob("*_ui.png"))) == 1
+    assert len(list(execution_dir.glob("*_ui.webm"))) == 1
+
+    observation_lines = [
+        json.loads(line)
+        for line in (execution_dir / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    ui_observations = [o for o in observation_lines if o["channel"] == "ui_capture"]
+    assert len(ui_observations) == 2  # 1 screenshot + 1 video, both real observations
+
+
 def test_cli_execute_only_captures_ui_for_the_declared_action_id(capsys, tmp_path, real_server):
     # A --capture-ui-for entry naming an action_id NOT in this plan must
     # not silently capture every action — the whole point is explicit,
@@ -207,4 +304,39 @@ def test_cli_execute_rejects_capture_ui_for_up_front_when_playwright_missing(cap
     assert "playwright" in captured.err
     # Checked BEFORE any real action runs — the server must never have
     # been hit at all.
+    assert _Handler.request_count == 0
+
+
+def test_cli_execute_rejects_a_negative_capture_ui_video_seconds(capsys, tmp_path, real_server):
+    plan_path = _plan_file(tmp_path, real_server, "act_ui_video_negative_test")
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            "hyp_ui_capture_cli_test",
+            "--plan-file",
+            str(plan_path),
+            "--allowed-action",
+            f"GET {real_server}",
+            "--capture-ui-video-for",
+            "act_ui_video_negative_test",
+            "--capture-ui-video-seconds",
+            "-1",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            "exec_ui_video_negative_test",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            str(tmp_path / "context.db"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--capture-ui-video-seconds" in captured.err
+    # Checked up front — the server must never have been hit at all.
     assert _Handler.request_count == 0
