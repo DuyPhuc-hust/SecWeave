@@ -81,11 +81,10 @@ def build_artifact_manifest(storage_dir: str, execution_id: str) -> List[Artifac
         raise FileNotFoundError(f"Không tìm thấy thư mục execution '{execution_dir}'")
     candidates = []
     for path in execution_dir.rglob("*"):
-        # Real gap found via independent review: `path.is_file()` follows
-        # a symlink to determine the type — so a symlink TO a file
-        # (anywhere in the tree, at any depth) would be silently
-        # dereferenced and hashed as if it were a real artifact this
-        # codebase wrote, potentially exposing/vouching-for a file
+        # `path.is_file()` follows a symlink to determine the type — so a
+        # symlink TO a file (anywhere in the tree, at any depth) would be
+        # silently dereferenced and hashed as if it were a real artifact
+        # this codebase wrote, potentially exposing/vouching-for a file
         # entirely OUTSIDE the execution directory under an innocuous-
         # looking relative path. `is_symlink()` is checked explicitly so
         # only files this codebase actually wrote (never a symlink) are

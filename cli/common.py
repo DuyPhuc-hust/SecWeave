@@ -219,8 +219,9 @@ def _warn_if_hypothesis_stale(
     """Best-effort twin of `_load_hypothesis_from_context_store`'s staleness
     cross-check, for the `--plan-file` path of `execute`/`retest` — that
     path never reconstructs a Hypothesis (the frozen plan file already has
-    the ActionPlan), so it used to skip this warning entirely, even though
-    it's the documented, RECOMMENDED way to run `execute`. Unlike
+    the ActionPlan), so it needs this separate check to warn at all, even
+    though `--plan-file` is the documented, RECOMMENDED way to run
+    `execute`. Unlike
     `_load_hypothesis_from_context_store`, a missing hypothesis_id or a
     Context Store error here is NOT an error — `--plan-file` has never
     required the hypothesis to still exist in this context-db (it may

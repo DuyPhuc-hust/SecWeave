@@ -124,17 +124,14 @@ def _run_measure(args: argparse.Namespace) -> int:
             try:
                 recomputed_verdict = _read_verdict_for_execution(execution_id, args.storage_dir)
             except CliError:
-                # Real gap found via independent review: `cross_checked`
-                # used to be incremented BEFORE this try/except, so a
-                # corrupted/torn artifact (the files exist, but
-                # _read_verdict_for_execution can't parse them) still
-                # counted toward "N cross-checked" even though the
-                # comparison against the declared verdict never actually
-                # happened — silently defeating the exact tamper-detection
-                # purpose this cross-check exists for (a hand-edited
-                # summary next to a genuinely corrupted artifact would
-                # report "N/N cross-checked, no mismatch" while having
-                # verified nothing for that run).
+                # `cross_checked` (incremented below, only after this
+                # try/except succeeds) must never count a corrupted/torn
+                # artifact (the files exist, but _read_verdict_for_execution
+                # can't parse them) — that would silently defeat the exact
+                # tamper-detection purpose this cross-check exists for: a
+                # hand-edited summary next to a genuinely corrupted
+                # artifact would otherwise report "N/N cross-checked, no
+                # mismatch" while having verified nothing for that run.
                 corrupted_artifact_count += 1
                 continue
             cross_checked += 1

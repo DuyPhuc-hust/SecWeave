@@ -56,20 +56,18 @@ def assemble_verification_package(
     ignores SETUP observations on its own, so passing the full list here
     costs nothing and loses no evidence from the package.
 
-    Raises ValueError immediately for `observations=[]` — real gap found
-    via independent review: this used to fall through to a generic,
-    confusing pydantic ValidationError naming 5 unrelated fields
+    Raises ValueError immediately for `observations=[]`, naming the actual
+    problem directly — without this, construction would fall through to a
+    generic, confusing pydantic ValidationError naming 5 unrelated fields
     (identities/action_record/raw_evidence_references/artifact_hashes/
-    normalized_observations all failing min_length=1 at once) instead of
-    one clear message naming the actual problem. A completely empty run
-    (e.g. the kill-switch stopped everything before any evidence was ever
-    captured) is exactly SPEC §4.5's "execution record" case this module
-    doesn't build — better to fail loud and specific here than let a
+    normalized_observations all failing min_length=1 at once). A completely
+    empty run (e.g. the kill-switch stopped everything before any evidence
+    was ever captured) is exactly SPEC §4.5's "execution record" case this
+    module doesn't build — better to fail loud and specific here than let a
     caller puzzle out 5 field errors that all trace back to one root cause.
 
     Also raises ValueError if any observation's own `execution_id` doesn't
-    match the `execution_id` parameter — real gap found via independent
-    review: nothing previously checked this, so a caller accidentally
+    match the `execution_id` parameter — a caller accidentally
     concatenating observations from two different runs (e.g. reusing a
     variable, or a bug in whatever reads observations.jsonl back) would
     silently produce a package whose predicate_results/verdict rest on

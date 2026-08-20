@@ -74,10 +74,9 @@ def _run_retest(args: argparse.Namespace) -> int:
         try:
             verdict = _read_verdict_for_execution(run_execution_id, args.storage_dir)
         except CliError as exc:
-            # Real gap found via independent review: this call used to be
-            # UNGUARDED, unlike _run_execute() right above it — a
+            # Guarded separately from _run_execute() above: a
             # corrupted/torn observations.jsonl line (a realistic outcome
-            # of a crash mid-write) would abort the WHOLE retest batch
+            # of a crash mid-write) must not abort the WHOLE retest batch
             # and discard the verdicts of every PRIOR run, even though
             # those runs already sent real HTTP requests and consumed
             # real cost-cap budget. Unlike _run_execute()'s own setup

@@ -125,10 +125,10 @@ class PlanCheckResult(BaseModel):
     """
 
     approved: bool
-    # min_length=1 — real gap found via independent review: without it,
-    # `PlanCheckResult(approved=True, checks=[])` constructed cleanly,
-    # since `all(... for check in [])` is vacuously True — "approved, 0
-    # checks" would look identical to a genuinely-reviewed plan. Same
+    # min_length=1 — without it, `PlanCheckResult(approved=True, checks=[])`
+    # would construct cleanly, since `all(... for check in [])` is
+    # vacuously True — "approved, 0 checks" would look identical to a
+    # genuinely-reviewed plan. Same
     # reasoning as ActionPlan.actions's own min_length=1 (see its
     # comment) — currently unreachable through check_plan()'s one real
     # call site (it builds `checks` 1:1 from ActionPlan.actions, which

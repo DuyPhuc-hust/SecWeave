@@ -105,12 +105,11 @@ def render_markdown_report(package: VerificationPackage) -> str:
     )
     lines.append("")
     # `Channel` shown explicitly rather than left for a reader to infer
-    # from `raw_evidence_ref`'s file extension — real gap found via
-    # independent review: once UI_CAPTURE observations (screenshots/
-    # videos, always role=setup/access_result=ambiguous) sit in the SAME
-    # table as HTTP_TRANSACTION rows, distinguishing them by squinting at
-    # a filename suffix is exactly the kind of implicit reading this
-    # project's own reports avoid elsewhere.
+    # from `raw_evidence_ref`'s file extension — UI_CAPTURE observations
+    # (screenshots/videos, always role=setup/access_result=ambiguous) sit
+    # in the SAME table as HTTP_TRANSACTION rows, and distinguishing them
+    # by squinting at a filename suffix is exactly the kind of implicit
+    # reading this project's own reports avoid elsewhere.
     lines.append("| # | Role | Channel | Access result | Status code | Marker khớp? | Raw evidence ref | Hash |")
     lines.append("|---|---|---|---|---|---|---|---|")
     for i, obs in enumerate(package.normalized_observations, start=1):
@@ -123,15 +122,15 @@ def render_markdown_report(package: VerificationPackage) -> str:
             f"| {i} | {obs.role.value} | {obs.channel.value} | {obs.access_result.value} | "
             f"{obs.status_code if obs.status_code is not None else '—'} "
             # `raw_evidence_hash` is NOT wrapped in a backtick code span like
-            # elsewhere in this file — real gap found via independent
-            # review: a value containing its own backtick would close the
-            # span early, and (like every other free-text cell) it also
-            # needs `_escape_cell` for the `|`/newline table-corruption risk
-            # `_escape_cell`'s own docstring describes. Plain escaped text,
-            # same styling as `raw_evidence_ref` right next to it, sidesteps
-            # both failure modes at once instead of trying to escape
-            # backticks INSIDE a code span (Markdown has no reliable way to
-            # do that with a fixed single-backtick delimiter).
+            # elsewhere in this file — a value containing its own backtick
+            # would close the span early, and (like every other free-text
+            # cell) it also needs `_escape_cell` for the `|`/newline
+            # table-corruption risk `_escape_cell`'s own docstring
+            # describes. Plain escaped text, same styling as
+            # `raw_evidence_ref` right next to it, sidesteps both failure
+            # modes at once instead of trying to escape backticks INSIDE a
+            # code span (Markdown has no reliable way to do that with a
+            # fixed single-backtick delimiter).
             f"| {marker} | {_escape_cell(obs.raw_evidence_ref)} | {_escape_cell(obs.raw_evidence_hash)} |"
         )
     lines.append("")

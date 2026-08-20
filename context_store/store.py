@@ -61,8 +61,7 @@ def _require_revision(revision: str) -> None:
     matches any/every revision," so an empty value here is always a
     caller mistake, not a legitimate query.
 
-    Undocumented assumption flagged via independent review, worth stating
-    explicitly: this store treats `revision` as CONTENT-ADDRESSED and
+    This store treats `revision` as CONTENT-ADDRESSED and
     IMMUTABLE (SPEC §10.1: "Quản lý phiên bản | Git | Gắn revision vào
     package" — i.e. a git SHA, not a mutable label). Exact-string matching
     (this function + get_verified_context/get_unverified_context's own
@@ -88,17 +87,14 @@ class SecurityContextStore:
             try:
                 Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                # Real gap found via independent review: this raised a
-                # plain OSError (e.g. a parent path component is an
-                # existing regular file, not a directory) — every cli.py
-                # call site only catches sqlite3.Error around construction,
-                # so this used to escape uncaught and dump a raw traceback
-                # (leaking local file paths) instead of a clean error.
-                # Re-raised as sqlite3.OperationalError (a sqlite3.Error
-                # subclass) so "the store couldn't be opened" has exactly
-                # ONE exception type to catch, regardless of whether the
-                # failure was directory creation or the sqlite connection
-                # itself.
+                # A plain OSError here (e.g. a parent path component is an
+                # existing regular file, not a directory) would otherwise
+                # escape uncaught past every cli.py call site, which only
+                # catches sqlite3.Error around construction. Re-raised as
+                # sqlite3.OperationalError (a sqlite3.Error subclass) so
+                # "the store couldn't be opened" has exactly ONE exception
+                # type to catch, regardless of whether the failure was
+                # directory creation or the sqlite connection itself.
                 raise sqlite3.OperationalError(
                     f"Không tạo được thư mục chứa Context Store tại '{db_path}': {exc}"
                 ) from exc
@@ -158,16 +154,15 @@ class SecurityContextStore:
         existing_hyp_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(hypotheses)")}
         if "location" not in existing_hyp_columns:
             self._conn.execute("ALTER TABLE hypotheses ADD COLUMN location TEXT")
-        # Real gap found via independent review of the verified_observations
-        # revision-staleness fix (2026-08-19): the SAME class of gap exists
-        # one tier up the pipeline — a hypothesis carries no record of which
-        # target_id/revision it was generated for, so a stale hypothesis
-        # generated against an old revision can be `plan`ned/`execute`d
-        # later with no automatic cross-check at all. NULL (not backfilled
-        # to '' — unlike verified_observations' `revision`, this is
-        # genuinely optional metadata, not something every write path is
-        # required to always know) for pre-existing rows AND for any new
-        # hypothesize() call made without --target-id — see
+        # A hypothesis carries no record of which target_id/revision it was
+        # generated for on its own — without these columns, a stale
+        # hypothesis generated against an old revision could be
+        # `plan`ned/`execute`d later with no automatic cross-check at all.
+        # NULL (not backfilled to '' — unlike verified_observations'
+        # `revision`, this is genuinely optional metadata, not something
+        # every write path is required to always know) for pre-existing
+        # rows AND for any new hypothesize() call made without
+        # --target-id — see
         # _load_hypothesis_from_context_store's own warning logic for how a
         # NULL here is treated (never compared, since there's nothing to
         # compare against).
@@ -209,14 +204,12 @@ class SecurityContextStore:
         if "stale_reason" not in existing_vo_columns:
             self._conn.execute("ALTER TABLE verified_observations ADD COLUMN stale_reason TEXT")
         if "revision" not in existing_vo_columns:
-            # Real gap found via independent review: nothing tied a
-            # verified fact to the revision it was verified against, so
-            # get_verified_context() kept serving a still-fresh
-            # (stale=0, valid_until not expired) fact from an OLD
-            # revision as trusted context even after the target's code
-            # had since changed — nothing detected the mismatch
-            # automatically, only an operator remembering to call
-            # mark_stale() did. A pre-existing row has no way to know
+            # Without this column, get_verified_context() would keep
+            # serving a still-fresh (stale=0, valid_until not expired)
+            # fact from an OLD revision as trusted context even after the
+            # target's code had since changed, with nothing to detect the
+            # mismatch automatically short of an operator remembering to
+            # call mark_stale(). A pre-existing row has no way to know
             # what revision it was really verified against, so it
             # backfills to '' — same "unknown, therefore not
             # trustworthy" treatment as a migrated NULL valid_until
@@ -292,17 +285,16 @@ class SecurityContextStore:
         silently refresh it every time someone re-runs this command.
         Returns the number of rows actually promoted.
 
-        Real gap found via independent review: with no bound check here, a
-        non-positive `valid_for_days` silently promoted a row to
-        status='verified' with `valid_until` already in the past — since
-        this method only ever matches WHERE status='unverified', that row
-        could never be promoted again with a correct expiry, permanently
-        losing it from get_verified_context(). An absurdly large value
-        (near datetime's max representable range) raised an uncaught
-        OverflowError instead of the RuntimeError every other failure mode
-        here produces. `valid_for_days` must be a positive integer, bounded
-        at 3650 (10 years) — generous for this store's purpose, but still a
-        real bound rather than none at all.
+        `valid_for_days` must be a positive integer, bounded at 3650 (10
+        years) — generous for this store's purpose, but still a real
+        bound. Without one, a non-positive value would silently promote a
+        row to status='verified' with `valid_until` already in the past —
+        since this method only ever matches WHERE status='unverified',
+        that row could never be promoted again with a correct expiry,
+        permanently losing it from get_verified_context(); an absurdly
+        large value (near datetime's max representable range) would raise
+        an uncaught OverflowError instead of the RuntimeError every other
+        failure mode here produces.
         """
         if not 1 <= valid_for_days <= 3650:
             raise ValueError(
@@ -358,15 +350,15 @@ class SecurityContextStore:
         # applies here too, not just to newly-written rows).
         #
         # `revision` filters to rows verified against THIS EXACT revision —
-        # real gap found via independent review: without this, a fact
-        # verified against an old revision kept being served as trusted
-        # context after the target's code had since changed, with nothing
-        # detecting the mismatch automatically (only an operator
-        # remembering to call mark_stale() did). This is a structural read-
-        # time guard, not a substitute for mark_stale() — it silently
-        # excludes stale-revision rows from THIS query, it doesn't persist
-        # anything, so a caller that queries with the WRONG revision by
-        # mistake can't accidentally mark real facts stale.
+        # without it, a fact verified against an old revision would keep
+        # being served as trusted context after the target's code had
+        # since changed, with nothing detecting the mismatch automatically
+        # short of an operator remembering to call mark_stale(). This is a
+        # structural read-time guard, not a substitute for mark_stale() —
+        # it silently excludes stale-revision rows from THIS query, it
+        # doesn't persist anything, so a caller that queries with the
+        # WRONG revision by mistake can't accidentally mark real facts
+        # stale.
         _require_revision(revision)
         try:
             cursor = self._conn.execute(
