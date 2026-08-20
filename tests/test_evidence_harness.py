@@ -155,6 +155,69 @@ def test_capture_redacts_authorization_and_cookie_headers_on_disk(tmp_path):
     assert "keep-me" in raw_text
 
 
+def test_capture_redacts_proxy_authorization_header_on_disk(tmp_path):
+    # Proxy-Authorization (RFC 7235) is the same class of always-credential
+    # header as Authorization, just for a proxy rather than the origin
+    # server — added to the base floor alongside it.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("proxy-authorization") == "Basic proxy-secret"
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), headers={"Proxy-Authorization": "Basic proxy-secret"}
+    )
+    harness = EvidenceHarness(
+        execution_id="exec_test1",
+        target_id="tgt_1",
+        target_revision_id="rev_1",
+        storage_dir=str(tmp_path),
+        http_client=client,
+    )
+    observation = harness.capture(_action(parameters={}), role=ObservationRole.MAIN)
+
+    raw_text = Path(observation.raw_evidence_ref).read_text()
+    assert "proxy-secret" not in raw_text
+
+
+def test_capture_redacts_a_sensitive_key_nested_inside_the_request_body(tmp_path):
+    # Real gap: _redact_body used to only check the body's TOP-LEVEL keys —
+    # a real request body is commonly nested (e.g. {"user": {"password":
+    # ...}}), so an operator declaring --sensitive-param password still had
+    # the value written to disk in plaintext whenever it was nested even
+    # one level deep.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201)
+
+    harness = _harness(tmp_path, handler)
+    action = _action(
+        method="POST",
+        type=ActionType.TEST_DATA_CREATION,
+        parameters={"user": {"name": "alice", "password": "NESTED-SECRET"}},
+    )
+    observation = harness.capture(action, role=ObservationRole.MAIN, sensitive_body_keys={"password"})
+
+    raw_text = Path(observation.raw_evidence_ref).read_text()
+    assert "NESTED-SECRET" not in raw_text
+    assert "alice" in raw_text  # non-sensitive sibling key untouched
+
+
+def test_capture_redacts_a_sensitive_key_nested_inside_a_list_in_the_request_body(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201)
+
+    harness = _harness(tmp_path, handler)
+    action = _action(
+        method="POST",
+        type=ActionType.TEST_DATA_CREATION,
+        parameters={"accounts": [{"token": "LIST-SECRET-1"}, {"token": "LIST-SECRET-2"}]},
+    )
+    observation = harness.capture(action, role=ObservationRole.MAIN, sensitive_body_keys={"token"})
+
+    raw_text = Path(observation.raw_evidence_ref).read_text()
+    assert "LIST-SECRET-1" not in raw_text
+    assert "LIST-SECRET-2" not in raw_text
+
+
 def test_capture_sends_get_parameters_as_query_string_not_body(tmp_path):
     captured = {}
 

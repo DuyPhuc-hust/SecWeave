@@ -89,11 +89,17 @@ from shared.models.observation import (
 )
 
 # Minimal safety floor, not the real redaction catalog (see module docstring).
-# Extended per-instance by login() when a caller uses a custom token_header —
-# a custom header name (e.g. "X-Access-Token") must redact just as much as
-# the standard "Authorization" does, on every subsequent request, not just
-# the login itself.
-_BASE_REDACTED_HEADERS = {"authorization", "cookie", "set-cookie"}
+# All 3 are protocol-level, RFC-defined header names that are ALWAYS
+# credential-bearing when present, regardless of target — not a guess about
+# any particular target's own field semantics (same distinction _redact_body
+# draws for body/query keys): "Authorization"/"Proxy-Authorization" (RFC
+# 7235, client credentials sent to the origin server vs. a proxy
+# respectively) and "Cookie"/"Set-Cookie" (RFC 6265). Extended per-instance
+# by login() when a caller uses a custom token_header — a custom header name
+# (e.g. "X-Access-Token") must redact just as much as the standard
+# "Authorization" does, on every subsequent request, not just the login
+# itself.
+_BASE_REDACTED_HEADERS = {"authorization", "proxy-authorization", "cookie", "set-cookie"}
 _REDACTED_PLACEHOLDER = "<redacted>"
 
 # Methods conventionally read via query string rather than a body. Not part
@@ -118,16 +124,36 @@ def _redact_headers(headers: Dict[str, str], sensitive_names: Set[str]) -> Dict[
 
 
 def _redact_body(body: Any, sensitive_keys: Optional[Set[str]]) -> Any:
-    # Only redacts a top-level dict's named keys — deliberately not
-    # recursive/heuristic (e.g. scanning for anything that "looks like" a
-    # password). ActionSpec.parameters shape is entirely target-specific, so
-    # guessing which nested fields are secrets would be exactly the kind of
-    # silent, incomplete denylist this project avoids elsewhere (see
-    # shared/policy.py's key-based, caller-declared params: allowlist for the
-    # same reasoning). Callers that need more must say so explicitly.
-    if not sensitive_keys or not isinstance(body, dict):
+    # Redacts every occurrence of a caller-DECLARED key name, at any nesting
+    # depth (dicts and lists both walked) — still never heuristic (e.g.
+    # scanning for anything that merely "looks like" a password, or
+    # recognizing common secret field names on its own). ActionSpec.
+    # parameters shape is entirely target-specific, so guessing which fields
+    # are secrets would be exactly the kind of silent, incomplete denylist
+    # this project avoids elsewhere (see shared/policy.py's key-based,
+    # caller-declared params: allowlist for the same reasoning). Recursing
+    # over STRUCTURE is a different thing from that: a real request body is
+    # commonly nested (e.g. {"user": {"password": "..."}}, or a list of
+    # objects), and an operator declaring "password" via --sensitive-param
+    # reasonably expects EVERY occurrence of that exact key protected, not
+    # only a top-level one — a real gap when the previous, non-recursive
+    # version silently left nested occurrences of an explicitly-declared key
+    # unredacted. Callers that need more than an exact key match must still
+    # say so explicitly; this only makes the SAME declaration thorough.
+    if not sensitive_keys:
         return body
-    return {key: (_REDACTED_PLACEHOLDER if key in sensitive_keys else value) for key, value in body.items()}
+    return _redact_nested(body, sensitive_keys)
+
+
+def _redact_nested(value: Any, sensitive_keys: Set[str]) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: (_REDACTED_PLACEHOLDER if key in sensitive_keys else _redact_nested(child, sensitive_keys))
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_nested(item, sensitive_keys) for item in value]
+    return value
 
 
 def _strip_userinfo(netloc: str) -> str:
@@ -448,13 +474,14 @@ class EvidenceHarness:
         name nobody has logged in as). See login() to establish a session
         for a real identity first.
 
-        `sensitive_body_keys`: top-level keys in action.parameters whose
-        VALUES must never be written to disk (e.g. {"password"} for a login
-        action) — see _redact_body's docstring for why this is caller-
-        declared rather than guessed. ALSO covers a same-named query-string
-        parameter embedded directly in `action.target`'s own URL (see
-        _redact_url_query's docstring). Only affects the STORED transcript,
-        never the real request actually sent.
+        `sensitive_body_keys`: key names in action.parameters whose VALUES
+        must never be written to disk (e.g. {"password"} for a login
+        action), matched at ANY nesting depth — see _redact_body's
+        docstring for why this is caller-declared rather than guessed.
+        ALSO covers a same-named query-string parameter embedded directly
+        in `action.target`'s own URL (see _redact_url_query's docstring,
+        flat only — a URL query string has no nesting). Only affects the
+        STORED transcript, never the real request actually sent.
 
         The stored `request.url` is the REAL, resolved URL httpx actually
         sent (`str(request.url)`), not `action.target` verbatim — for
