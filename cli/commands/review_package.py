@@ -52,12 +52,21 @@ def _run_review_package(args: argparse.Namespace) -> int:
 
     decision = _parse_enum_arg(ReviewDecision, args.decision, "--decision")
 
-    if args.retest_reference and decision != ReviewDecision.RETEST:
-        # --retest-reference with a non-retest decision would attach field
-        # #19 ("absent until retests have run") to a package where no retest
-        # actually happened.
+    if args.retest_reference and decision not in (ReviewDecision.RETEST, ReviewDecision.RELEASE):
+        # --retest-reference with decision=reject would attach field #19
+        # ("absent until retests have run") to a package the reviewer is
+        # explicitly discarding — pointless, and a realistic copy-paste
+        # mistake to guard against. RELEASE is deliberately allowed too:
+        # VerificationPackage.missing_fields_for_release() unconditionally
+        # requires retest_reference for is_release_ready regardless of
+        # decision (SPEC §8.1's reproducibility gate applies to every
+        # release, not just a decision=retest one) — a package that had
+        # retest run separately and is now being released must be able to
+        # attach that reference here too, or is_release_ready can never
+        # become true for a real, checked, released package.
         raise CliError(
-            f"--retest-reference chỉ hợp lệ cùng --decision retest (đang dùng --decision {decision.value})."
+            f"--retest-reference chỉ hợp lệ cùng --decision retest hoặc release (đang dùng --decision "
+            f"{decision.value})."
         )
 
     try:

@@ -4786,12 +4786,48 @@ def test_cli_review_package_rejects_a_hand_tampered_verdict(capsys, monkeypatch,
     assert "sửa tay" in captured.err
 
 
-def test_cli_review_package_rejects_retest_reference_with_non_retest_decision(capsys, monkeypatch, tmp_path):
-    # Real gap found via independent review: --retest-reference could be
-    # attached to ANY decision (e.g. release), producing a package that's
-    # simultaneously is_release_ready=True and carries a retest_reference —
-    # contradicting field #19's own semantics ("absent until retests have
-    # run").
+def test_cli_review_package_rejects_retest_reference_with_reject_decision(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review (original version of this
+    # check): --retest-reference could be attached to ANY decision at all,
+    # including reject — pointless, and a realistic copy-paste mistake to
+    # guard against. NOTE: release is deliberately NOT rejected here (see
+    # test_cli_review_package_accepts_retest_reference_with_release_decision
+    # right below) — a SECOND real gap found running this pipeline for real
+    # (2026-08-20): the ORIGINAL fix for this incident only allowed
+    # --decision retest, which made retest_reference permanently
+    # unattachable for the one decision that actually needs it for
+    # is_release_ready (SPEC §8.1's reproducibility gate applies to every
+    # release, not just a decision=retest one).
+    package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path)
+
+    exit_code = cli.main(
+        [
+            "review-package",
+            "--package-file",
+            str(package_file),
+            "--reviewer",
+            "phuc@ntq.local",
+            "--decision",
+            "reject",
+            "--reason",
+            "test",
+            "--retest-reference",
+            "retest_123",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "retest" in captured.err
+
+
+def test_cli_review_package_accepts_retest_reference_with_release_decision(capsys, monkeypatch, tmp_path):
+    # Real gap found running this pipeline for real (2026-08-20): a package
+    # that had `secweave retest` run separately, then genuinely reviewed
+    # and released, could never have --retest-reference attached at all —
+    # the original fix for the sibling test above only permitted
+    # --decision retest, leaving is_release_ready permanently False (missing
+    # retest_reference) for every real released package.
     package_file = _assemble_a_real_package(capsys, monkeypatch, tmp_path)
 
     exit_code = cli.main(
@@ -4808,12 +4844,25 @@ def test_cli_review_package_rejects_retest_reference_with_non_retest_decision(ca
             "--checked-raw-artifact",
             "--retest-reference",
             "retest_123",
+            "--format",
+            "json",
         ]
     )
-    captured = capsys.readouterr()
+    reviewed_output = capsys.readouterr().out
+    reviewed = json.loads(reviewed_output)
 
-    assert exit_code == 1
-    assert "retest" in captured.err
+    assert exit_code == 0
+    assert reviewed["retest_reference"] == "retest_123"
+
+    # Confirm via the REAL is_release_ready gate (measure), not just that
+    # the field round-tripped — this is what actually stayed broken before
+    # this fix (retest_reference present has no effect if the CLI never
+    # let it coexist with decision=release in the first place).
+    package_file.write_text(reviewed_output, encoding="utf-8")
+    measure_exit_code = cli.main(["measure", "--package-file", str(package_file), "--format", "json"])
+    measure_report = json.loads(capsys.readouterr().out)
+    assert measure_exit_code == 0
+    assert measure_report["schema_completeness"] == {"is_release_ready": True, "missing_fields": []}
 
 
 def test_cli_review_package_warns_when_overwriting_a_prior_review(capsys, monkeypatch, tmp_path):
@@ -5475,8 +5524,12 @@ def test_cli_measure_reports_schema_completeness_from_a_real_package_and_updates
     assert report["ecs"]["status"].startswith("N/A")
     assert report["khả_năng_bàn_giao"]["status"].startswith("N/A")
 
-    # Release it for real (Gate 4 minimal loop), then re-measure the SAME
-    # underlying execution — schema completeness must flip to ready.
+    # Release it for real (Gate 4 minimal loop), attaching a real
+    # --retest-reference in the SAME step (supported alongside
+    # decision=release — see
+    # test_cli_review_package_accepts_retest_reference_with_release_decision
+    # for the dedicated regression test of that fix), then re-measure the
+    # SAME underlying execution — schema completeness must flip to ready.
     assert (
         cli.main(
             [
@@ -5490,6 +5543,8 @@ def test_cli_measure_reports_schema_completeness_from_a_real_package_and_updates
                 "--reason",
                 "ok",
                 "--checked-raw-artifact",
+                "--retest-reference",
+                "retest_dummy_1",
                 "--context-db",
                 db_path,
                 "--format",
@@ -5498,14 +5553,7 @@ def test_cli_measure_reports_schema_completeness_from_a_real_package_and_updates
         )
         == 0
     )
-    reviewed_output = capsys.readouterr().out
-    # review-package doesn't persist retest_reference unless --decision retest;
-    # simulate a package that already carries one (as a real release-ready
-    # candidate would, per VerificationPackage field #19) by injecting it
-    # directly into the package JSON before re-measuring.
-    reviewed = json.loads(reviewed_output)
-    reviewed["retest_reference"] = "retest_dummy_1"
-    package_file.write_text(json.dumps(reviewed), encoding="utf-8")
+    package_file.write_text(capsys.readouterr().out, encoding="utf-8")
 
     exit_code = cli.main(["measure", "--package-file", str(package_file), "--format", "json"])
     report = json.loads(capsys.readouterr().out)

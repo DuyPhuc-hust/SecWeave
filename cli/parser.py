@@ -386,7 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
         "normalized observation tương ứng (SPEC §4.5) — decision=release bắt buộc phải có cờ này",
     )
     review_package_parser.add_argument(
-        "--retest-reference", help="Tham chiếu tới lượt retest (nếu decision=retest) — tuỳ chọn"
+        "--retest-reference", help="Tham chiếu tới lượt retest (nếu decision=retest hoặc release) — tuỳ chọn"
     )
     _add_format_arg(review_package_parser)
     _add_context_db_arg(review_package_parser)
