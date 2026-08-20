@@ -17,7 +17,7 @@ from cli.common import (
     _parse_enum_arg,
     _warn_if_hypothesis_stale,
 )
-from evidence_harness.harness import EvidenceHarness
+from evidence_harness.harness import EvidenceHarness, verify_ui_capture_available
 from exploit_agent.agent import ExploitAgent
 from shared.cost import CostService
 from shared.id_generator import generate_id
@@ -407,6 +407,22 @@ def _run_execute(args: argparse.Namespace) -> int:
         raise CliError("--target-revision-id không được để trống.")
     if not args.target_id:
         raise CliError("--target-id không được để trống.")
+    capture_ui_for_ids = set(args.capture_ui_for or [])
+    if capture_ui_for_ids:
+        # Checked up front, before any real action runs — a run that
+        # already sent real HTTP requests (consuming real cost-cap
+        # budget) and only THEN discovered playwright/Chromium isn't
+        # installed, deep inside the loop below, would be a much worse
+        # failure mode than refusing cleanly before anything happened.
+        # verify_ui_capture_available() actually launches a real
+        # (throwaway) browser — a plain import check alone can't detect
+        # `pip install playwright` having been done WITHOUT the separate
+        # `playwright install chromium` step, which is the far more
+        # common real misconfiguration.
+        try:
+            verify_ui_capture_available()
+        except RuntimeError as exc:
+            raise CliError(str(exc)) from exc
 
     if args.plan_file:
         plan_result = _load_frozen_plan(args)
@@ -597,6 +613,13 @@ def _run_execute(args: argparse.Namespace) -> int:
     # _resolve_from_step_references). Empty for the overwhelming majority
     # of plans that never use {{FROM_STEP:...}} at all.
     step_responses: Dict[str, Any] = {}
+    # Every --capture-ui-for action_id that actually matched a real,
+    # executed action — used below to warn about any entry that never
+    # matched anything (a typo, or an action_id from a DIFFERENT plan)
+    # instead of silently costing nothing with no sign anything was
+    # wrong, the same "never silently ignore an operator's explicit flag"
+    # principle other flags in this file already follow.
+    matched_capture_ui_for_ids: set = set()
 
     def _persist_observation(observation: NormalizedObservation) -> None:
         # Appended one JSON object per line (not a single array rewritten
@@ -749,9 +772,44 @@ def _run_execute(args: argparse.Namespace) -> int:
                     f"   [{observation.access_result.value}] {resolved_action.method} {resolved_action.target} "
                     f"(HTTP {observation.status_code})"
                 )
+                if resolved_action.action_id in capture_ui_for_ids:
+                    matched_capture_ui_for_ids.add(resolved_action.action_id)
+                    # A companion screenshot for the SAME action, using the
+                    # SAME identity — never affects the verdict (see
+                    # capture_ui_state()'s own docstring), so a failure
+                    # here is treated exactly like the HTTP capture's own
+                    # RuntimeError: an operational stop, not a config
+                    # error (playwright's own availability was already
+                    # confirmed up front, before this loop ever started).
+                    try:
+                        ui_observation = harness.capture_ui_state(
+                            resolved_action,
+                            identity=role_identity.get(resolved_action.role, args.identity),
+                        )
+                    except RuntimeError as exc:
+                        stopped_reason = str(exc)
+                        print(f"   DỪNG GIỮA CHỪNG (UI capture): {exc}", file=sys.stderr)
+                        break
+                    _persist_observation(ui_observation)
+                    print(f"   [ui-capture] {resolved_action.target} -> {ui_observation.raw_evidence_ref}")
     finally:
         harness.close()
         execution_context_store.close()
+
+    if stopped_reason is None:
+        # Only warn once the run actually completed normally — an entry
+        # that never matched because the run was cut short mid-way (the
+        # action it named simply never got a turn) isn't a mistake, it's
+        # just an incomplete run; only a truly UNMATCHED entry (a typo,
+        # or an action_id copied from a different plan) is worth flagging.
+        unmatched_capture_ui_for_ids = capture_ui_for_ids - matched_capture_ui_for_ids
+        if unmatched_capture_ui_for_ids:
+            print(
+                f"CẢNH BÁO: --capture-ui-for không khớp action_id nào trong plan này: "
+                f"{sorted(unmatched_capture_ui_for_ids)} — không chụp screenshot nào cho (các) "
+                "action_id này, kiểm tra lại có gõ đúng action_id trong plan không.",
+                file=sys.stderr,
+            )
 
     print(f"-> Kill-switch status cuối: {kill_switch.status.value}")
     print(f"-> Cost: {cost_service.executed_action_count}/{cost_service.cap}")

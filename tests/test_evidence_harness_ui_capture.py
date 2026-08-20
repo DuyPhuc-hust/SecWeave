@@ -190,3 +190,33 @@ def test_capture_ui_state_raises_a_clear_error_when_playwright_is_not_installed(
 
     with pytest.raises(RuntimeError, match="playwright"):
         harness.capture_ui_state(_action("http://127.0.0.1:1/"))
+
+
+def test_verify_ui_capture_available_raises_a_clean_error_when_chromium_binary_is_missing(monkeypatch, tmp_path):
+    # Real gap found via independent review: the plain package-import
+    # check alone (_sync_playwright) cannot tell `pip install playwright`
+    # apart from `pip install playwright && playwright install
+    # chromium` — the far more common real misconfiguration, since it's
+    # a separate, easy-to-forget step. Pointing PLAYWRIGHT_BROWSERS_PATH
+    # at an empty directory reproduces a genuinely missing Chromium
+    # binary for real (not a monkeypatched stub) — pw.chromium.launch()
+    # raises playwright's OWN Error type here, which must come back as a
+    # clean RuntimeError, not propagate raw.
+    from evidence_harness.harness import verify_ui_capture_available
+
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "empty_browsers_dir"))
+
+    with pytest.raises(RuntimeError, match="[Cc]hromium"):
+        verify_ui_capture_available()
+
+
+def test_capture_ui_state_converts_a_real_playwright_error_into_a_clean_runtime_error(monkeypatch, tmp_path):
+    # Same underlying gap as above, but for capture_ui_state() itself
+    # (not just the CLI's up-front check) — a genuinely broken Chromium
+    # install must not crash with a raw playwright.sync_api.Error deep
+    # inside a real execute() run.
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "empty_browsers_dir"))
+    harness = _harness(tmp_path)
+
+    with pytest.raises(RuntimeError, match="[Cc]hromium|Error"):
+        harness.capture_ui_state(_action("http://127.0.0.1:1/"))

@@ -162,7 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
             type=int,
             default=10,
             help="Cap số hành động — dùng CHUNG cho cả cost-check lúc lập plan lẫn CostService lúc thực "
-            "thi thật (mặc định: %(default)s)",
+            "thi thật (mặc định: %(default)s). LƯU Ý: mỗi action_id trong --capture-ui-for THỰC SỰ "
+            "khớp 1 action trong plan tính THÊM 1 hành động thực tế vào cap này (ngoài HTTP capture "
+            "bình thường của chính action đó) — plan duyệt qua `plan --cap` không biết trước "
+            "--capture-ui-for (chỉ có ở execute/retest), nên cần tự cộng thêm khi ước lượng cap đủ "
+            "dùng.",
         )
         parser.add_argument("--target-id", required=True, help="target_id ghi vào evidence")
         parser.add_argument(
@@ -210,6 +214,18 @@ def build_parser() -> argparse.ArgumentParser:
             "(vd --sensitive-param password --sensitive-param api_key). Chỉ ảnh hưởng bản ghi lưu lại, "
             "không ảnh hưởng request thật đã gửi. Không truyền = không field nào được coi là nhạy cảm "
             "ngoài header Authorization/Cookie/Set-Cookie (luôn redact sẵn).",
+        )
+        parser.add_argument(
+            "--capture-ui-for",
+            action="append",
+            help="action_id (từ ActionSpec.action_id trong plan) mà, NGOÀI HTTP capture bình thường, "
+            "còn chụp thêm 1 screenshot thật qua Playwright (SPEC §4.3.2, kênh UI_CAPTURE) — lặp lại "
+            "flag để khai nhiều action. Chỉ mang tính trình bày/đối chiếu cho con người, KHÔNG ảnh "
+            "hưởng verdict (role luôn là setup, access_result luôn ambiguous — Oracle không phán "
+            "quyết dựa trên ảnh). Mỗi action khai ở đây tính THÊM 1 hành động thực tế vào --cap (xem "
+            "--cap). Cần cài riêng `playwright` (pip install playwright && playwright install "
+            "chromium) — kiểm tra ngay từ đầu, trước khi gửi bất kỳ action thật nào, nếu thiếu thì "
+            "báo lỗi sạch thay vì crash giữa chừng.",
         )
         _add_llm_mode_arg(parser)
         _add_context_db_arg(parser)

@@ -182,6 +182,36 @@ def _sync_playwright():
     return sync_playwright
 
 
+def verify_ui_capture_available() -> None:
+    """Real gap found via independent review: `_sync_playwright()` alone
+    only checks the `playwright` PIP PACKAGE is importable — it never
+    launches a browser, so it cannot detect the far more common real
+    misconfiguration of `pip install playwright` done WITHOUT the
+    separate `playwright install chromium` step the package itself
+    requires. A caller (e.g. the CLI) that only calls `_sync_playwright()`
+    up front, before running any real action, would still crash on the
+    FIRST actual `capture_ui_state()` call — potentially after several
+    OTHER real actions already ran and consumed real cost-cap budget.
+
+    This actually launches a real (throwaway) Chromium instance and closes
+    it immediately, so a missing browser binary is caught up front, before
+    anything real runs — matching capture_ui_state()'s own conversion of
+    a raw playwright.sync_api.Error into a clean RuntimeError, so a caller
+    only ever needs to catch RuntimeError from either check.
+    """
+    sync_playwright = _sync_playwright()
+    from playwright.sync_api import Error as PlaywrightError
+
+    try:
+        with sync_playwright() as pw:
+            pw.chromium.launch().close()
+    except PlaywrightError as exc:
+        raise RuntimeError(
+            "capture_ui_state() cần Chromium đã cài qua `playwright install chromium` — không mở "
+            f"được trình duyệt thật để kiểm tra: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def _strip_userinfo(netloc: str) -> str:
     """Drops a `user:pass@` prefix from a URL's netloc, unconditionally —
     unlike query-key redaction (opt-in, via caller-declared sensitive_keys),
@@ -835,7 +865,12 @@ class EvidenceHarness:
         browser navigation is a different mechanism, not an httpx
         request), for the same reasons: refuses instead of opening a real
         browser once STOPPED, and counts against the same cost cap since
-        this is still a real action against the target.
+        this is still a real action against the target. A caller pairing
+        this with an HTTP capture() call for the SAME action (the CLI's
+        own `execute --capture-ui-for` does exactly this) spends a
+        SECOND cost-cap slot on top of the HTTP capture's own — a real,
+        intentional cost, not a bug, but one a caller sizing `--cap`
+        needs to account for explicitly (see `--cap`'s own help text).
 
         Requires the `playwright` package + `playwright install
         chromium` — NOT a dependency of this module's other capabilities,
@@ -905,23 +940,45 @@ class EvidenceHarness:
                 entry["url"] = action.target
             playwright_cookies.append(entry)
 
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch()
-            try:
-                context = browser.new_context()
+        from playwright.sync_api import Error as PlaywrightError
+
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch()
                 try:
-                    if playwright_cookies:
-                        context.add_cookies(playwright_cookies)
-                    page = context.new_page()
+                    context = browser.new_context()
                     try:
-                        page.goto(action.target, wait_until="load")
-                    except Exception:  # noqa: BLE001 - a failed navigation is still evidence
-                        pass
-                    screenshot_bytes = page.screenshot(full_page=True)
+                        if playwright_cookies:
+                            context.add_cookies(playwright_cookies)
+                        page = context.new_page()
+                        try:
+                            page.goto(action.target, wait_until="load")
+                        except PlaywrightError:
+                            # A failed NAVIGATION specifically is still
+                            # evidence (Chromium renders its own error
+                            # page) — see this method's own docstring.
+                            # Distinct from the outer except below, which
+                            # covers a genuinely broken browser/context/
+                            # screenshot, not just an unreachable target.
+                            pass
+                        screenshot_bytes = page.screenshot(full_page=True)
+                    finally:
+                        context.close()
                 finally:
-                    context.close()
-            finally:
-                browser.close()
+                    browser.close()
+        except PlaywrightError as exc:
+            # Real gap found via independent review: an unguarded
+            # pw.chromium.launch() (e.g. `playwright install chromium`
+            # never run) raises playwright's OWN Error type, not a
+            # RuntimeError — every caller of this method (the CLI's
+            # execute loop included) only ever catches RuntimeError,
+            # matching ExecutionStoppedError/CostCapExceededError above,
+            # so a raw playwright.sync_api.Error would otherwise crash
+            # the whole run instead of being handled the same way.
+            raise RuntimeError(
+                f"capture_ui_state() lỗi khi dùng trình duyệt thật cho action '{action.action_id}': "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
         screenshot_path = self._storage_dir / f"{observation_id}_ui.png"
         screenshot_path.write_bytes(screenshot_bytes)
