@@ -104,8 +104,15 @@ def render_markdown_report(package: VerificationPackage) -> str:
         "kèm field #10/#11 vì luôn khớp 1:1)"
     )
     lines.append("")
-    lines.append("| # | Role | Access result | Status code | Marker khớp? | Raw evidence ref | Hash |")
-    lines.append("|---|---|---|---|---|---|---|")
+    # `Channel` shown explicitly rather than left for a reader to infer
+    # from `raw_evidence_ref`'s file extension — real gap found via
+    # independent review: once UI_CAPTURE observations (screenshots/
+    # videos, always role=setup/access_result=ambiguous) sit in the SAME
+    # table as HTTP_TRANSACTION rows, distinguishing them by squinting at
+    # a filename suffix is exactly the kind of implicit reading this
+    # project's own reports avoid elsewhere.
+    lines.append("| # | Role | Channel | Access result | Status code | Marker khớp? | Raw evidence ref | Hash |")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for i, obs in enumerate(package.normalized_observations, start=1):
         marker = (
             "—"
@@ -113,7 +120,8 @@ def render_markdown_report(package: VerificationPackage) -> str:
             else f"response={_bool_label(obs.response_contains_marker)}, request={_bool_label(obs.request_contains_marker)}"
         )
         lines.append(
-            f"| {i} | {obs.role.value} | {obs.access_result.value} | {obs.status_code if obs.status_code is not None else '—'} "
+            f"| {i} | {obs.role.value} | {obs.channel.value} | {obs.access_result.value} | "
+            f"{obs.status_code if obs.status_code is not None else '—'} "
             # `raw_evidence_hash` is NOT wrapped in a backtick code span like
             # elsewhere in this file — real gap found via independent
             # review: a value containing its own backtick would close the

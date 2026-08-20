@@ -40,15 +40,34 @@ class ArtifactManifest(BaseModel):
 
 
 def build_artifact_manifest(storage_dir: str, execution_id: str) -> List[ArtifactManifestEntry]:
-    """Hashes every FILE directly under `{storage_dir}/{execution_id}/`
-    (not recursive — nothing this codebase writes there is nested in a
-    subdirectory today), sorted by filename for deterministic output.
-    Excludes `PACKAGE_MANIFEST_FILENAME` itself by name — a manifest can't
-    meaningfully include its own hash (chicken-and-egg: the file doesn't
-    have its final bytes until after this function returns), and a stale
-    leftover from a PRIOR `assemble-package` run for the same execution_id
-    would otherwise show up as a phantom entry that changes every re-run
-    for no reason connected to any real evidence.
+    """Hashes every FILE under `{storage_dir}/{execution_id}/`,
+    RECURSIVELY — every real artifact this codebase writes there
+    (actions.json, observations.jsonl, raw evidence transcripts,
+    screenshots, videos, audit logs) lives flat, with no subdirectory
+    involved. Recursion exists for a narrower reason: a best-effort
+    cleanup failure (e.g. capture_ui_recording()'s own scratch-directory
+    removal failing due to a permission issue) could leave a stray file
+    inside a nested scratch directory that a flat, non-recursive scan
+    would silently never hash or track at all — invisible to the exact
+    tamper/change-detection mechanism this manifest exists to provide.
+    Recursing costs nothing extra when (the overwhelming majority of the
+    time) nothing is nested, and closes that gap on the rare occasion
+    something is.
+
+    Each entry's `filename` is the path RELATIVE to the execution
+    directory (e.g. "actions.json", or a nested
+    ".ui_video_scratch_abc123/leftover.webm" for a stray file) rather
+    than a bare basename — so 2 files that happen to share a basename in
+    different subdirectories can't collide, and a reader can tell at a
+    glance whether an entry is an expected top-level artifact or
+    something unexpected found nested. Sorted by that relative path for
+    deterministic output. Excludes `PACKAGE_MANIFEST_FILENAME` by its
+    TOP-LEVEL relative path only — a manifest can't meaningfully include
+    its own hash (chicken-and-egg: the file doesn't have its final bytes
+    until after this function returns), and a stale leftover from a PRIOR
+    `assemble-package` run for the same execution_id would otherwise show
+    up as a phantom entry that changes every re-run for no reason
+    connected to any real evidence.
 
     Raises FileNotFoundError if the directory itself doesn't exist —
     callers (assemble-package) already require this directory to hold
@@ -60,14 +79,31 @@ def build_artifact_manifest(storage_dir: str, execution_id: str) -> List[Artifac
     execution_dir = Path(storage_dir) / execution_id
     if not execution_dir.is_dir():
         raise FileNotFoundError(f"Không tìm thấy thư mục execution '{execution_dir}'")
-    entries = []
-    for path in sorted(execution_dir.iterdir()):
-        if not path.is_file() or path.name == PACKAGE_MANIFEST_FILENAME:
+    candidates = []
+    for path in execution_dir.rglob("*"):
+        # Real gap found via independent review: `path.is_file()` follows
+        # a symlink to determine the type — so a symlink TO a file
+        # (anywhere in the tree, at any depth) would be silently
+        # dereferenced and hashed as if it were a real artifact this
+        # codebase wrote, potentially exposing/vouching-for a file
+        # entirely OUTSIDE the execution directory under an innocuous-
+        # looking relative path. `is_symlink()` is checked explicitly so
+        # only files this codebase actually wrote (never a symlink) are
+        # ever included — nothing this codebase's own artifact-writing
+        # code creates is a symlink, so this excludes nothing legitimate.
+        if path.is_symlink() or not path.is_file():
             continue
+        relative_path = path.relative_to(execution_dir).as_posix()
+        if relative_path == PACKAGE_MANIFEST_FILENAME:
+            continue
+        candidates.append((relative_path, path))
+
+    entries = []
+    for relative_path, path in sorted(candidates, key=lambda item: item[0]):
         raw_bytes = path.read_bytes()
         entries.append(
             ArtifactManifestEntry(
-                filename=path.name,
+                filename=relative_path,
                 sha256_hash=f"sha256:{hashlib.sha256(raw_bytes).hexdigest()}",
                 size_bytes=len(raw_bytes),
             )

@@ -235,3 +235,37 @@ def test_render_markdown_report_escapes_a_pipe_and_backtick_in_raw_evidence_hash
     report = render_markdown_report(package)
     assert "sha256:abc`\\|evil" in report
     assert "`sha256:abc`" not in report  # no raw code span wrapping the tampered value anymore
+
+
+def test_render_markdown_report_shows_a_channel_column_distinguishing_ui_capture_from_http(tmp_path=None):
+    # A UI_CAPTURE screenshot/video observation sitting in the SAME table
+    # as HTTP_TRANSACTION rows must be distinguishable without a reader
+    # having to infer it from raw_evidence_ref's file extension.
+    ui_action = _action(
+        "act_ui", ObservationRole.SETUP, "https://staging.example.com/api/objects/42", "Screenshot of main action."
+    )
+    ui_observation = _observation(
+        "act_ui",
+        ObservationRole.SETUP,
+        channel=EvidenceChannel.UI_CAPTURE,
+        access_result=AccessResult.AMBIGUOUS,
+        status_code=None,
+        raw_evidence_ref="/tmp/obs_ui.png",
+        raw_evidence_hash="sha256:bbb",
+        response_contains_marker=None,
+        request_contains_marker=None,
+    )
+    base = _confirmed_package()
+    observations = list(base.normalized_observations) + [ui_observation]
+    package = _confirmed_package(
+        action_record=list(base.action_record) + [ui_action],
+        normalized_observations=observations,
+        raw_evidence_references=[o.raw_evidence_ref for o in observations],
+        artifact_hashes=[o.raw_evidence_hash for o in observations],
+    )
+
+    report = render_markdown_report(package)
+
+    assert "| # | Role | Channel | Access result |" in report
+    assert "| main | http_transaction | granted |" in report
+    assert "| setup | ui_capture | ambiguous |" in report
