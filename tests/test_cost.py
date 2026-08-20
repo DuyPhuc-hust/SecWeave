@@ -280,3 +280,47 @@ def test_runtime_cost_decision_accepts_consistent_construction():
     assert allowed.allowed is True
     refused = RuntimeCostDecision(allowed=False, reason="over cap", executed_action_count=5, cap=5)
     assert refused.allowed is False
+
+
+def test_two_separate_cost_service_instances_racing_record_action_never_jointly_exceed_cap(tmp_path):
+    # The actual cross-process race this closes: 2 SEPARATE CostService
+    # instances (simulating 2 separate processes sharing one execution_id/
+    # storage_dir) each have their OWN threading.Lock — that lock alone
+    # gives zero mutual exclusion between them. Only the shared file lock
+    # (each instance's own file descriptor, contending over the SAME
+    # on-disk .lock file) can prevent both from reading the same stale
+    # count and both recording an action past cap. Uses real, separately-
+    # constructed instances (not one instance shared across threads,
+    # which self._lock alone would already serialize) to force genuine
+    # cross-instance contention.
+    execution_id = "exec_cross_instance_cost_race"
+    cap = 5
+    n_workers = 20
+    instances = [CostService(execution_id=execution_id, storage_dir=str(tmp_path), cap=cap) for _ in range(n_workers)]
+    barrier = threading.Barrier(n_workers)
+    results = []
+    results_lock = threading.Lock()
+    errors = []
+
+    def _call(i):
+        try:
+            barrier.wait(timeout=5)
+            decision = instances[i].record_action(f"action_{i}")
+            with results_lock:
+                results.append(decision.allowed)
+        except Exception as exc:  # noqa: BLE001 - test needs to see ANY failure
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_call, args=(i,)) for i in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert errors == []
+    assert sum(1 for allowed in results if allowed) == cap  # exactly cap successes, never more
+    assert sum(1 for allowed in results if not allowed) == n_workers - cap
+
+    # A freshly-constructed instance must recover the SAME, non-exceeded count.
+    final = CostService(execution_id=execution_id, storage_dir=str(tmp_path), cap=cap)
+    assert final.executed_action_count == cap

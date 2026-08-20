@@ -690,3 +690,95 @@ def test_evidence_harness_capture_raises_execution_stopped_error_when_stopped(tm
         harness.capture(action, role=ObservationRole.MAIN)
 
     assert calls == []  # the real transport was never touched
+
+
+def test_two_separate_kill_switch_instances_racing_stop_never_produce_a_sequence_tie(tmp_path):
+    # test_concurrent_stop_calls_run_cleanup_exactly_once_and_never_crash
+    # already covers 8 THREADS sharing ONE instance — that's already
+    # serialized by self._lock alone, a plain threading.Lock, regardless of
+    # any cross-process fix. This test forces the scenario only the file
+    # lock can prevent: 8 SEPARATE instances (each with its own
+    # threading.Lock AND its own file descriptor), simulating 8 separate
+    # `secweave kill`-style processes racing to stop the SAME execution_id
+    # at nearly the same instant.
+    execution_id = "exec_cross_instance_stop_race"
+    cleanup_calls = []
+    cleanup_lock = threading.Lock()
+
+    def _cleanup():
+        with cleanup_lock:
+            cleanup_calls.append(1)
+
+    seed = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path), cleanup=_cleanup)
+    seed.start()
+
+    n_workers = 8
+    instances = [
+        KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path), cleanup=_cleanup)
+        for _ in range(n_workers)
+    ]
+    barrier = threading.Barrier(n_workers)
+    errors = []
+
+    def _call(i):
+        try:
+            barrier.wait(timeout=5)
+            instances[i].stop(source=StopSource.OPERATOR, reason=f"racer {i}", actor=f"racer-{i}")
+        except Exception as exc:  # noqa: BLE001 - test needs to see ANY failure
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_call, args=(i,)) for i in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert errors == []
+    assert cleanup_calls == [1]  # exactly 1 winner ran cleanup, never more than once
+
+    recovered = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    assert recovered.status == ExecutionStatus.STOPPED
+    entries = recovered.read_audit_log()
+    sequences = [e["sequence"] for e in entries]
+    assert len(sequences) == len(set(sequences))  # every entry has a UNIQUE sequence — no tie
+
+
+def test_stop_with_a_cleanup_that_touches_cost_service_for_the_same_execution_does_not_deadlock(tmp_path):
+    # Real bug found via independent review of the file-lock fix above:
+    # KillSwitch and CostService both point at the SAME
+    # {storage_dir}/{execution_id}/ directory, and ExecutionFileLock used
+    # to open one shared, generically-named lock file for both classes.
+    # stop() now holds its file lock across cleanup() (see stop()'s own
+    # docstring) — a `cleanup` callable that touches CostService for the
+    # SAME execution_id (e.g. reading its count, or anything that
+    # constructs/uses a CostService instance, exactly the kind of wiring
+    # KillSwitch's own docstring anticipates for `cleanup`) would try to
+    # acquire a CONFLICTING lock via a DIFFERENT open file description on
+    # the literal same file — flock() has no same-thread exemption across
+    # different file descriptions, so the thread deadlocks against
+    # itself. Fixed by giving each class its own lock filename
+    # (kill_switch.lock / cost.lock) — this test fails by hanging (until
+    # the join timeout) if that fix regresses.
+    from shared.cost import CostService
+
+    execution_id = "exec_cleanup_touches_cost"
+    cost_service = CostService(execution_id=execution_id, storage_dir=str(tmp_path), cap=10)
+
+    def _cleanup():
+        cost_service.record_action("cleanup_action")
+
+    ks = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path), cleanup=_cleanup)
+    ks.start()
+
+    result = {}
+
+    def _call():
+        result["event"] = ks.stop(source=StopSource.OPERATOR, reason="cleanup touches cost service")
+
+    t = threading.Thread(target=_call)
+    t.start()
+    t.join(timeout=5)
+
+    assert not t.is_alive()  # must not still be hanging
+    assert result["event"].cleanup_status == CleanupStatus.OK
+    assert cost_service.executed_action_count == 1

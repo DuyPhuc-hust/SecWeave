@@ -2307,6 +2307,94 @@ def test_cli_execute_with_plan_file_never_calls_the_llm(capsys, monkeypatch, tmp
     assert "Traceback" not in captured.err
 
 
+def test_cli_execute_with_plan_file_warns_when_revision_differs(capsys, monkeypatch, tmp_path):
+    # test_cli_execute_without_plan_file_warns_when_revision_differs already
+    # covers the non---plan-file branch; this confirms the documented,
+    # RECOMMENDED --plan-file path (which never reconstructs a Hypothesis
+    # from Context Store, only replays the frozen ActionPlan) gets the
+    # SAME staleness warning via _warn_if_hypothesis_stale, instead of
+    # silently skipping it.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis_for_target(capsys, monkeypatch, db_path, "tgt_1", "rev_OLD")
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_1",
+            "--target-revision-id",
+            "rev_NEW",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0  # a warning, not a block
+    assert "được sinh khi target ở revision" in captured.err
+    assert "rev_OLD" in captured.err
+    assert "rev_NEW" in captured.err
+
+
+def test_cli_execute_with_plan_file_does_not_error_when_hypothesis_id_is_absent_from_context_db(
+    capsys, monkeypatch, tmp_path
+):
+    # --plan-file has never required the hypothesis to still exist in
+    # --context-db (a plan file can be handed off/replayed independently of
+    # where it was originally generated) — the staleness check added above
+    # must stay best-effort and not turn that into a new hard requirement.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")  # never populated with any hypothesis
+    hypothesis_id = "hyp_never_stored_anywhere"
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_1",
+            "--target-revision-id",
+            "rev_NEW",
+            "--storage-dir",
+            str(tmp_path / "evidence"),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "được sinh khi target ở revision" not in captured.err
+    assert "được sinh cho target_id" not in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_cli_execute_sensitive_param_redacts_value_from_the_stored_transcript(capsys, monkeypatch, tmp_path):
     # Real gap found via independent review: capture() has always accepted
     # sensitive_body_keys (caller-declared parameter names whose VALUES
@@ -4091,6 +4179,108 @@ def test_cli_assemble_package_builds_a_real_package_from_a_real_execute_run(caps
     assert len(package["normalized_observations"]) == 1
     assert len(package["action_record"]) == 1
     assert package["verdict"] == "inconclusive"  # only role=main, no controls
+
+
+def test_cli_assemble_package_writes_a_package_manifest_covering_every_run_artifact(capsys, monkeypatch, tmp_path):
+    # SPEC §4.3.3: "package chứa manifest liệt kê hash → phát hiện thay đổi
+    # ngoài ý muốn." Confirms assemble-package actually writes this
+    # manifest as a side effect, that it lists every real artifact
+    # execute() persisted (not just the ones VerificationPackage's own
+    # field #10/#11 already cover), and that running assemble-package a
+    # SECOND time for the same execution doesn't fold a stale copy of the
+    # manifest's own prior output back into itself.
+    import hashlib
+
+    import httpx
+
+    from verification_package.manifest import PACKAGE_MANIFEST_FILENAME, ArtifactManifest
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_manifest_test"
+    storage_dir = tmp_path / "evidence"
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    execute_exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert execute_exit_code == 0
+    capsys.readouterr()
+
+    assemble_args = [
+        "assemble-package",
+        "--execution-id",
+        execution_id,
+        "--storage-dir",
+        str(storage_dir),
+        "--target-id",
+        "tgt_test",
+        "--target-revision-id",
+        "rev_test",
+        "--environment",
+        "sandbox",
+        "--authorization-reference",
+        "auth_local_test_1",
+        "--scenario",
+        "s",
+        "--limitations",
+        "l",
+        "--next-action",
+        "n",
+        "--format",
+        "json",
+    ]
+
+    exit_code = cli.main(assemble_args)
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "package manifest" in captured.err
+
+    execution_dir = storage_dir / execution_id
+    manifest_path = execution_dir / PACKAGE_MANIFEST_FILENAME
+    assert manifest_path.exists()
+    manifest = ArtifactManifest(**json.loads(manifest_path.read_text(encoding="utf-8")))
+    assert manifest.execution_id == execution_id
+    manifest_filenames = {e.filename for e in manifest.entries}
+    assert {"actions.json", "observations.jsonl", "execution_status.json"}.issubset(manifest_filenames)
+    assert PACKAGE_MANIFEST_FILENAME not in manifest_filenames
+
+    # Cross-check one real hash against the actual on-disk bytes.
+    actions_entry = next(e for e in manifest.entries if e.filename == "actions.json")
+    real_bytes = (execution_dir / "actions.json").read_bytes()
+    assert actions_entry.sha256_hash == "sha256:" + hashlib.sha256(real_bytes).hexdigest()
+    assert actions_entry.size_bytes == len(real_bytes)
+
+    # Re-running assemble-package must not fold the manifest's own prior
+    # output back into itself as a phantom entry.
+    exit_code_again = cli.main(assemble_args)
+    capsys.readouterr()
+    assert exit_code_again == 0
+    manifest_again = ArtifactManifest(**json.loads(manifest_path.read_text(encoding="utf-8")))
+    assert {e.filename for e in manifest_again.entries} == manifest_filenames
 
 
 def test_cli_assemble_package_works_after_a_multi_identity_execute_run(capsys, monkeypatch, tmp_path):

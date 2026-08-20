@@ -29,6 +29,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from shared.file_lock import ExecutionFileLock
 from shared.models.action import ActionPlan, CostDecision, RuntimeCostDecision
 
 
@@ -88,11 +89,22 @@ class CostService:
     trick requires — nothing here can make one caller's write land out of
     true logical order, so that whole class of bug does not apply.
 
-    Scope boundary: same cross-instance limitation as KillSwitch (see its
-    own docstring) — two CostService instances can each recover the same
-    count, both see `count < cap`, and both record an action, jointly
-    exceeding cap by more than 1. Every call site here constructs exactly
-    one CostService per execution_id within a single process.
+    Cross-process safety: `self._file_lock`
+    (shared/file_lock.py::ExecutionFileLock, an OS-level `fcntl.flock`)
+    closes the same class of gap KillSwitch's own file lock closes —
+    `record_action()` acquires it BEFORE re-reading the count fresh from
+    disk and deciding, so 2 processes sharing an execution_id can no
+    longer both read the same stale count, both see `count < cap`, and
+    both record an action, jointly exceeding cap by more than 1. Residual
+    limitation: the `cap`-consistency check in `__init__` still isn't
+    protected against 2 processes constructing a CostService for the SAME
+    BRAND-NEW execution_id at the exact same instant with 2 DIFFERENT
+    `--cap` values — both could see "no log yet" and each accept its own
+    cap as the first one. Narrower and rarer than the per-action race
+    above (it requires 2 concurrent FIRST constructions, not just 2
+    concurrent calls against an already-running execution), and left
+    unfixed for now rather than adding a more elaborate first-writer-wins
+    protocol for it.
     """
 
     def __init__(self, execution_id: str, storage_dir: str, cap: int) -> None:
@@ -102,7 +114,9 @@ class CostService:
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._audit_log_path = self._storage_dir / "cost_audit_log.jsonl"
         self._lock = threading.Lock()
-        self._count, recorded_cap = self._recover_count_from_audit_log()
+        self._file_lock = ExecutionFileLock(self._storage_dir, "cost.lock")
+        with self._file_lock:
+            self._count, recorded_cap = self._recover_count_from_audit_log()
         # `cap` itself is cross-checked, not just the executed-action
         # COUNT — a later invocation reusing the same execution_id (the
         # intended way cost accumulates "real meaning" across cmd_execute
@@ -197,9 +211,15 @@ class CostService:
         restart would recover the LOWER, correct value, silently diverging
         from what this process believed). The durable write must succeed
         FIRST; only then does the in-memory count move to match it.
+
+        Acquires the cross-process file lock BEFORE re-reading the count
+        fresh from disk (rather than trusting `self._count`, which could
+        be stale relative to a DIFFERENT process's own writes for this
+        same execution_id) — see this class's own docstring.
         """
-        with self._lock:
-            current = self._count
+        with self._file_lock, self._lock:
+            current, _recorded_cap = self._recover_count_from_audit_log()
+            self._count = current
             allowed = current < self._cap
             if allowed:
                 new_count = current + 1

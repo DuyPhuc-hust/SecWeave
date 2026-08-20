@@ -15,6 +15,7 @@ from cli.common import (
     _load_hypothesis_from_context_store,
     _open_context_store,
     _parse_enum_arg,
+    _warn_if_hypothesis_stale,
 )
 from evidence_harness.harness import EvidenceHarness
 from exploit_agent.agent import ExploitAgent
@@ -409,6 +410,9 @@ def _run_execute(args: argparse.Namespace) -> int:
 
     if args.plan_file:
         plan_result = _load_frozen_plan(args)
+        _warn_if_hypothesis_stale(
+            _open_context_store(args.context_db), args.hypothesis_id, args.target_id, args.target_revision_id
+        )
         # review_plan()/check_plan()/check_cost() are pure Policy/Cost logic
         # (shared/policy.py, shared/cost.py) — none of them ever touch
         # self._llm_client, so no real LLM client is needed just to call

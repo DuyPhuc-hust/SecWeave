@@ -62,6 +62,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
+from shared.file_lock import ExecutionFileLock
 from shared.models.kill_switch import (
     AuditEventType,
     AutomaticThresholdReason,
@@ -101,28 +102,29 @@ class KillSwitch:
     Scope boundary, stated plainly: `__init__` reconstructs status from the
     on-disk audit log so a NEW instance correctly picks up a PRIOR instance's
     last known state (e.g. after a crash/restart — see
-    _recover_status_from_audit_log). That handles SEQUENTIAL reconstruction
-    only. It does NOT make it safe for multiple instances to be alive and
-    mutating state AT THE SAME TIME — `self._lock` is a plain in-process
-    `threading.Lock`, so it provides mutual exclusion only between calls made
-    through the SAME instance, never across two different instances, even
-    across 2 OS processes pointed at the same storage_dir/execution_id.
+    _recover_status_from_audit_log). `self._lock` is a plain in-process
+    `threading.Lock` — it provides mutual exclusion between calls made
+    through the SAME instance, but says nothing on its own about two
+    DIFFERENT instances (even across 2 OS processes) racing each other.
 
     That last case is NOT hypothetical — this codebase's own `cli.py`
     deliberately constructs a SEPARATE KillSwitch instance, in a SEPARATE
     process, for `secweave kill`/`secweave resume` against an execution_id
     that a DIFFERENT, already-running `secweave execute` process may still
     hold its own instance for (an operator's emergency stop from another
-    terminal is the whole point of `kill` existing as its own command). The
-    `sequence`-based tie-break documented below exists specifically to make
-    STATUS RECOVERY correct across exactly that scenario (each instance's
-    audit-log write is still a single atomic OS-level append, and a genuine
-    sequence tie fails safe to STOPPED rather than guessing). What remains
-    genuinely out of scope is true fine-grained mutual exclusion DURING a
-    concurrent mutation across processes (e.g. an OS-level file lock, or an
-    external coordination store) — this MVP increment does not attempt that;
-    it only guarantees each instance's own recovery/append sequence is
-    internally correct and fails safe when ambiguous.
+    terminal is the whole point of `kill` existing as its own command).
+    `self._file_lock` (shared/file_lock.py::ExecutionFileLock, an OS-level
+    `fcntl.flock`) closes that: `start()`/`stop()`/`resume()` each acquire it
+    BEFORE re-reading the audit log fresh from disk and deciding what to do,
+    so 2 processes can no longer both read the same stale state and each
+    compute the same next `sequence` — one is made to wait for the other,
+    eliminating the tie at the source rather than only detecting it after
+    the fact. The lock is released again before running `cleanup()`/writing
+    the audit log (see stop()'s own docstring for why that I/O must never
+    happen while another caller could be blocked on it) — a slow cleanup
+    from one process still cannot block a different process's own stop()
+    call from being logged, matching the existing same-process guarantee
+    `self._lock` already gave.
     """
 
     def __init__(
@@ -146,13 +148,16 @@ class KillSwitch:
         self._audit_log_path = self._storage_dir / "kill_switch_audit_log.jsonl"
         self._cleanup = cleanup
         self._lock = threading.Lock()
+        self._file_lock = ExecutionFileLock(self._storage_dir, "kill_switch.lock")
         # Derived from the audit log's last event (by `sequence`, not file
         # position — see module docstring), not assumed PREPARED — a SECOND
         # KillSwitch constructed for an execution that was already STOPPED
         # (a crash recovery, a separate CLI/API process, a worker restart)
         # must not silently reset to PREPARED and let start() succeed with
-        # zero record of authorization.
-        self._status, self._sequence = self._recover_from_audit_log()
+        # zero record of authorization. Under the file lock so this initial
+        # read can't land mid-write from another process's own instance.
+        with self._file_lock:
+            self._status, self._sequence = self._recover_from_audit_log()
 
     def _recover_from_audit_log(self) -> Tuple[ExecutionStatus, int]:
         entries, had_corrupt_line = self._read_audit_log_raw()
@@ -226,32 +231,48 @@ class KillSwitch:
         call racing a concurrent `stop()` on THIS SAME instance could read
         a stale/incomplete view mid-write and regress `_status` backward.
         """
-        recovered_status, recovered_sequence = self._recover_from_audit_log()
+        with self._file_lock:
+            recovered_status, recovered_sequence = self._recover_from_audit_log()
         with self._lock:
             if recovered_sequence > self._sequence:
                 self._status = recovered_status
                 self._sequence = recovered_sequence
 
     def start(self) -> None:
-        with self._lock:
-            if self._status != ExecutionStatus.PREPARED:
-                raise ValueError(
-                    f"start() chỉ hợp lệ từ trạng thái PREPARED — trạng thái hiện tại là "
-                    f"'{self._status.value}'."
+        # Re-reads disk state under the cross-process file lock BEFORE
+        # deciding — see module docstring's `self._file_lock` paragraph.
+        # Without this, a DIFFERENT process's already-STOPPED execution
+        # would only be visible to this instance's in-memory `_status` once
+        # something happened to call refresh() first; start() itself would
+        # otherwise trust a possibly-stale PREPARED/RUNNING view and
+        # incorrectly transition an execution another process already
+        # stopped.
+        with self._file_lock:
+            disk_status, disk_sequence = self._recover_from_audit_log()
+            with self._lock:
+                if disk_sequence > self._sequence:
+                    self._status, self._sequence = disk_status, disk_sequence
+                if self._status != ExecutionStatus.PREPARED:
+                    raise ValueError(
+                        f"start() chỉ hợp lệ từ trạng thái PREPARED — trạng thái hiện tại là "
+                        f"'{self._status.value}'."
+                    )
+                self._status = ExecutionStatus.RUNNING
+                self._sequence += 1
+                event = StopEvent(
+                    event=AuditEventType.START,
+                    execution_id=self._execution_id,
+                    sequence=self._sequence,
+                    at=datetime.now(timezone.utc),
                 )
-            self._status = ExecutionStatus.RUNNING
-            self._sequence += 1
-            event = StopEvent(
-                event=AuditEventType.START,
-                execution_id=self._execution_id,
-                sequence=self._sequence,
-                at=datetime.now(timezone.utc),
-            )
-        # Logged outside the lock — see stop()'s docstring for why cleanup/
-        # log I/O should never happen while other callers might be blocked
-        # on it. `sequence` (assigned above, INSIDE the lock) is what keeps
-        # recovery correct regardless of when this write actually lands.
-        self._append_audit_log(event)
+            # Logged INSIDE self._file_lock (but outside self._lock) — see
+            # stop()'s docstring for why the write must not be visible to a
+            # DIFFERENT process's read until it's actually durable, and why
+            # that's safe with respect to same-instance callers (self._lock
+            # already released by this point) even though self._file_lock
+            # provides no protection between 2 threads of this SAME
+            # instance.
+            self._append_audit_log(event)
 
     def stop(
         self,
@@ -290,13 +311,25 @@ class KillSwitch:
         source that tried, not just the winner — losing the race must never
         mean losing the record that a stop was requested.
 
-        The lock is held ONLY for the atomic check-and-flip of `_status` (and
-        assigning this event's `sequence` number — see module docstring), not
-        for running cleanup or writing the audit log — holding it across
-        `self._cleanup()` would let a slow or hanging cleanup from the
-        WINNING caller block every OTHER source's stop() call from
-        returning or being logged, exactly the failure mode a kill switch
-        must never have.
+        `self._lock` (in-process) is held ONLY for the atomic check-and-flip
+        of `_status` (and assigning this event's `sequence` number — see
+        module docstring), not for running cleanup or writing the audit log
+        — holding it across `self._cleanup()` would let a slow or hanging
+        cleanup from the WINNING caller block every OTHER THREAD OF THIS
+        SAME INSTANCE from returning or being logged, exactly the failure
+        mode a kill switch must never have.
+
+        `self._file_lock` (cross-process) is held for the WHOLE method,
+        including cleanup() and the audit-log write — unlike `self._lock`,
+        it provides no protection between 2 THREADS of the SAME instance
+        (see shared/file_lock.py), so this does not reintroduce the
+        problem above for same-instance callers. It DOES mean a genuinely
+        DIFFERENT process/instance's stop() call can be made to wait for
+        this one's cleanup to finish before it can determine whether it's
+        the winner or a duplicate — necessary so a second PROCESS can never
+        wrongly conclude "not yet stopped, I'm the winner" from a stale
+        disk read taken before the real winner's cleanup+write have
+        landed, which would otherwise let cleanup run more than once.
         """
         if source == StopSource.AUTOMATIC_THRESHOLD and automatic_threshold_reason is None:
             raise ValueError(
@@ -306,52 +339,56 @@ class KillSwitch:
         if source != StopSource.AUTOMATIC_THRESHOLD and automatic_threshold_reason is not None:
             raise ValueError("automatic_threshold_reason chỉ có ý nghĩa khi source=automatic_threshold.")
 
-        with self._lock:
-            already_stopped = self._status == ExecutionStatus.STOPPED
-            self._status = ExecutionStatus.STOPPED
-            self._sequence += 1
-            sequence = self._sequence
-            at = datetime.now(timezone.utc)
+        with self._file_lock:
+            disk_status, disk_sequence = self._recover_from_audit_log()
+            with self._lock:
+                if disk_sequence > self._sequence:
+                    self._status, self._sequence = disk_status, disk_sequence
+                already_stopped = self._status == ExecutionStatus.STOPPED
+                self._status = ExecutionStatus.STOPPED
+                self._sequence += 1
+                sequence = self._sequence
+                at = datetime.now(timezone.utc)
 
-        if already_stopped:
+            if already_stopped:
+                event = StopEvent(
+                    event=AuditEventType.STOP_REQUESTED_AFTER_ALREADY_STOPPED,
+                    execution_id=self._execution_id,
+                    sequence=sequence,
+                    at=at,
+                    source=source,
+                    reason=reason,
+                    actor=actor,
+                    cleanup_status=CleanupStatus.SKIPPED,
+                    automatic_threshold_reason=automatic_threshold_reason,
+                )
+                self._append_audit_log(event)
+                return event
+
+            cleanup_status = CleanupStatus.SKIPPED
+            cleanup_error: Optional[str] = None
+            if self._cleanup is not None:
+                try:
+                    self._cleanup()
+                    cleanup_status = CleanupStatus.OK
+                except Exception as exc:  # noqa: BLE001 - must not lose the STOPPED transition
+                    cleanup_status = CleanupStatus.FAILED
+                    cleanup_error = f"{type(exc).__name__}: {exc}"
+
             event = StopEvent(
-                event=AuditEventType.STOP_REQUESTED_AFTER_ALREADY_STOPPED,
+                event=AuditEventType.STOP,
                 execution_id=self._execution_id,
                 sequence=sequence,
                 at=at,
                 source=source,
                 reason=reason,
                 actor=actor,
-                cleanup_status=CleanupStatus.SKIPPED,
+                cleanup_status=cleanup_status,
+                cleanup_error=cleanup_error,
                 automatic_threshold_reason=automatic_threshold_reason,
             )
             self._append_audit_log(event)
             return event
-
-        cleanup_status = CleanupStatus.SKIPPED
-        cleanup_error: Optional[str] = None
-        if self._cleanup is not None:
-            try:
-                self._cleanup()
-                cleanup_status = CleanupStatus.OK
-            except Exception as exc:  # noqa: BLE001 - must not lose the STOPPED transition
-                cleanup_status = CleanupStatus.FAILED
-                cleanup_error = f"{type(exc).__name__}: {exc}"
-
-        event = StopEvent(
-            event=AuditEventType.STOP,
-            execution_id=self._execution_id,
-            sequence=sequence,
-            at=at,
-            source=source,
-            reason=reason,
-            actor=actor,
-            cleanup_status=cleanup_status,
-            cleanup_error=cleanup_error,
-            automatic_threshold_reason=automatic_threshold_reason,
-        )
-        self._append_audit_log(event)
-        return event
 
     def resume(
         self, actor: Optional[str] = None, authorization_reference: Optional[str] = None
@@ -364,25 +401,29 @@ class KillSwitch:
         during Chặng 1, this is recorded as claimed by the caller, not
         independently verified.
         """
-        with self._lock:
-            if self._status != ExecutionStatus.STOPPED:
-                raise ValueError(
-                    f"resume() chỉ hợp lệ từ trạng thái STOPPED — trạng thái hiện tại là "
-                    f"'{self._status.value}'."
+        with self._file_lock:
+            disk_status, disk_sequence = self._recover_from_audit_log()
+            with self._lock:
+                if disk_sequence > self._sequence:
+                    self._status, self._sequence = disk_status, disk_sequence
+                if self._status != ExecutionStatus.STOPPED:
+                    raise ValueError(
+                        f"resume() chỉ hợp lệ từ trạng thái STOPPED — trạng thái hiện tại là "
+                        f"'{self._status.value}'."
+                    )
+                self._status = ExecutionStatus.RUNNING
+                self._sequence += 1
+                event = StopEvent(
+                    event=AuditEventType.RESUME,
+                    execution_id=self._execution_id,
+                    sequence=self._sequence,
+                    at=datetime.now(timezone.utc),
+                    actor=actor,
+                    authorization_reference=authorization_reference,
                 )
-            self._status = ExecutionStatus.RUNNING
-            self._sequence += 1
-            event = StopEvent(
-                event=AuditEventType.RESUME,
-                execution_id=self._execution_id,
-                sequence=self._sequence,
-                at=datetime.now(timezone.utc),
-                actor=actor,
-                authorization_reference=authorization_reference,
-            )
-        # Logged outside the lock, same reasoning as start()/stop(): file I/O
-        # should never happen while another caller might be blocked on it.
-        self._append_audit_log(event)
+            # Logged INSIDE self._file_lock — same reasoning as start()'s
+            # own write above.
+            self._append_audit_log(event)
 
     def read_audit_log(self) -> List[dict]:
         """Reads back every entry logged so far (by this instance or any

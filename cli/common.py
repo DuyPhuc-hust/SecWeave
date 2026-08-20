@@ -175,6 +175,24 @@ def _load_hypothesis_from_context_store(
             "status=hypothesis, không tra được not_verifiable)"
         )
 
+    _print_hypothesis_staleness_warning(record, hypothesis_id, current_target_id, current_revision)
+
+    try:
+        return _load_stored_hypothesis(record)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+
+
+def _print_hypothesis_staleness_warning(
+    record: dict,
+    hypothesis_id: str,
+    current_target_id: Optional[str],
+    current_revision: Optional[str],
+) -> None:
+    """The comparison itself, factored out so both
+    `_load_hypothesis_from_context_store` (the non---plan-file path) and
+    `_warn_if_hypothesis_stale` (the --plan-file path, see below) print the
+    exact same warning text instead of 2 copies drifting apart."""
     stored_target_id = record.get("target_id")
     stored_revision = record.get("revision")
     if stored_target_id and current_target_id and stored_target_id != current_target_id:
@@ -191,10 +209,37 @@ def _load_hypothesis_from_context_store(
             file=sys.stderr,
         )
 
+
+def _warn_if_hypothesis_stale(
+    context_store: SecurityContextStore,
+    hypothesis_id: str,
+    current_target_id: Optional[str],
+    current_revision: Optional[str],
+) -> None:
+    """Best-effort twin of `_load_hypothesis_from_context_store`'s staleness
+    cross-check, for the `--plan-file` path of `execute`/`retest` — that
+    path never reconstructs a Hypothesis (the frozen plan file already has
+    the ActionPlan), so it used to skip this warning entirely, even though
+    it's the documented, RECOMMENDED way to run `execute`. Unlike
+    `_load_hypothesis_from_context_store`, a missing hypothesis_id or a
+    Context Store error here is NOT an error — `--plan-file` has never
+    required the hypothesis to still exist in this context-db (it may
+    have been generated in a different db, or the db may have been
+    rotated), so this only warns when there is something concrete to warn
+    about, silently doing nothing otherwise. Always closes `context_store`.
+    """
+    if current_target_id == "":
+        raise CliError("target_id truyền vào để đối chiếu không được là chuỗi rỗng — bỏ hẳn cờ nếu không cần.")
+    if current_revision == "":
+        raise CliError("revision truyền vào để đối chiếu không được là chuỗi rỗng — bỏ hẳn cờ nếu không cần.")
     try:
-        return _load_stored_hypothesis(record)
-    except ValueError as exc:
-        raise CliError(str(exc)) from exc
+        record = context_store.get_hypothesis(hypothesis_id)
+    except RuntimeError:
+        return
+    finally:
+        context_store.close()
+    if record is not None:
+        _print_hypothesis_staleness_warning(record, hypothesis_id, current_target_id, current_revision)
 
 
 def _build_local_test_authorization(args: argparse.Namespace) -> Authorization:

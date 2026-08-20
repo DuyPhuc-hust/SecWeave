@@ -13,6 +13,7 @@ from shared.models.kill_switch import ExecutionStatus
 from shared.models.observation import NormalizedObservation
 from shared.models.verification_package import Environment
 from verification_package.assembler import assemble_verification_package
+from verification_package.manifest import PACKAGE_MANIFEST_FILENAME, ArtifactManifest, build_artifact_manifest
 
 
 def cmd_assemble_package(args: argparse.Namespace) -> int:
@@ -107,6 +108,24 @@ def _run_assemble_package(args: argparse.Namespace) -> int:
         )
     except (ValueError, ValidationError) as exc:
         raise CliError(f"không lắp được Verification Package: {exc}") from exc
+
+    # SPEC §4.3.3: "package chứa manifest liệt kê hash → phát hiện thay đổi
+    # ngoài ý muốn." Written BEFORE printing the package below — an
+    # execution is only considered fully assembled once both artifacts
+    # (package + manifest) exist, not just the one printed to stdout.
+    try:
+        manifest_entries = build_artifact_manifest(args.storage_dir, args.execution_id)
+        manifest = ArtifactManifest(
+            execution_id=args.execution_id, generated_at=datetime.now(timezone.utc), entries=manifest_entries
+        )
+        manifest_path = execution_dir / PACKAGE_MANIFEST_FILENAME
+        manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    except (OSError, ValidationError) as exc:
+        raise CliError(f"không ghi được package manifest cho execution '{args.execution_id}': {exc}") from exc
+    print(
+        f"-> Đã ghi package manifest ({len(manifest_entries)} artifact, SPEC §4.3.3) tại '{manifest_path}'",
+        file=sys.stderr,
+    )
 
     if args.format == "json":
         print(package.model_dump_json(indent=2))
