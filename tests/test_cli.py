@@ -5317,6 +5317,76 @@ def test_cli_retest_surfaces_runs_that_captured_no_verdict_at_all(capsys, monkey
     assert summary["agreement_count"] == 0
 
 
+def test_cli_retest_continues_past_one_runs_corrupted_artifact_instead_of_aborting_the_batch(
+    capsys, monkeypatch, tmp_path
+):
+    # Real gap found via independent review: the retest loop's own call to
+    # _read_verdict_for_execution used to be UNGUARDED, unlike
+    # _run_execute()'s call right above it — a corrupted/torn
+    # observations.jsonl line for just ONE run used to abort the WHOLE
+    # batch (raising CliError all the way up), discarding the verdicts of
+    # every run that already completed successfully, even though those
+    # runs already sent real HTTP requests and consumed real cost-cap
+    # budget. A per-run artifact corruption must only cost THAT run's
+    # verdict, not the whole batch's results.
+    import cli.commands.retest as retest_module
+    import httpx
+    from cli.common import CliError
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+    storage_dir = tmp_path / "evidence"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    real_read_verdict = retest_module._read_verdict_for_execution
+
+    def _fake_read_verdict(execution_id, storage_dir_arg):
+        if execution_id == "exec_retest_corrupt_retest2":
+            raise CliError("giả lập observations.jsonl bị hỏng cho lần 2")
+        return real_read_verdict(execution_id, storage_dir_arg)
+
+    monkeypatch.setattr(retest_module, "_read_verdict_for_execution", _fake_read_verdict)
+
+    exit_code = cli.main(
+        [
+            "retest",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--runs",
+            "3",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            "exec_retest_corrupt",
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0  # must NOT abort the whole batch
+    assert "không đọc được verdict" in captured.err
+
+    summary = json.loads((storage_dir / "exec_retest_corrupt_retest_summary.json").read_text())
+    assert summary["runs"] == 3
+    assert summary["runs_with_corrupted_artifact"] == 1
+    verdicts = [r["verdict"] for r in summary["results"]]
+    assert verdicts.count("inconclusive") == 2  # runs 1 and 3 completed normally
+    assert verdicts.count(None) == 1  # run 2's unreadable verdict recorded as None, not a crash
+
+
 def test_cli_measure_requires_at_least_one_input(capsys):
     exit_code = cli.main(["measure"])
     captured = capsys.readouterr()
@@ -5582,6 +5652,79 @@ def test_cli_measure_warns_on_a_tampered_retest_summary_without_hard_failing(cap
     assert len(report["reproducibility"]["WARNING_mismatch_with_raw_artifact"]) == 1
     assert report["reproducibility"]["WARNING_mismatch_with_raw_artifact"][0]["khai_trong_summary"] == "confirmed"
     assert report["reproducibility"]["WARNING_mismatch_with_raw_artifact"][0]["tinh_lai_tu_raw_artifact"] == "inconclusive"
+    assert "CẢNH BÁO" in captured.err
+
+
+def test_cli_measure_does_not_count_a_corrupted_artifact_as_cross_checked(capsys, monkeypatch, tmp_path):
+    # Real gap found via independent review: `cross_checked` used to be
+    # incremented BEFORE the try/except around _read_verdict_for_execution
+    # — a run whose observations.jsonl EXISTS but is corrupted (unreadable)
+    # still counted toward "N cross-checked", even though the comparison
+    # against the declared verdict never actually happened. That silently
+    # defeats the entire purpose of this cross-check: a hand-tampered
+    # summary sitting next to a corrupted artifact would report "N/N
+    # cross-checked, no mismatch" while having verified nothing for that
+    # run.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    plan_file = _single_role_plan_file(tmp_path, hypothesis_id)
+    storage_dir = tmp_path / "evidence"
+
+    _patch_evidence_harness_transport(monkeypatch, lambda request: httpx.Response(200, json={"ok": True}))
+
+    assert (
+        cli.main(
+            [
+                "retest",
+                "--hypothesis-id",
+                hypothesis_id,
+                "--plan-file",
+                str(plan_file),
+                "--runs",
+                "2",
+                "--allowed-action",
+                "GET http://host.docker.internal:3000",
+                "--target-id",
+                "tgt_test",
+                "--target-revision-id",
+                "rev_test",
+                "--execution-id",
+                "exec_measure_corrupt",
+                "--storage-dir",
+                str(storage_dir),
+                "--context-db",
+                db_path,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    # Corrupt run 1's observations.jsonl AFTER it already completed
+    # successfully and consumed real cost-cap budget.
+    corrupted_path = storage_dir / "exec_measure_corrupt_retest1" / "observations.jsonl"
+    corrupted_path.write_text("not valid json\n", encoding="utf-8")
+
+    summary_path = storage_dir / "exec_measure_corrupt_retest_summary.json"
+    exit_code = cli.main(
+        [
+            "measure",
+            "--retest-summary",
+            str(summary_path),
+            "--storage-dir",
+            str(storage_dir),
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert exit_code == 0  # a warning, not a hard failure
+    assert report["reproducibility"]["cross_checked_against_raw_artifact"] == 1  # only run 2, NOT run 1
+    assert report["reproducibility"]["runs_with_corrupted_artifact"] == 1
+    assert "WARNING_mismatch_with_raw_artifact" not in report["reproducibility"]  # nothing to compare, not a mismatch
     assert "CẢNH BÁO" in captured.err
 
 

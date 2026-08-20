@@ -218,6 +218,30 @@ def test_capture_redacts_a_sensitive_key_nested_inside_a_list_in_the_request_bod
     assert "LIST-SECRET-2" not in raw_text
 
 
+def test_capture_redacts_a_sensitive_key_nested_inside_a_tuple_in_the_request_body(tmp_path):
+    # Real gap found via independent review: _redact_nested's structural
+    # recursion only checked `isinstance(value, list)` — a tuple (a
+    # legitimate, JSON-serializable value ActionSpec.parameters: Dict[str,
+    # Any] doesn't rule out) fell through to the plain "return value"
+    # case unchanged, so a declared-sensitive key nested inside a tuple
+    # was never redacted even though the exact same shape nested in a
+    # list already was.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201)
+
+    harness = _harness(tmp_path, handler)
+    action = _action(
+        method="POST",
+        type=ActionType.TEST_DATA_CREATION,
+        parameters={"accounts": ({"token": "TUPLE-SECRET-1"}, {"token": "TUPLE-SECRET-2"})},
+    )
+    observation = harness.capture(action, role=ObservationRole.MAIN, sensitive_body_keys={"token"})
+
+    raw_text = Path(observation.raw_evidence_ref).read_text()
+    assert "TUPLE-SECRET-1" not in raw_text
+    assert "TUPLE-SECRET-2" not in raw_text
+
+
 def test_capture_sends_get_parameters_as_query_string_not_body(tmp_path):
     captured = {}
 

@@ -51,6 +51,7 @@ def _run_retest(args: argparse.Namespace) -> int:
     print(f"-> retest {args.runs} lần độc lập cho plan '{args.plan_file}', base execution_id='{base_execution_id}'")
 
     results: List[Tuple[str, Optional[str]]] = []
+    corrupted_artifact_count = 0
     for i in range(1, args.runs + 1):
         run_execution_id = f"{base_execution_id}_retest{i}"
         # A shallow copy per run — only .execution_id differs, everything
@@ -70,7 +71,26 @@ def _run_retest(args: argparse.Namespace) -> int:
             # honest than silently reporting on however many runs
             # happened to complete before hitting the same root cause.
             raise CliError(f"retest dừng ở lần {i}/{args.runs}: {exc}") from exc
-        verdict = _read_verdict_for_execution(run_execution_id, args.storage_dir)
+        try:
+            verdict = _read_verdict_for_execution(run_execution_id, args.storage_dir)
+        except CliError as exc:
+            # Real gap found via independent review: this call used to be
+            # UNGUARDED, unlike _run_execute() right above it — a
+            # corrupted/torn observations.jsonl line (a realistic outcome
+            # of a crash mid-write) would abort the WHOLE retest batch
+            # and discard the verdicts of every PRIOR run, even though
+            # those runs already sent real HTTP requests and consumed
+            # real cost-cap budget. Unlike _run_execute()'s own setup
+            # failure above (which genuinely hits every subsequent run
+            # identically), a corrupted artifact is per-run I/O — only
+            # THIS run's verdict is unreadable, not a reason to discard
+            # every other run's real result. Tracked separately from
+            # `runs_with_no_verdict` (a legitimately-stopped run) since
+            # "verdict unreadable due to corruption" is a more concerning
+            # finding than "run never captured anything."
+            verdict = None
+            corrupted_artifact_count += 1
+            print(f"   CẢNH BÁO: không đọc được verdict của lần {i}/{args.runs}: {exc}", file=sys.stderr)
         results.append((run_execution_id, verdict))
         print(f"-> Lần {i}/{args.runs}: verdict={verdict or '(không có observation — có thể đã bị dừng giữa chừng)'}")
 
@@ -94,6 +114,7 @@ def _run_retest(args: argparse.Namespace) -> int:
         "agreement_ratio": ratio,
         "meets_recommended_threshold": meets_threshold,
         "runs_with_no_verdict": no_verdict_count,
+        "runs_with_corrupted_artifact": corrupted_artifact_count,
     }
     summary_path = Path(args.storage_dir) / f"{base_execution_id}_retest_summary.json"
     try:
@@ -115,6 +136,13 @@ def _run_retest(args: argparse.Namespace) -> int:
             f"-> LƯU Ý: {no_verdict_count}/{len(results)} lần KHÔNG có verdict nào (dừng giữa chừng do "
             "kill-switch/cost-cap hoặc lỗi hạ tầng khác) — tỷ lệ trên có thể phản ánh sự cố hạ tầng, "
             "không hẳn là hệ thống thiếu tất định. Xem 'results' để biết chính xác lần nào."
+        )
+    if corrupted_artifact_count:
+        print(
+            f"-> CẢNH BÁO: {corrupted_artifact_count}/{len(results)} lần có artifact BỊ HỎNG, không đọc "
+            "lại được verdict dù request thật đã gửi và tốn cost-cap thật — khác với 'dừng giữa chừng "
+            "bình thường', đây là dấu hiệu cần kiểm tra thủ công (đĩa hỏng, ghi đè tay, ...), không nên "
+            "âm thầm coi là 1 lần 'không có verdict' thông thường."
         )
     print(f"-> Ngưỡng đề xuất SPEC §8.1 (>= 2/3): {'ĐẠT' if meets_threshold else 'CHƯA ĐẠT — phải ghi vào Limitations'}")
     print(f"-> retest_id: {summary['retest_id']} — lưu tóm tắt tại: {summary_path}")

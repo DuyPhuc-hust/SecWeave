@@ -142,6 +142,6 @@ Mỗi lệnh có `--help` riêng để xem đầy đủ tuỳ chọn.
 
 ---
 
-**Ghi chú:** dự án đang ở giai đoạn Chặng 1 (discovery/preparation), chưa có active run trên target thật ngoài môi trường demo cục bộ; 631/631 test pass. Đặc tả kỹ thuật đầy đủ nằm ở `SECWEAVE_SPEC.md`, kế hoạch triển khai theo tuần ở `SECWEAVE_WEEKLY_PLAN.md`, biểu mẫu Gate 2 ở `TARGET_SANDBOX_AUTHORIZATION_TEMPLATE.md`.
+**Ghi chú:** dự án đang ở giai đoạn Chặng 1 (discovery/preparation), chưa có active run trên target thật ngoài môi trường demo cục bộ; 678/678 test pass. Đặc tả kỹ thuật đầy đủ nằm ở `SECWEAVE_SPEC.md`, kế hoạch triển khai theo tuần ở `SECWEAVE_WEEKLY_PLAN.md`, biểu mẫu Gate 2 ở `TARGET_SANDBOX_AUTHORIZATION_TEMPLATE.md`.
 
 **Phân loại:** NTQ INTERNAL.

@@ -114,17 +114,30 @@ def _run_measure(args: argparse.Namespace) -> int:
 
         mismatches = []
         cross_checked = 0
+        corrupted_artifact_count = 0
         for entry in summary["results"]:
             execution_id = entry.get("execution_id")
             declared_verdict = entry.get("verdict")
             execution_dir = Path(args.storage_dir) / str(execution_id)
             if not (execution_dir / "observations.jsonl").exists() or not (execution_dir / "execution_status.json").exists():
                 continue
-            cross_checked += 1
             try:
                 recomputed_verdict = _read_verdict_for_execution(execution_id, args.storage_dir)
             except CliError:
+                # Real gap found via independent review: `cross_checked`
+                # used to be incremented BEFORE this try/except, so a
+                # corrupted/torn artifact (the files exist, but
+                # _read_verdict_for_execution can't parse them) still
+                # counted toward "N cross-checked" even though the
+                # comparison against the declared verdict never actually
+                # happened — silently defeating the exact tamper-detection
+                # purpose this cross-check exists for (a hand-edited
+                # summary next to a genuinely corrupted artifact would
+                # report "N/N cross-checked, no mismatch" while having
+                # verified nothing for that run).
+                corrupted_artifact_count += 1
                 continue
+            cross_checked += 1
             if recomputed_verdict != declared_verdict:
                 mismatches.append(
                     {
@@ -142,7 +155,16 @@ def _run_measure(args: argparse.Namespace) -> int:
             "meets_recommended_threshold": summary.get("meets_recommended_threshold"),
             "runs_with_no_verdict": summary.get("runs_with_no_verdict"),
             "cross_checked_against_raw_artifact": cross_checked,
+            "runs_with_corrupted_artifact": corrupted_artifact_count,
         }
+        if corrupted_artifact_count:
+            print(
+                f"CẢNH BÁO: {corrupted_artifact_count} lần retest có artifact tồn tại nhưng KHÔNG đọc lại "
+                "được để đối chiếu (observations.jsonl/execution_status.json bị hỏng) — những lần này "
+                "KHÔNG được tính vào cross_checked_against_raw_artifact, và verdict khai trong summary "
+                "của chúng chưa được kiểm chứng lại.",
+                file=sys.stderr,
+            )
         if mismatches:
             report["reproducibility"]["WARNING_mismatch_with_raw_artifact"] = mismatches
             print(

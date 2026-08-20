@@ -17,6 +17,18 @@ def test_strip_removes_fence_with_no_language_tag():
     assert strip_markdown_json_fence(text) == '{"a": 1}'
 
 
+def test_strip_removes_fence_with_no_newline_before_closing_backticks():
+    # Real gap found via independent review: the fence regex hard-required
+    # a literal newline immediately before the closing ``` — a model
+    # emitting compact, single-line JSON with no blank line before the
+    # fence closes (a plausible, terser style every OTHER test case here
+    # happens not to use) made the regex match ZERO times, silently
+    # falling through to `return text.strip()` with the fence markers
+    # still embedded in the "JSON".
+    text = '```json\n{"a": 1}```'
+    assert strip_markdown_json_fence(text) == '{"a": 1}'
+
+
 def test_strip_extracts_json_from_fence_surrounded_by_prose():
     # Real regression: Llama (via Groq) returns explanatory prose both
     # before AND after the fence, not just clean JSON in a fence like

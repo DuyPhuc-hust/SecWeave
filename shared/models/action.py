@@ -125,7 +125,18 @@ class PlanCheckResult(BaseModel):
     """
 
     approved: bool
-    checks: List[ActionCheckResult]
+    # min_length=1 — real gap found via independent review: without it,
+    # `PlanCheckResult(approved=True, checks=[])` constructed cleanly,
+    # since `all(... for check in [])` is vacuously True — "approved, 0
+    # checks" would look identical to a genuinely-reviewed plan. Same
+    # reasoning as ActionPlan.actions's own min_length=1 (see its
+    # comment) — currently unreachable through check_plan()'s one real
+    # call site (it builds `checks` 1:1 from ActionPlan.actions, which
+    # already can't be empty), but this model is a standalone,
+    # independently-constructible result (a test fixture, a JSON reload,
+    # a future second call site) and should not rely solely on that one
+    # caller happening to never pass an empty list.
+    checks: List[ActionCheckResult] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _check_consistency(self) -> "PlanCheckResult":

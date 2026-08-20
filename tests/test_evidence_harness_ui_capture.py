@@ -222,6 +222,27 @@ def test_capture_ui_state_converts_a_real_playwright_error_into_a_clean_runtime_
         harness.capture_ui_state(_action("http://127.0.0.1:1/"))
 
 
+def test_capture_ui_state_does_not_charge_cost_cap_when_chromium_is_missing(monkeypatch, tmp_path):
+    # Real gap found via independent review: the cost-cap charge used to
+    # run as part of the shared pre-flight check, BEFORE a real browser
+    # was ever attempted — matching capture()'s own stated principle
+    # ("consuming a cost slot any EARLIER would let a harness-internal
+    # failure unrelated to the target consume real budget for an action
+    # that never had a chance to reach the wire"), a missing Chromium
+    # binary (a local environment problem, not a target failure) must
+    # NOT burn a real cost-cap slot.
+    from shared.cost import CostService
+
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "empty_browsers_dir"))
+    cost_service = CostService(execution_id="exec_ui_cost_not_charged", storage_dir=str(tmp_path / "cost"), cap=5)
+    harness = _harness(tmp_path, execution_id="exec_ui_cost_not_charged", cost_service=cost_service)
+
+    with pytest.raises(RuntimeError, match="[Cc]hromium|Error"):
+        harness.capture_ui_state(_action("http://127.0.0.1:1/"))
+
+    assert cost_service.executed_action_count == 0
+
+
 def test_capture_ui_recording_writes_a_real_webm_with_correct_hash_and_size(tmp_path, real_server):
     import hashlib
     from pathlib import Path
@@ -303,3 +324,19 @@ def test_capture_ui_recording_converts_a_real_playwright_error_into_a_clean_runt
 
     with pytest.raises(RuntimeError, match="[Cc]hromium|Error"):
         harness.capture_ui_recording(_action("http://127.0.0.1:1/"))
+
+
+def test_capture_ui_recording_does_not_charge_cost_cap_when_chromium_is_missing(monkeypatch, tmp_path):
+    # Same reasoning as capture_ui_state()'s own version of this test.
+    from shared.cost import CostService
+
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "empty_browsers_dir"))
+    cost_service = CostService(
+        execution_id="exec_ui_recording_cost_not_charged", storage_dir=str(tmp_path / "cost"), cap=5
+    )
+    harness = _harness(tmp_path, execution_id="exec_ui_recording_cost_not_charged", cost_service=cost_service)
+
+    with pytest.raises(RuntimeError, match="[Cc]hromium|Error"):
+        harness.capture_ui_recording(_action("http://127.0.0.1:1/"))
+
+    assert cost_service.executed_action_count == 0

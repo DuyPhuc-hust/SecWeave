@@ -9,7 +9,16 @@ _FALSY_STRINGS = {"false", "0", "no", "null", "none", ""}
 # prose before/after the fence, even though the prompt asked for plain JSON.
 # Requiring the whole response to START with the fence (as before) missed
 # exactly this case.
-_FENCE_PATTERN = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
+#
+# The closing `\n?` is deliberately OPTIONAL — real gap found via
+# independent review: a model emitting compact, single-line JSON with no
+# blank line before the closing ``` (a plausible, terser style, not just
+# the multi-line style every existing test case used) made the PREVIOUS
+# pattern (a hard-required `\n` before the closing fence) match zero
+# times, silently falling through to `return text.strip()` with the fence
+# markers still embedded — a raw `json.loads()` failure downstream instead
+# of a clean extraction.
+_FENCE_PATTERN = re.compile(r"```[^\n]*\n(.*?)\n?```", re.DOTALL)
 
 
 def is_truthy(value: Any) -> bool:

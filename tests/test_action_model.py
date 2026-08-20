@@ -133,6 +133,16 @@ def test_plan_check_result_rejects_approved_false_when_all_checks_allowed():
         PlanCheckResult(approved=False, checks=[_check(True), _check(True)])
 
 
+def test_plan_check_result_rejects_an_empty_checks_list():
+    # Real gap found via independent review: without min_length=1,
+    # PlanCheckResult(approved=True, checks=[]) constructed cleanly —
+    # all(... for check in []) is vacuously True, so "approved, 0
+    # checks" looked identical to a genuinely-reviewed plan. Same
+    # reasoning as ActionPlan.actions's own min_length=1.
+    with pytest.raises(ValidationError):
+        PlanCheckResult(approved=True, checks=[])
+
+
 # ----- CostDecision: allowed must match planned_action_count <= cap -----
 
 

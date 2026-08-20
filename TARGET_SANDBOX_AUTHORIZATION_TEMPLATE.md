@@ -1,8 +1,9 @@
 # Target/Sandbox Authorization — template (chưa điền tên/ký)
 
-Sản phẩm Chặng 1 theo `SECWEAVE_WEEKLY_PLAN.md` (W2): biểu mẫu cho **Gate 2 —
-Target/Sandbox Authorization**, ký bởi owner của target/sandbox được chọn ở
-Gate 1. Đây là **template rỗng** — không đại diện cho bất kỳ target thật nào
+Sản phẩm Chặng 2 theo `SECWEAVE_WEEKLY_PLAN.md` (W3, sau khi Gate 1 ở W2 đã
+mở Chặng 2): biểu mẫu cho **Gate 2 — Target/Sandbox Authorization**, ký bởi
+owner của target/sandbox được chọn ở Gate 1. Đây là **template rỗng** —
+không đại diện cho bất kỳ target thật nào
 (kể cả NxKeeper), không được điền thông tin suy đoán, chỉ điền khi có
 owner thật ký thật.
 

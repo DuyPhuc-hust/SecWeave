@@ -54,6 +54,16 @@ class OpenAICompatibleLLMClient(HypothesisLLMClient):
             # which would otherwise crash with a raw traceback instead of
             # this module's clean failure path.
             raise RuntimeError(f"LLM_BASE_URL không hợp lệ ('{self._base_url}'): {exc}") from exc
+        except httpx.UnsupportedProtocol as exc:
+            # A whitespace-only or scheme-less LLM_BASE_URL (e.g. a stray
+            # space, or a missing "https://") passes the plain "env var is
+            # set" check above but raises httpx.UnsupportedProtocol here —
+            # unlike InvalidURL, this one IS already an httpx.HTTPError
+            # subclass (so cli.py's handler catches it, no raw crash), but
+            # it skipped this module's own friendly Vietnamese message.
+            # Same fix shape as InvalidURL above, for the same class of
+            # "LLM_BASE_URL is malformed" mistake.
+            raise RuntimeError(f"LLM_BASE_URL không hợp lệ ('{self._base_url}'): {exc}") from exc
         response.raise_for_status()
         try:
             body = response.json()

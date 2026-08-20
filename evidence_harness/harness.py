@@ -154,8 +154,17 @@ def _redact_nested(value: Any, sensitive_keys: Set[str]) -> Any:
             key: (_REDACTED_PLACEHOLDER if key in sensitive_keys else _redact_nested(child, sensitive_keys))
             for key, child in value.items()
         }
-    if isinstance(value, list):
-        return [_redact_nested(item, sensitive_keys) for item in value]
+    if isinstance(value, (list, tuple)):
+        # Real gap found via independent review: `ActionSpec.parameters`
+        # is `Dict[str, Any]` — pydantic never coerces nested values, so a
+        # caller can legitimately nest a tuple (e.g.
+        # `{"accounts": ({"password": "..."}, )}`), which `json.dumps`
+        # serializes identically to a list when the real request is sent.
+        # Checking `isinstance(value, list)` alone let a tuple fall
+        # through to the plain `return value` case below UNCHANGED — a
+        # declared-sensitive key nested inside a tuple was never redacted
+        # even though the exact same shape nested in a list would be.
+        return type(value)(_redact_nested(item, sensitive_keys) for item in value)
     return value
 
 
@@ -810,19 +819,18 @@ class EvidenceHarness:
 
         return observation
 
-    def _enforce_ui_capture_gates(self, action: ActionSpec, verb: str):
-        """Shared closed-instance / kill-switch / cost-cap checks for
-        capture_ui_state() and capture_ui_recording() — same 3 checks,
-        same order as capture()'s own gating, only `verb` (a Vietnamese
-        phrase describing the real browser action about to happen, e.g.
-        "mở trình duyệt thật" / "quay video thật") differs between the
-        two methods' error messages. Returns the `sync_playwright`
-        callable (from `_sync_playwright()`) so the caller doesn't need
-        a separate import-check call of its own — checked here, between
-        the kill-switch and cost checks, matching the original ordering:
-        a STOPPED execution fails fast without even checking playwright
-        is installed, and a missing playwright never consumes a cost-cap
-        slot for an action that was never going to run anyway.
+    def _check_ui_capture_not_stopped(self, action: ActionSpec, verb: str):
+        """Shared closed-instance / kill-switch checks for
+        capture_ui_state() and capture_ui_recording() — `verb` (a
+        Vietnamese phrase describing the real browser action about to
+        happen, e.g. "mở trình duyệt thật" / "quay video thật") differs
+        between the two methods' error messages. Returns the
+        `sync_playwright` callable (from `_sync_playwright()`) so the
+        caller doesn't need a separate import-check call of its own.
+
+        Deliberately does NOT charge the cost-cap here — see
+        `_charge_ui_capture_cost()`'s own docstring for why that must
+        wait until AFTER a real browser has actually launched.
         """
         if self._closed:
             raise RuntimeError(
@@ -840,9 +848,27 @@ class EvidenceHarness:
                     f"'{action.action_id}'. Xem kill_switch_audit_log.jsonl của execution này để biết "
                     "ai/khi nào/vì sao đã dừng."
                 )
+        return _sync_playwright()
 
-        sync_playwright = _sync_playwright()
-
+    def _charge_ui_capture_cost(self, action: ActionSpec, verb: str) -> None:
+        """Cost-cap check + charge for capture_ui_state()/
+        capture_ui_recording() — called ONLY after `pw.chromium.launch()`
+        has already succeeded (see both methods' own call sites), never
+        earlier. Real gap found via independent review: this used to run
+        as part of the shared pre-flight check, before a real browser was
+        ever attempted — meaning a missing Chromium binary (a local
+        environment problem, `playwright install chromium` never run,
+        NOT a target failure) still burned a real cost-cap slot, and
+        could even trip `ACTION_COUNT_EXCEEDED` and halt the whole
+        execution purely from a local misconfiguration that never
+        reached the target. capture()'s own docstring states the
+        correct principle directly: consuming a cost slot before
+        confirming the action isn't failing for a harness-internal
+        reason unrelated to the target lets exactly that kind of
+        internal failure consume real budget for an action that never
+        had a chance to reach the wire — this mirrors that ordering for
+        the browser-launch case specifically.
+        """
         if self._cost_service is not None:
             decision = self._cost_service.record_action(action.action_id)
             if not decision.allowed:
@@ -856,7 +882,6 @@ class EvidenceHarness:
                     f"Execution '{self._execution_id}': {decision.reason} Không {verb} cho action "
                     f"'{action.action_id}'."
                 )
-        return sync_playwright
 
     def _playwright_cookies_for(self, identity: str, action: ActionSpec) -> List[Dict[str, Any]]:
         """Translates `identity`'s existing httpx cookie jar into
@@ -960,12 +985,13 @@ class EvidenceHarness:
         the image as shareable.
 
         Same KillSwitch/CostService gating as capture() (see
-        _enforce_ui_capture_gates), for the same reasons: refuses instead
-        of opening a real browser once STOPPED, and counts against the
-        same cost cap since this is still a real action against the
-        target. A caller pairing this with an HTTP capture() call for the
-        SAME action (the CLI's own `execute --capture-ui-for` does
-        exactly this) spends a SECOND cost-cap slot on top of the HTTP
+        _check_ui_capture_not_stopped/_charge_ui_capture_cost), for the
+        same reasons: refuses instead of opening a real browser once
+        STOPPED, and counts against the same cost cap since this is
+        still a real action against the target. A caller pairing this
+        with an HTTP capture() call for the SAME action (the CLI's own
+        `execute --capture-ui-for` does exactly this) spends a SECOND
+        cost-cap slot on top of the HTTP
         capture's own — a real, intentional cost, not a bug, but one a
         caller sizing `--cap` needs to account for explicitly (see
         `--cap`'s own help text).
@@ -977,7 +1003,7 @@ class EvidenceHarness:
         with a clear install hint instead of a raw ImportError deep in a
         stack trace if it's missing.
         """
-        sync_playwright = self._enforce_ui_capture_gates(action, "mở trình duyệt thật")
+        sync_playwright = self._check_ui_capture_not_stopped(action, "mở trình duyệt thật")
 
         observation_id = generate_id("obs")
         captured_at = datetime.now(timezone.utc)
@@ -989,6 +1015,10 @@ class EvidenceHarness:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch()
                 try:
+                    # Cost is charged HERE, only after a real browser has
+                    # actually launched — not earlier — see
+                    # _charge_ui_capture_cost()'s own docstring for why.
+                    self._charge_ui_capture_cost(action, "mở trình duyệt thật")
                     context = browser.new_context()
                     try:
                         if playwright_cookies:
@@ -1082,7 +1112,7 @@ class EvidenceHarness:
         then removes the scratch file/directory so nothing beyond the
         renamed copy under `raw_evidence_ref` lingers on disk.
         """
-        sync_playwright = self._enforce_ui_capture_gates(action, "quay video thật")
+        sync_playwright = self._check_ui_capture_not_stopped(action, "quay video thật")
 
         observation_id = generate_id("obs")
         captured_at = datetime.now(timezone.utc)
@@ -1097,6 +1127,10 @@ class EvidenceHarness:
                 with sync_playwright() as pw:
                     browser = pw.chromium.launch()
                     try:
+                        # Cost is charged HERE, only after a real browser
+                        # has actually launched — not earlier — see
+                        # _charge_ui_capture_cost()'s own docstring.
+                        self._charge_ui_capture_cost(action, "quay video thật")
                         context = browser.new_context(record_video_dir=str(video_scratch_dir))
                         try:
                             if playwright_cookies:

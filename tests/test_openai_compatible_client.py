@@ -157,6 +157,23 @@ def test_generate_raises_clean_runtime_error_on_malformed_base_url(monkeypatch):
         client.generate("hello prompt")
 
 
+def test_generate_raises_clean_runtime_error_on_scheme_less_base_url(monkeypatch):
+    # Real gap found via independent review: a whitespace-only/scheme-less
+    # LLM_BASE_URL (e.g. a stray space from a copy-paste mistake) passes
+    # the "env var is set" check, then raises httpx.UnsupportedProtocol —
+    # NOT httpx.InvalidURL, so it skipped THIS module's own friendly
+    # message (it's still an httpx.HTTPError subclass, so cli.py's own
+    # handler doesn't crash on it, but the error was less helpful than it
+    # should be).
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_BASE_URL", " ")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    client = OpenAICompatibleLLMClient()
+    with pytest.raises(RuntimeError, match="LLM_BASE_URL không hợp lệ"):
+        client.generate("hello prompt")
+
+
 def test_base_url_strips_stray_whitespace_and_newlines(monkeypatch):
     # A trailing newline/CR in LLM_BASE_URL is a realistic .env copy-paste
     # mistake and would otherwise trigger httpx.InvalidURL.
