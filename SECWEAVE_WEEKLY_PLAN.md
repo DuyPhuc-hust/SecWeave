@@ -168,7 +168,7 @@ Vì hệ thống có bốn tầng với bốn loại trách nhiệm khác nhau (
 - Implement Security Context Store tối thiểu (SQLite, [SPEC §4.6](./SECWEAVE_SPEC.md#46-security-context-store)) — chỉ phần đọc `verified` context (chưa có gì để đọc thật ở lượt đầu, nhưng interface phải tồn tại từ tuần này vì Hypothesis Engine phụ thuộc vào nó).
 
 **Chức năng hoàn thiện cuối tuần:**
-- Chạy được lệnh (ví dụ) `secweave hypothesize --signal semgrep_report.json --target-revision <rev>` → xuất ra một `Hypothesis` JSON hợp lệ hoặc thông báo "không kiểm chứng được" — toàn bộ **không gửi request nào ra target**, chỉ đọc source + gọi LLM.
+- Chạy được lệnh (ví dụ) `secweave hypothesize --signal semgrep_report.json --target-revision-id <rev>` → xuất ra một `Hypothesis` JSON hợp lệ hoặc thông báo "không kiểm chứng được" — toàn bộ **không gửi request nào ra target**, chỉ đọc source + gọi LLM.
 - `NormalizedSignal` sinh từ Semgrep report thật của target khớp đúng schema đã đặc tả.
 
 **Kế hoạch test:**

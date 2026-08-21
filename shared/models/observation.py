@@ -70,7 +70,7 @@ it decides a hypothesis benefits from blind-marker verification. The LLM
 never sees or invents the REAL marker (a random token from
 EvidenceHarness.generate_marker()) — SPEC's own table names ONLY Harness
 and Oracle as legitimate readers, explicitly excluding "Exploit Agent /
-mọi LLM". cli.py's `execute` substitutes this placeholder for the real
+mọi LLM". cli/commands/execute.py's `execute` substitutes this placeholder for the real
 value AFTER the LLM is done and BEFORE Policy Service/Cost Service/
 execution ever see it, so the real value never passes through any LLM
 context — only this constant (a public token, not a secret) does."""

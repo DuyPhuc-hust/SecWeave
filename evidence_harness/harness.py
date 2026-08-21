@@ -155,15 +155,15 @@ def _redact_nested(value: Any, sensitive_keys: Set[str]) -> Any:
             for key, child in value.items()
         }
     if isinstance(value, (list, tuple)):
-        # Real gap found via independent review: `ActionSpec.parameters`
-        # is `Dict[str, Any]` — pydantic never coerces nested values, so a
-        # caller can legitimately nest a tuple (e.g.
-        # `{"accounts": ({"password": "..."}, )}`), which `json.dumps`
-        # serializes identically to a list when the real request is sent.
-        # Checking `isinstance(value, list)` alone let a tuple fall
-        # through to the plain `return value` case below UNCHANGED — a
-        # declared-sensitive key nested inside a tuple was never redacted
-        # even though the exact same shape nested in a list would be.
+        # `ActionSpec.parameters` is `Dict[str, Any]` — pydantic never
+        # coerces nested values, so a caller can legitimately nest a tuple
+        # (e.g. `{"accounts": ({"password": "..."}, )}`), which
+        # `json.dumps` serializes identically to a list when the real
+        # request is sent. Checking `isinstance(value, list)` alone would
+        # let a tuple fall through to the plain `return value` case below
+        # UNCHANGED, so a declared-sensitive key nested inside a tuple
+        # must be redacted the same as the identical shape nested in a
+        # list.
         return type(value)(_redact_nested(item, sensitive_keys) for item in value)
     return value
 
@@ -192,15 +192,15 @@ def _sync_playwright():
 
 
 def verify_ui_capture_available() -> None:
-    """Real gap found via independent review: `_sync_playwright()` alone
-    only checks the `playwright` PIP PACKAGE is importable — it never
-    launches a browser, so it cannot detect the far more common real
-    misconfiguration of `pip install playwright` done WITHOUT the
-    separate `playwright install chromium` step the package itself
-    requires. A caller (e.g. the CLI) that only calls `_sync_playwright()`
-    up front, before running any real action, would still crash on the
-    FIRST actual `capture_ui_state()` call — potentially after several
-    OTHER real actions already ran and consumed real cost-cap budget.
+    """`_sync_playwright()` alone only checks the `playwright` PIP PACKAGE
+    is importable — it never launches a browser, so it cannot detect the
+    far more common real misconfiguration of `pip install playwright`
+    done WITHOUT the separate `playwright install chromium` step the
+    package itself requires. A caller (e.g. the CLI) that only calls
+    `_sync_playwright()` up front, before running any real action, would
+    still crash on the FIRST actual `capture_ui_state()` call —
+    potentially after several OTHER real actions already ran and consumed
+    real cost-cap budget.
 
     This actually launches a real (throwaway) Chromium instance and closes
     it immediately, so a missing browser binary is caught up front, before
@@ -854,15 +854,14 @@ class EvidenceHarness:
         """Cost-cap check + charge for capture_ui_state()/
         capture_ui_recording() — called ONLY after `pw.chromium.launch()`
         has already succeeded (see both methods' own call sites), never
-        earlier. Real gap found via independent review: this used to run
-        as part of the shared pre-flight check, before a real browser was
-        ever attempted — meaning a missing Chromium binary (a local
-        environment problem, `playwright install chromium` never run,
-        NOT a target failure) still burned a real cost-cap slot, and
-        could even trip `ACTION_COUNT_EXCEEDED` and halt the whole
-        execution purely from a local misconfiguration that never
-        reached the target. capture()'s own docstring states the
-        correct principle directly: consuming a cost slot before
+        earlier — running this as part of the shared pre-flight check,
+        before a real browser was ever attempted, would mean a missing
+        Chromium binary (a local environment problem, `playwright install
+        chromium` never run, NOT a target failure) still burns a real
+        cost-cap slot, and could even trip `ACTION_COUNT_EXCEEDED` and
+        halt the whole execution purely from a local misconfiguration
+        that never reached the target. capture()'s own docstring states
+        the correct principle directly: consuming a cost slot before
         confirming the action isn't failing for a harness-internal
         reason unrelated to the target lets exactly that kind of
         internal failure consume real budget for an action that never
@@ -1153,17 +1152,17 @@ class EvidenceHarness:
                         browser.close()
                 video_bytes = video_path.read_bytes()
             except (PlaywrightError, OSError) as exc:
-                # Real gap found via independent review: reading the
-                # video file back from disk (unlike capture_ui_state()'s
-                # screenshot, which comes back as in-memory bytes
-                # directly from Playwright) is a NEW failure surface this
-                # method has that capture_ui_state() doesn't — a
-                # `FileNotFoundError`/other `OSError` here (the scratch
-                # file removed or locked by something external, a
-                # disk-full mid-write) is not a PlaywrightError and would
-                # otherwise propagate raw past this method, uncaught by
-                # the CLI's `except RuntimeError` handling every other
-                # error path in this feature relies on.
+                # Reading the video file back from disk (unlike
+                # capture_ui_state()'s screenshot, which comes back as
+                # in-memory bytes directly from Playwright) is a NEW
+                # failure surface this method has that capture_ui_state()
+                # doesn't — a `FileNotFoundError`/other `OSError` here
+                # (the scratch file removed or locked by something
+                # external, a disk-full mid-write) is not a
+                # PlaywrightError and would otherwise propagate raw past
+                # this method, uncaught by the CLI's `except RuntimeError`
+                # handling every other error path in this feature relies
+                # on.
                 raise RuntimeError(
                     f"capture_ui_recording() lỗi khi dùng trình duyệt thật cho action "
                     f"'{action.action_id}': {type(exc).__name__}: {exc}"

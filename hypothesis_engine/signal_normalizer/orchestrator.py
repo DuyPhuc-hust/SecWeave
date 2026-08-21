@@ -43,7 +43,7 @@ class SignalNormalizer:
             raw_report = json.loads(raw_bytes)
         except RecursionError as exc:
             # Ordinary malformed JSON raises json.JSONDecodeError (a
-            # ValueError subclass, already caught cleanly by cli.py's
+            # ValueError subclass, already caught cleanly by the CLI's
             # existing `except ValueError`), but a pathologically
             # deeply-nested (still syntactically valid) JSON document raises
             # RecursionError instead — NOT a ValueError, so it would

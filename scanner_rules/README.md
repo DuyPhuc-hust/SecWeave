@@ -20,7 +20,7 @@ semgrep --config auto --config scanner_rules/semgrep/idor_identity_from_url_para
 ```
 
 Report JSON kết quả (bao gồm cả finding từ rule tuỳ chỉnh) đưa thẳng vào
-`cli.py normalize`/`hypothesize` như bình thường — `SemgrepAdapter` không cần
+`python -m cli normalize`/`hypothesize` như bình thường — `SemgrepAdapter` không cần
 sửa gì, vì shape JSON của 1 custom rule giống hệt rule lấy từ registry.
 
 ## Rule hiện có

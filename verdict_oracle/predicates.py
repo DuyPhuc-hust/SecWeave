@@ -225,7 +225,7 @@ def evaluate_predicates(observations: List[NormalizedObservation]) -> List[Predi
     # Nothing about the blind-marker check itself (request/response marker
     # presence) can detect this — it's purely an identity-bookkeeping fact
     # the check functions never see. An operator forgetting a
-    # `--role-identity` mapping (cli.py) — falling back to the single
+    # `--role-identity` mapping (cli/commands/execute.py) — falling back to the single
     # shared --identity for every role — is a realistic, not just
     # theoretical, way to reach this silently.
     #
