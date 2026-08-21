@@ -155,13 +155,15 @@ def _redact_nested(value: Any, sensitive_keys: Set[str]) -> Any:
             for key, child in value.items()
         }
     if isinstance(value, (list, tuple)):
-        # `ActionSpec.parameters` is `Dict[str, Any]` — pydantic never
-        # coerces nested values, so a caller can legitimately nest a tuple
-        # (e.g. `{"accounts": ({"password": "..."}, )}`), which
-        # `json.dumps` serializes identically to a list when the real
-        # request is sent — checking `isinstance(value, list)` alone would
-        # miss it, leaving a declared-sensitive key nested inside a tuple
-        # unredacted even though the same shape nested in a list is.
+        # Real gap found via independent review: `ActionSpec.parameters`
+        # is `Dict[str, Any]` — pydantic never coerces nested values, so a
+        # caller can legitimately nest a tuple (e.g.
+        # `{"accounts": ({"password": "..."}, )}`), which `json.dumps`
+        # serializes identically to a list when the real request is sent.
+        # Checking `isinstance(value, list)` alone let a tuple fall
+        # through to the plain `return value` case below UNCHANGED — a
+        # declared-sensitive key nested inside a tuple was never redacted
+        # even though the exact same shape nested in a list would be.
         return type(value)(_redact_nested(item, sensitive_keys) for item in value)
     return value
 
@@ -190,15 +192,15 @@ def _sync_playwright():
 
 
 def verify_ui_capture_available() -> None:
-    """`_sync_playwright()` alone only checks the `playwright` PIP PACKAGE
-    is importable — it never launches a browser, so it cannot detect the
-    far more common real misconfiguration of `pip install playwright`
-    done WITHOUT the separate `playwright install chromium` step the
-    package itself requires. A caller (e.g. the CLI) that only calls
-    `_sync_playwright()` up front, before running any real action, would
-    still crash on the FIRST actual `capture_ui_state()` call —
-    potentially after several OTHER real actions already ran and consumed
-    real cost-cap budget.
+    """Real gap found via independent review: `_sync_playwright()` alone
+    only checks the `playwright` PIP PACKAGE is importable — it never
+    launches a browser, so it cannot detect the far more common real
+    misconfiguration of `pip install playwright` done WITHOUT the
+    separate `playwright install chromium` step the package itself
+    requires. A caller (e.g. the CLI) that only calls `_sync_playwright()`
+    up front, before running any real action, would still crash on the
+    FIRST actual `capture_ui_state()` call — potentially after several
+    OTHER real actions already ran and consumed real cost-cap budget.
 
     This actually launches a real (throwaway) Chromium instance and closes
     it immediately, so a missing browser binary is caught up front, before
@@ -699,22 +701,6 @@ class EvidenceHarness:
             # classification from evidence the artifact itself says failed.
             status_code = None
 
-        # For the STORED transcript only — a human-facing artifact, where
-        # --sensitive-param is meant to scrub a value the operator doesn't
-        # want written to disk in cleartext. NormalizedObservation.
-        # resolved_target below must NOT reuse this same redacted string:
-        # _redact_url_query() replaces a redacted key's VALUE with the same
-        # fixed placeholder for every request, so if the operator declares
-        # the resource-identifying query key itself as sensitive (e.g.
-        # --sensitive-param id on "?id=100" vs "?id=200"), 2 genuinely
-        # different resources would collapse into the identical redacted
-        # string — exactly what _check_same_resource_cross_identity's
-        # equality check depends on being trustworthy. resolved_target
-        # instead uses the real, unredacted sent_url (see below) —
-        # consistent with actions.json/ActionSpec.target, which already
-        # store every action's real target unredacted regardless of
-        # --sensitive-param; only the raw evidence TRANSCRIPT ever redacts.
-        redacted_sent_url = _redact_url_query(sent_url, sensitive_body_keys)
         transcript: Dict[str, Any] = {
             "observation_id": observation_id,
             "action_ref": action.action_id,
@@ -723,7 +709,7 @@ class EvidenceHarness:
             "captured_at": captured_at.isoformat(),
             "request": {
                 "method": action.method,
-                "url": redacted_sent_url,
+                "url": _redact_url_query(sent_url, sensitive_body_keys),
                 "params": _redact_body(params, sensitive_body_keys),
                 "body": _redact_body(request_body, sensitive_body_keys),
                 "headers": request_headers,
@@ -792,10 +778,6 @@ class EvidenceHarness:
             status_code=status_code,
             response_contains_marker=response_contains_marker,
             request_contains_marker=_contains_marker(request_text, marker),
-            # Unredacted — see the comment above redacted_sent_url's own
-            # definition for why this must never be the same value as the
-            # stored transcript's request.url.
-            resolved_target=sent_url,
         )
 
         if self._context_store is not None:
@@ -872,17 +854,20 @@ class EvidenceHarness:
         """Cost-cap check + charge for capture_ui_state()/
         capture_ui_recording() — called ONLY after `pw.chromium.launch()`
         has already succeeded (see both methods' own call sites), never
-        earlier: charging any sooner would let a missing Chromium binary
-        (a local environment problem, `playwright install chromium` never
-        run, NOT a target failure) burn a real cost-cap slot — even
-        tripping `ACTION_COUNT_EXCEEDED` and halting the whole execution —
-        purely from a local misconfiguration that never reached the
-        target. capture()'s own docstring states the same principle:
-        consuming a cost slot before confirming the action isn't failing
-        for a harness-internal reason unrelated to the target lets that
-        kind of internal failure consume real budget for an action that
-        never had a chance to reach the wire — this mirrors that ordering
-        for the browser-launch case specifically.
+        earlier. Real gap found via independent review: this used to run
+        as part of the shared pre-flight check, before a real browser was
+        ever attempted — meaning a missing Chromium binary (a local
+        environment problem, `playwright install chromium` never run,
+        NOT a target failure) still burned a real cost-cap slot, and
+        could even trip `ACTION_COUNT_EXCEEDED` and halt the whole
+        execution purely from a local misconfiguration that never
+        reached the target. capture()'s own docstring states the
+        correct principle directly: consuming a cost slot before
+        confirming the action isn't failing for a harness-internal
+        reason unrelated to the target lets exactly that kind of
+        internal failure consume real budget for an action that never
+        had a chance to reach the wire — this mirrors that ordering for
+        the browser-launch case specifically.
         """
         if self._cost_service is not None:
             decision = self._cost_service.record_action(action.action_id)
@@ -1089,7 +1074,6 @@ class EvidenceHarness:
             status_code=None,
             response_contains_marker=None,
             request_contains_marker=None,
-            resolved_target=action.target,
         )
         self._record_ui_capture_in_context_store(action, "screenshot captured")
         return observation
@@ -1169,16 +1153,17 @@ class EvidenceHarness:
                         browser.close()
                 video_bytes = video_path.read_bytes()
             except (PlaywrightError, OSError) as exc:
-                # Reading the video file back from disk (unlike
-                # capture_ui_state()'s screenshot, which comes back as
-                # in-memory bytes directly from Playwright) is a failure
-                # surface this method has that capture_ui_state() doesn't
-                # — a `FileNotFoundError`/other `OSError` here (the
-                # scratch file removed or locked by something external, a
-                # disk-full mid-write) is not a PlaywrightError, and must
-                # still degrade to the same RuntimeError every other error
-                # path in this feature relies on, not propagate raw past
-                # the CLI's `except RuntimeError` handling.
+                # Real gap found via independent review: reading the
+                # video file back from disk (unlike capture_ui_state()'s
+                # screenshot, which comes back as in-memory bytes
+                # directly from Playwright) is a NEW failure surface this
+                # method has that capture_ui_state() doesn't — a
+                # `FileNotFoundError`/other `OSError` here (the scratch
+                # file removed or locked by something external, a
+                # disk-full mid-write) is not a PlaywrightError and would
+                # otherwise propagate raw past this method, uncaught by
+                # the CLI's `except RuntimeError` handling every other
+                # error path in this feature relies on.
                 raise RuntimeError(
                     f"capture_ui_recording() lỗi khi dùng trình duyệt thật cho action "
                     f"'{action.action_id}': {type(exc).__name__}: {exc}"
@@ -1219,7 +1204,6 @@ class EvidenceHarness:
             status_code=None,
             response_contains_marker=None,
             request_contains_marker=None,
-            resolved_target=action.target,
         )
         self._record_ui_capture_in_context_store(action, "video recording captured")
         return observation

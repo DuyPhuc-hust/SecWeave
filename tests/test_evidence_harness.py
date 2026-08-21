@@ -841,43 +841,6 @@ def test_capture_redacts_a_secret_embedded_in_action_target_query_string(tmp_pat
     assert "SUPER-SECRET-RESET-TOKEN" not in raw_text
 
 
-def test_resolved_target_stays_unredacted_even_when_sensitive_param_covers_the_resource_id_query_key(tmp_path):
-    # Real, reproducible false-CONFIRMED found via independent review right
-    # after resolved_target was added: it used to reuse the SAME value
-    # already redacted for the stored transcript. _redact_url_query()
-    # replaces a redacted key's VALUE with the identical fixed placeholder
-    # for every request — so if an operator declares the RESOURCE-
-    # IDENTIFYING query key itself sensitive (a realistic, documented use
-    # of --sensitive-param, not misuse), 2 genuinely different resources
-    # ("?id=100" vs "?id=200") collapse into the identical redacted string,
-    # defeating check_main_predicate's exact-equality "same resource" check
-    # and producing a false CONFIRMED for 2 unrelated resources. The stored
-    # transcript on disk is STILL correctly redacted (that's the intended,
-    # human-facing behavior of --sensitive-param) — only resolved_target
-    # must stay unredacted, matching actions.json's own existing behavior.
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200)
-
-    harness = _harness(tmp_path, handler)
-    action_a = _action(target="https://target.example.com/api/objects", parameters={"id": "100"})
-    action_b = _action(target="https://target.example.com/api/objects", parameters={"id": "200"})
-
-    obs_a = harness.capture(action_a, role=ObservationRole.MAIN, sensitive_body_keys={"id"})
-    obs_b = harness.capture(action_b, role=ObservationRole.MAIN, sensitive_body_keys={"id"})
-
-    assert obs_a.resolved_target != obs_b.resolved_target
-    assert "id=100" in obs_a.resolved_target
-    assert "id=200" in obs_b.resolved_target
-
-    # The stored transcripts, by contrast, both redact to the same
-    # placeholder — confirming this test actually exercises redaction, not
-    # a no-op, and that the transcript's own behavior is untouched.
-    transcript_a = Path(obs_a.raw_evidence_ref).read_text()
-    transcript_b = Path(obs_b.raw_evidence_ref).read_text()
-    assert "id=100" not in transcript_a
-    assert "id=200" not in transcript_b
-
-
 def test_capture_raises_clean_runtime_error_after_close_instead_of_a_confusing_httpx_crash(tmp_path):
     # Real bug found via review: reusing an identity whose client was
     # already closed used to crash with an uncaught httpx-internal

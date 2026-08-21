@@ -183,33 +183,6 @@ class NormalizedObservation(BaseModel):
     response_contains_marker: Optional[bool] = None
     request_contains_marker: Optional[bool] = None
 
-    # The REAL, fully-resolved request URL this observation's action
-    # actually hit — deliberately UNREDACTED, even when --sensitive-param
-    # covers a query key on this request: _redact_url_query() replaces a
-    # redacted key's VALUE with the same fixed placeholder for EVERY
-    # request, so if the operator ever declares the resource-identifying
-    # query key itself sensitive (e.g. --sensitive-param id on "?id=100"
-    # vs "?id=200"), 2 genuinely different resources would collapse into
-    # the identical redacted string, defeating the exact equality check
-    # check_main_predicate() depends on this field for (below) and
-    # producing a false CONFIRMED. Consistent with actions.json/
-    # ActionSpec.target, which already store every action's real target
-    # unredacted regardless of --sensitive-param — only the raw evidence
-    # transcript itself is meant to ever redact.
-    #
-    # Lets check_main_predicate() confirm a leak WITHOUT a blind marker for
-    # resources that have no free-text field to plant one in (e.g. a JSON
-    # API whose only bait-able field is a business-rule-constrained integer
-    # like `quantity`): main and positive_control targeting the exact same
-    # resolved_target, both access_result=GRANTED, with 2 different
-    # identities, is evidence a non-owning identity read what only the
-    # owner should have — no marker needed. Optional and defaults to None
-    # ONLY for backward compatibility with observations captured before this
-    # field existed (older stored observations.jsonl files) — every new
-    # capture() call always sets it; a None here just means "unknown,
-    # cannot safely compare", never "same" or "different".
-    resolved_target: Optional[str] = None
-
 
 class PredicateStatus(str, Enum):
     """SPEC §11 glossary: a predicate returns "thỏa mãn/không thỏa
