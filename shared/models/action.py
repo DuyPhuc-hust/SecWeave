@@ -56,7 +56,7 @@ class ActionSpec(BaseModel):
     # referenced by from a LATER action in the same plan (e.g. a
     # test_data_creation action that seeds a resource and needs its
     # server-assigned ID relayed into a later action's target/parameters).
-    # Assigned by Exploit Agent when it designs the plan — see cli.py's
+    # Assigned by Exploit Agent when it designs the plan — see cli/commands/execute.py's
     # `{{FROM_STEP:<step_id>:<json.path>}}` placeholder (resolved at
     # execution time, after step_id's action actually ran, never guessed
     # or invented by the LLM). None (the default) means this action's

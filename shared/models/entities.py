@@ -64,7 +64,7 @@ class Authorization(BaseModel):
         datetime.now(timezone.utc), so a timezone-NAIVE value here would
         crash that comparison with an uncaught TypeError instead of a clean
         deny. Currently unreachable through this codebase's own call sites
-        (cli.py only ever sets approved_at via datetime.now(timezone.utc)
+        (the CLI only ever sets approved_at via datetime.now(timezone.utc)
         and never sets these 3 fields), but a landmine for the day real
         Gate 2/3 data loads from an operator-authored file or API, where an
         omitted UTC offset is a very natural mistake. Rejects outright

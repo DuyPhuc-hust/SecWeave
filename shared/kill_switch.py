@@ -107,7 +107,7 @@ class KillSwitch:
     through the SAME instance, but says nothing on its own about two
     DIFFERENT instances (even across 2 OS processes) racing each other.
 
-    That last case is NOT hypothetical — this codebase's own `cli.py`
+    That last case is NOT hypothetical — this codebase's own CLI layer (`cli/`)
     deliberately constructs a SEPARATE KillSwitch instance, in a SEPARATE
     process, for `secweave kill`/`secweave resume` against an execution_id
     that a DIFFERENT, already-running `secweave execute` process may still

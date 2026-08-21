@@ -10,14 +10,13 @@ _FALSY_STRINGS = {"false", "0", "no", "null", "none", ""}
 # Requiring the whole response to START with the fence (as before) missed
 # exactly this case.
 #
-# The closing `\n?` is deliberately OPTIONAL — real gap found via
-# independent review: a model emitting compact, single-line JSON with no
-# blank line before the closing ``` (a plausible, terser style, not just
-# the multi-line style every existing test case used) made the PREVIOUS
-# pattern (a hard-required `\n` before the closing fence) match zero
-# times, silently falling through to `return text.strip()` with the fence
-# markers still embedded — a raw `json.loads()` failure downstream instead
-# of a clean extraction.
+# The closing `\n?` is deliberately OPTIONAL — a model emitting compact,
+# single-line JSON with no blank line before the closing ``` (a plausible,
+# terser style, not just the multi-line style every existing test case
+# used) would otherwise not match a pattern that hard-required a `\n`
+# before the closing fence, silently falling through to
+# `return text.strip()` with the fence markers still embedded — a raw
+# `json.loads()` failure downstream instead of a clean extraction.
 _FENCE_PATTERN = re.compile(r"```[^\n]*\n(.*?)\n?```", re.DOTALL)
 
 

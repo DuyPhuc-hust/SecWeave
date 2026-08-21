@@ -49,7 +49,7 @@ class OpenAICompatibleLLMClient(HypothesisLLMClient):
         except httpx.InvalidURL as exc:
             # A malformed LLM_BASE_URL (a bad port, a stray control
             # character) raises httpx.InvalidURL — NOT a subclass of
-            # httpx.HTTPError, so none of cli.py's
+            # httpx.HTTPError, so none of the CLI's
             # `except (RuntimeError, httpx.HTTPError)` handlers catch it,
             # which would otherwise crash with a raw traceback instead of
             # this module's clean failure path.
@@ -59,7 +59,7 @@ class OpenAICompatibleLLMClient(HypothesisLLMClient):
             # space, or a missing "https://") passes the plain "env var is
             # set" check above but raises httpx.UnsupportedProtocol here —
             # unlike InvalidURL, this one IS already an httpx.HTTPError
-            # subclass (so cli.py's handler catches it, no raw crash), but
+            # subclass (so the CLI's handler catches it, no raw crash), but
             # it skipped this module's own friendly Vietnamese message.
             # Same fix shape as InvalidURL above, for the same class of
             # "LLM_BASE_URL is malformed" mistake.

@@ -89,7 +89,7 @@ class SecurityContextStore:
             except OSError as exc:
                 # A plain OSError here (e.g. a parent path component is an
                 # existing regular file, not a directory) would otherwise
-                # escape uncaught past every cli.py call site, which only
+                # escape uncaught past every CLI call site, which only
                 # catches sqlite3.Error around construction. Re-raised as
                 # sqlite3.OperationalError (a sqlite3.Error subclass) so
                 # "the store couldn't be opened" has exactly ONE exception

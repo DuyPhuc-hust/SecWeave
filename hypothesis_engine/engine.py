@@ -138,7 +138,7 @@ class HypothesisEngine:
                 # type check — a model returning
                 # {"reason": ["multiple", "reasons"]} (plausible when
                 # explaining more than one issue) makes pydantic's strict
-                # str field raise ValidationError here; cli.py only catches
+                # str field raise ValidationError here; the CLI only catches
                 # RuntimeError/httpx.HTTPError around this call, so this
                 # must be turned into a clean failure mode itself rather
                 # than surfacing as a raw traceback.

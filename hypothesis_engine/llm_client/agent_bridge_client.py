@@ -57,7 +57,7 @@ class AgentBridgeLLMClient(HypothesisLLMClient):
             # — a BOM, smart quotes pasted from a non-UTF-8 source, or any
             # stray invalid byte raises UnicodeDecodeError, a ValueError
             # subclass that neither `RuntimeError` nor `httpx.HTTPError`
-            # (the 2 exception types every cli.py call site catches around
+            # (the 2 exception types every CLI call site catches around
             # generate()/generate_many()) would catch on its own.
             raise RuntimeError(
                 f"File response '{response_path}' không phải UTF-8 hợp lệ: {exc}"

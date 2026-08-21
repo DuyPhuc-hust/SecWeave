@@ -52,16 +52,16 @@ class ExecutionFileLock:
 
     `lock_filename` is REQUIRED and must be distinct per class, even
     though KillSwitch and CostService share the SAME
-    `{storage_dir}/{execution_id}/` directory — a real bug found via
-    independent review: pointing both classes at one shared generic lock
-    file meant a single thread holding, say, KillSwitch's file lock while
-    (directly or via a `cleanup` callback) trying to acquire CostService's
-    file lock would be requesting a CONFLICTING lock via a DIFFERENT open
-    file description on the literal same file — flock() has no same-
-    thread/same-process exemption across different file descriptions, so
-    that thread deadlocks against itself. Giving each class its own lock
-    file removes the possibility entirely rather than relying on callers
-    never combining them in one thread.
+    `{storage_dir}/{execution_id}/` directory — pointing both classes at
+    one shared generic lock file would mean a single thread holding, say,
+    KillSwitch's file lock while (directly or via a `cleanup` callback)
+    trying to acquire CostService's file lock would be requesting a
+    CONFLICTING lock via a DIFFERENT open file description on the literal
+    same file — flock() has no same-thread/same-process exemption across
+    different file descriptions, so that thread would deadlock against
+    itself. Giving each class its own lock file removes the possibility
+    entirely rather than relying on callers never combining them in one
+    thread.
     """
 
     def __init__(self, execution_dir: Path, lock_filename: str) -> None:
