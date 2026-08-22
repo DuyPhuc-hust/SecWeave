@@ -3063,6 +3063,244 @@ def test_cli_execute_login_token_extraction_failure_is_a_clean_error_not_a_crash
     assert "Traceback" not in captured.err
 
 
+def test_cli_execute_establishes_session_from_a_dynamically_resolved_in_plan_login(
+    capsys, monkeypatch, tmp_path
+):
+    # The generic, GENERIC-across-any-target scenario --identity-logins
+    # can't express: a "victim" identity is only discovered by an EARLIER
+    # action in THIS SAME plan (a {{FROM_STEP:...}}-chained registration,
+    # server-assigned id/email unknown until runtime) — then a LATER
+    # action's own response (a login using that dynamically-learned
+    # email) establishes a session for its identity, which a STILL-LATER
+    # action of the SAME identity automatically inherits with zero
+    # --identity-logins entry. Also includes an UNRELATED role=setup
+    # action (a plain marker-seed, nothing to do with this login) to
+    # prove it does NOT get contaminated with the attacker's forged
+    # session — real gap found by independent review: since identity used
+    # to be resolved purely by role, and establishes_session forces
+    # role=setup, any other role=setup action defaulted onto the exact
+    # same identity/session with no warning. Uses a fully synthetic mock
+    # API (not any real target's routes) specifically to prove this is a
+    # general mechanism, not something that only works against one
+    # target's shape.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_establishes_session_test"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://mock.test/register",
+                                "description": "Register a victim; server assigns email/id at runtime.",
+                                "role": "setup",
+                                "step_id": "register_victim",
+                                "parameters": {"want": "victim"},
+                            },
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://mock.test/login",
+                                "description": "Attacker logs in using the dynamically-registered victim's email.",
+                                "role": "setup",
+                                "parameters": {"email": "{{FROM_STEP:register_victim:email}}", "password": "whatever"},
+                                "establishes_session": {"identity": "attacker", "token_json_path": "token"},
+                            },
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://mock.test/seed-marker",
+                                "description": "Unrelated setup action (e.g. a blind-marker seed) — must NOT inherit the attacker's forged session.",
+                                "role": "setup",
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://mock.test/profile",
+                                "description": "Uses the session established by the login action above — no --identity-logins entry for this identity at all.",
+                                "role": "main",
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    FORGED_TOKEN = "forged-session-token-xyz"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/register":
+            return httpx.Response(200, json={"id": 99, "email": "victim99@mock.test"})
+        if request.url.path == "/login":
+            body = json.loads(request.content)
+            if body["email"] == "victim99@mock.test":
+                return httpx.Response(200, json={"token": FORGED_TOKEN})
+            return httpx.Response(401, json={"error": "invalid credentials"})
+        if request.url.path == "/seed-marker":
+            # The unrelated setup action, run by the DEFAULT identity
+            # ("anonymous", no --role-identity setup=... override) — must
+            # arrive with no Authorization header at all.
+            if "Authorization" in request.headers:
+                return httpx.Response(500, json={"error": "CONTAMINATED: unexpected Authorization header"})
+            return httpx.Response(200, json={"ok": True})
+        if request.url.path == "/profile":
+            auth = request.headers.get("Authorization")
+            if auth == f"Bearer {FORGED_TOKEN}":
+                return httpx.Response(200, json={"marker": "this-is-the-session-proof"})
+            return httpx.Response(401, json={"error": "no session"})
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--role-identity",
+            "main=attacker",
+            "--allowed-action",
+            "POST http://mock.test/register params:want",
+            "--allowed-action",
+            "POST http://mock.test/login params:email,password",
+            "--allowed-action",
+            "POST http://mock.test/seed-marker",
+            "--allowed-action",
+            "GET http://mock.test/profile",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    assert "Traceback" not in captured.err
+
+    log_path = storage_dir / execution_id / "observations.jsonl"
+    from shared.models.observation import NormalizedObservation
+
+    observations = [NormalizedObservation(**json.loads(line)) for line in log_path.read_text().splitlines()]
+    by_role = [(o.role.value, o.identity, o.access_result.value, o.status_code) for o in observations]
+    assert by_role == [
+        ("setup", "anonymous", "granted", 200),  # register_victim (default identity, no --role-identity setup=... override)
+        ("setup", "attacker", "granted", 200),  # establishes_session login, pinned identity="attacker"
+        ("setup", "anonymous", "granted", 200),  # unrelated setup action — did NOT inherit the attacker's session (200, not 500)
+        ("main", "attacker", "granted", 200),  # profile read, using the inherited session
+    ]
+
+
+def test_cli_execute_from_step_referencing_the_establishes_session_token_path_fails_cleanly(
+    capsys, monkeypatch, tmp_path
+):
+    # Real gap found by independent review: harness.login() rewrites the
+    # just-written artifact's response body, redacting the value at its
+    # own token_json_path, BEFORE cli/commands/execute.py's
+    # _load_step_response_body() reads that same artifact to populate
+    # step_responses. A later action FROM_STEP-referencing that EXACT
+    # path used to silently receive the literal "<redacted>" placeholder
+    # text instead of the real token — must now fail cleanly instead.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_from_step_redacted_token_test"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://mock.test/login",
+                                "description": "Establishes a session; also tagged with a step_id.",
+                                "role": "setup",
+                                "step_id": "do_login",
+                                "parameters": {"email": "attacker@mock.test", "password": "whatever"},
+                                "establishes_session": {"identity": "attacker", "token_json_path": "token"},
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://mock.test/echo",
+                                "description": "Tries to re-extract the already-redacted token via FROM_STEP.",
+                                "role": "main",
+                                "parameters": {"leaked": "{{FROM_STEP:do_login:token}}"},
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            return httpx.Response(200, json={"token": "real-secret-token-abc"})
+        raise AssertionError(f"unexpected path reached: {request.url.path} — should have failed before this")
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "POST http://mock.test/login params:email,password",
+            "--allowed-action",
+            "GET http://mock.test/echo params:leaked",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "redact" in captured.err.lower()
+
+
 def test_cli_execute_login_token_extraction_failure_still_persists_the_observation(
     capsys, monkeypatch, tmp_path
 ):

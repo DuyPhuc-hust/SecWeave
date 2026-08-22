@@ -103,7 +103,12 @@ from shared.models.observation import (
 # "Authorization" does, on every subsequent request, not just the login
 # itself.
 _BASE_REDACTED_HEADERS = {"authorization", "proxy-authorization", "cookie", "set-cookie"}
-_REDACTED_PLACEHOLDER = "<redacted>"
+# Public (no leading underscore) — cli/commands/execute.py also imports this
+# to detect when a {{FROM_STEP:...}} reference has resolved to a value THIS
+# module already redacted (e.g. the token path login() rewrites on disk),
+# rather than silently forwarding the literal placeholder text as if it
+# were real data.
+REDACTED_PLACEHOLDER = "<redacted>"
 
 # Methods conventionally read via query string rather than a body. Not part
 # of SPEC — ActionSpec.parameters doesn't say whether it's a query string or
@@ -121,7 +126,7 @@ _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 
 def _redact_headers(headers: Dict[str, str], sensitive_names: Set[str]) -> Dict[str, str]:
     return {
-        key: (_REDACTED_PLACEHOLDER if key.lower() in sensitive_names else value)
+        key: (REDACTED_PLACEHOLDER if key.lower() in sensitive_names else value)
         for key, value in headers.items()
     }
 
@@ -151,7 +156,7 @@ def _redact_body(body: Any, sensitive_keys: Optional[Set[str]]) -> Any:
 def _redact_nested(value: Any, sensitive_keys: Set[str]) -> Any:
     if isinstance(value, dict):
         return {
-            key: (_REDACTED_PLACEHOLDER if key in sensitive_keys else _redact_nested(child, sensitive_keys))
+            key: (REDACTED_PLACEHOLDER if key in sensitive_keys else _redact_nested(child, sensitive_keys))
             for key, child in value.items()
         }
     if isinstance(value, (list, tuple)):
@@ -264,7 +269,7 @@ def _redact_url_query(url: str, sensitive_keys: Optional[Set[str]]) -> str:
         # the OTHER params is accepted only once a key genuinely must hide.
         return url
     redacted_pairs = [
-        (key, _REDACTED_PLACEHOLDER if key in sensitive_keys else value) for key, value in pairs
+        (key, REDACTED_PLACEHOLDER if key in sensitive_keys else value) for key, value in pairs
     ]
     new_query = urlencode(redacted_pairs)
     return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
@@ -330,9 +335,9 @@ def _redact_json_path(data: Any, path_parts: List[str]) -> Any:
         node = node[int(part)] if isinstance(node, list) else node[part]
     last = path_parts[-1]
     if isinstance(node, list):
-        node[int(last)] = _REDACTED_PLACEHOLDER
+        node[int(last)] = REDACTED_PLACEHOLDER
     else:
-        node[last] = _REDACTED_PLACEHOLDER
+        node[last] = REDACTED_PLACEHOLDER
     return data
 
 
@@ -1357,7 +1362,7 @@ class EvidenceHarness:
             # a possibly-real secret in the clear forever — see this
             # method's own docstring for the full reasoning.
             observation = self._rewrite_artifact_response_body(
-                observation, raw, f"{_REDACTED_PLACEHOLDER} (token_json_path extraction thất bại)"
+                observation, raw, f"{REDACTED_PLACEHOLDER} (token_json_path extraction thất bại)"
             )
             raise LoginTokenExtractionError(
                 f"login() cho identity '{identity}': không trích được token theo đường dẫn "

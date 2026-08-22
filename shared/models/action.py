@@ -20,6 +20,70 @@ class ActionType(str, Enum):
     TEST_DATA_CREATION = "test_data_creation"
 
 
+class SessionEstablishingLogin(BaseModel):
+    """Declares that an ActionSpec's OWN response should establish a
+    session for its identity — the generic, IN-PLAN form of what
+    `--identity-logins` already does with STATIC, pre-plan-known
+    credentials (cli/commands/execute.py's `_IdentityLoginSpec`).
+    `--identity-logins` alone can't express a login whose target/
+    parameters are only known at plan-authoring time as a real attack/
+    login shape depending on an EARLIER action in the SAME plan (e.g. an
+    SQLi payload targeting an identity/email a prior `{{FROM_STEP:...}}`
+    step just registered) — its credentials are fixed JSON loaded BEFORE
+    the plan's own actions, and FROM_STEP resolution, ever run.
+
+    Extracted via `EvidenceHarness.login()` (not a bare `capture()`), so
+    the resulting token attaches to this identity's client for every
+    LATER action in the same execute run using the same identity — one
+    generic mechanism, reusable for any target with a login/register
+    pattern shaped this way, not specific to any one target's routes.
+
+    `identity` is REQUIRED, not derived from the action's own `role` —
+    real gap found by independent review: cli/commands/execute.py resolves
+    every OTHER action's identity purely from its role (`role_identity.get
+    (action.role, args.identity)`), and this field's own validator forces
+    every `establishes_session` action to `role=setup`. Since a single
+    execute run maps at most ONE identity per role, that would silently
+    collide any OTHER unrelated role=setup action (e.g. a blind-marker
+    bait-seeding action, an entirely different purpose already using that
+    same role) onto the EXACT SAME identity/session by default — an
+    attacker's forged session leaking onto a completely unrelated setup
+    action with no warning anywhere, order-dependent on action list
+    position. Requiring an explicit `identity` here takes this field OUT
+    of the shared role->identity slot entirely: a LATER action that should
+    inherit this session still resolves its own identity normally (via its
+    OWN role + `--role-identity`), and simply needs to be mapped to the
+    SAME identity string declared here — no collision, no reliance on
+    which role happens to default where.
+    """
+
+    identity: str
+    token_json_path: str
+    token_header: str = "Authorization"
+    token_prefix: str = "Bearer "
+
+    @model_validator(mode="after")
+    def _identity_and_token_path_must_be_non_empty(self) -> "SessionEstablishingLogin":
+        # Both are required fields, but pydantic's `str` accepts "" —
+        # an empty identity would fall back to whatever capture()/login()
+        # itself does with an empty string (an easy, silent authoring
+        # typo), and an empty token_json_path hits login()'s OWN
+        # `if not token_json_path: return observation` early-return — the
+        # exact same shape as _IdentityLoginSpec's legitimate "cookie-only,
+        # no token to extract" case, but here it would silently make
+        # establishes_session a complete no-op (capture succeeds, no
+        # error, no header ever attaches) despite the field being declared
+        # required. Reject outright rather than let a typo look like a
+        # correctly-configured session.
+        if not self.identity or not self.token_json_path:
+            raise ValueError(
+                "SessionEstablishingLogin.identity và token_json_path đều không được để trống — "
+                "để trống token_json_path khiến establishes_session âm thầm không làm gì cả (không "
+                "lỗi, không session nào được thiết lập)."
+            )
+        return self
+
+
 class ActionSpec(BaseModel):
     """A planned action within an ActionPlan. Field name matches weekly plan
     W5: `is_allowed(action: ActionSpec) -> PolicyDecision`.
@@ -63,6 +127,38 @@ class ActionSpec(BaseModel):
     # response is never referenced by anything later — the overwhelming
     # majority of actions.
     step_id: Optional[str] = None
+
+    # None (the default, the overwhelming majority of actions) means this
+    # action is a plain capture() — no session established from it. When
+    # set, EvidenceHarness.login() runs instead of capture() for this
+    # action (see cli/commands/execute.py's per-action loop) — see
+    # SessionEstablishingLogin's own docstring for why this exists
+    # alongside --identity-logins rather than replacing it.
+    establishes_session: Optional[SessionEstablishingLogin] = None
+
+    @model_validator(mode="after")
+    def _establishes_session_requires_setup_role(self) -> "ActionSpec":
+        # EvidenceHarness.login() ALWAYS persists its observation with
+        # role=SETUP, unconditionally — exactly the same real gap already
+        # fixed once for --identity-logins's own pre-plan login actions
+        # (see cli/commands/execute.py: "harness.login() ALWAYS internally
+        # captures with role=SETUP regardless of what the ActionSpec
+        # says"). An ActionSpec declaring role=main/positive_control/
+        # denied_control alongside establishes_session would persist an
+        # actions.json entry contradicting the observation `login()`
+        # actually recorded — reject outright at construction time rather
+        # than silently overriding the declared role (which could mask a
+        # real authoring mistake) or letting the mismatch reach disk.
+        if self.establishes_session is not None and self.role != ObservationRole.SETUP:
+            raise ValueError(
+                "establishes_session chỉ hợp lệ khi role=setup — EvidenceHarness.login() luôn ghi "
+                "observation với role=SETUP bất kể ActionSpec khai gì; 1 action khai role khác (vd "
+                "main/positive_control) kèm establishes_session sẽ khiến actions.json mâu thuẫn với "
+                "observation thật. Nếu action này chỉ nhằm thiết lập session để MỘT action SAU đó "
+                "(qua identity + {{FROM_STEP:...}} nếu cần) mới thực sự mang role dự kiến, đặt "
+                "role=setup tường minh ở đây."
+            )
+        return self
 
 
 class ActionPlan(BaseModel):

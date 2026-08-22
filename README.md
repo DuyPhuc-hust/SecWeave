@@ -65,6 +65,8 @@ In ra verdict cuối (thường `inconclusive` cho finding 1-role như trên —
 
 Kịch bản đủ 3-role (main/positive_control/denied_control, nhiều identity thật qua `--role-identity`/`--identity-logins`, blind marker qua `{{SECWEAVE_BLIND_MARKER}}`, ID tài nguyên động qua `{{FROM_STEP:step_id:json_path}}`) — xem `execute --help` và ví dụ đầy đủ tại `.secweave/manual_test/identity_scenario_example.py`.
 
+`--identity-logins` chỉ khai được credential TĨNH, biết trước khi plan chạy. Khi 1 action cần đăng nhập bằng giá trị chỉ biết được TRONG plan (vd email của 1 tài khoản vừa đăng ký ở action trước, qua `{{FROM_STEP:...}}`), gắn `establishes_session: {identity, token_json_path}` (role phải là `setup`) trực tiếp lên action đó trong plan file — session tạo ra tự động gắn theo `identity` khai rõ (không suy ra từ role), action SAU cùng identity đó (qua `--role-identity`) tự thừa hưởng, không cần khai `--identity-logins` nào cả.
+
 **6. Đo tính lặp lại — chạy lại ĐÚNG 1 plan nhiều lần độc lập (`retest`)** — tuỳ chọn, cần đóng băng plan trước:
 ```bash
 python -m cli plan --hypothesis-id <hyp_...> \

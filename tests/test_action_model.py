@@ -12,6 +12,7 @@ from shared.models.action import (
     PlanCheckResult,
     PlanReviewResult,
     PolicyDecision,
+    SessionEstablishingLogin,
 )
 from shared.models.observation import ObservationRole
 
@@ -72,6 +73,86 @@ def test_action_spec_accepts_a_step_id():
         step_id="seed_note",
     )
     assert action.step_id == "seed_note"
+
+
+# ----- ActionSpec.establishes_session: generic in-plan session
+# establishment (2026-08-22) -----
+
+
+def test_action_spec_establishes_session_defaults_to_none():
+    assert _action().establishes_session is None
+
+
+def test_action_spec_accepts_establishes_session_with_role_setup():
+    action = ActionSpec(
+        type=ActionType.TEST_DATA_CREATION,
+        method="POST",
+        target="https://x.example.com/login",
+        description="d",
+        role=ObservationRole.SETUP,
+        establishes_session=SessionEstablishingLogin(identity="victim", token_json_path="authentication.token"),
+    )
+    assert action.establishes_session.token_json_path == "authentication.token"
+    assert action.establishes_session.token_header == "Authorization"
+    assert action.establishes_session.token_prefix == "Bearer "
+
+
+def test_action_spec_rejects_establishes_session_with_role_main():
+    # EvidenceHarness.login() always persists role=SETUP regardless of what
+    # the ActionSpec declares — role=main here would leave actions.json
+    # contradicting the real observation login() writes.
+    with pytest.raises(ValidationError):
+        ActionSpec(
+            type=ActionType.TEST_DATA_CREATION,
+            method="POST",
+            target="https://x.example.com/login",
+            description="d",
+            role=ObservationRole.MAIN,
+            establishes_session=SessionEstablishingLogin(identity="victim", token_json_path="authentication.token"),
+        )
+
+
+@pytest.mark.parametrize(
+    "role", [ObservationRole.POSITIVE_CONTROL, ObservationRole.DENIED_CONTROL]
+)
+def test_action_spec_rejects_establishes_session_with_any_non_setup_role(role):
+    with pytest.raises(ValidationError):
+        ActionSpec(
+            type=ActionType.TEST_DATA_CREATION,
+            method="POST",
+            target="https://x.example.com/login",
+            description="d",
+            role=role,
+            establishes_session=SessionEstablishingLogin(identity="victim", token_json_path="authentication.token"),
+        )
+
+
+def test_session_establishing_login_rejects_empty_identity():
+    with pytest.raises(ValidationError):
+        SessionEstablishingLogin(identity="", token_json_path="token")
+
+
+def test_session_establishing_login_rejects_empty_token_json_path():
+    # Real gap found via independent review: login()'s own
+    # `if not token_json_path: return observation` early-return means an
+    # empty string would make establishes_session a silent no-op (capture
+    # succeeds, no error, no session header ever attaches) despite the
+    # field being declared required.
+    with pytest.raises(ValidationError):
+        SessionEstablishingLogin(identity="attacker", token_json_path="")
+
+
+def test_action_spec_allows_role_setup_without_establishes_session():
+    # role=setup on its own (no establishes_session) must stay valid — the
+    # new validator only fires when establishes_session is actually set.
+    action = ActionSpec(
+        type=ActionType.TEST_DATA_CREATION,
+        method="POST",
+        target="https://x.example.com/seed",
+        description="d",
+        role=ObservationRole.SETUP,
+    )
+    assert action.establishes_session is None
 
 
 # ----- ActionPlanResult: real gap found via independent review — the

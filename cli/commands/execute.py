@@ -18,6 +18,7 @@ from cli.common import (
     _warn_if_hypothesis_stale,
 )
 from evidence_harness.harness import (
+    REDACTED_PLACEHOLDER,
     EvidenceHarness,
     LoginTokenExtractionError,
     verify_ui_capture_available,
@@ -301,12 +302,45 @@ def _lookup_from_step(step_id: str, path: str, step_responses: Dict[str, Any]) -
             "chiếu action đứng TRƯỚC trong cùng plan, không tham chiếu ngược hay tự tham chiếu."
         )
     try:
-        return _resolve_json_path(step_responses[step_id], path)
+        value = _resolve_json_path(step_responses[step_id], path)
     except (KeyError, TypeError, IndexError, ValueError) as exc:
         raise CliError(
             f"'{{{{FROM_STEP:{step_id}:{path}}}}}': không trích được giá trị từ response thật của step "
             f"'{step_id}' — {type(exc).__name__}: {exc}"
         ) from exc
+    if value == REDACTED_PLACEHOLDER:
+        # Real gap found by independent review: step_responses for a
+        # `establishes_session` step comes from the SAME artifact
+        # harness.login() already rewrote on disk, redacting the value at
+        # its own token_json_path — a LATER action referencing that exact
+        # path via FROM_STEP would otherwise silently get the literal
+        # "<redacted>" placeholder text sent on the wire instead of a
+        # credential (a request that will almost certainly fail, or
+        # succeed nonsensically), with no error anywhere pointing at why.
+        # The token is deliberately unrecoverable via FROM_STEP — a LATER
+        # action needing this session should rely on the automatic
+        # per-identity header attachment login() already performs, not
+        # re-extract the secret into a plan value that could itself end
+        # up stored unredacted elsewhere.
+        # Scope limit noted by a 2nd independent review pass on this exact
+        # fix: this is pure value equality, not a provenance check — a
+        # target whose own REAL, unredacted response data organically
+        # equals the literal string "<redacted>" at this exact path would
+        # also trip this. Accepted deliberately: the false-positive
+        # direction fails LOUD (a clean CliError naming the exact path)
+        # rather than the original bug's failure direction (silently
+        # forwarding fake secret-shaped text on the wire) — a real target
+        # coincidentally emitting this exact sentinel string as genuine
+        # data is a far narrower, and far safer to get wrong, edge than
+        # the bug this closes.
+        raise CliError(
+            f"'{{{{FROM_STEP:{step_id}:{path}}}}}': giá trị tại đường dẫn này đã bị redact "
+            f"('{REDACTED_PLACEHOLDER}') trong artifact thật của step '{step_id}' — không thể tham "
+            "chiếu lại giá trị đã bị che (thường là do step đó dùng establishes_session, và path này "
+            "chính là token_json_path của nó). Nếu action sau cần dùng session đó, hãy dựa vào việc "
+            "session tự động gắn theo identity, đừng cố trích lại giá trị bí mật qua FROM_STEP."
+        )
+    return value
 
 
 def _resolve_from_step_in_string(text: str, step_responses: Dict[str, Any]) -> str:
@@ -758,13 +792,44 @@ def _run_execute(args: argparse.Namespace) -> int:
                         "runtime đã vượt phạm vi plan đã duyệt, từ chối gửi request thật."
                     )
                 try:
-                    observation = harness.capture(
-                        resolved_action,
-                        role=resolved_action.role,
-                        marker=marker_value,
-                        identity=role_identity.get(resolved_action.role, args.identity),
-                        sensitive_body_keys=sensitive_body_keys,
-                    )
+                    if resolved_action.establishes_session is not None:
+                        # Generic, in-plan form of --identity-logins (see
+                        # SessionEstablishingLogin's own docstring) — the
+                        # ActionSpec's own model_validator already
+                        # guarantees role=setup here, matching the role
+                        # login() itself always persists. Uses
+                        # session_spec.identity DIRECTLY, deliberately NOT
+                        # the role->identity map every other action uses
+                        # (role_identity.get(role, args.identity)) — real
+                        # gap found by independent review: since at most
+                        # one identity maps to role=setup, ANY other
+                        # unrelated role=setup action (e.g. a blind-marker
+                        # bait-seed, nothing to do with this login) would
+                        # otherwise silently collide onto this same forged
+                        # session by default. A LATER action inheriting
+                        # this session still resolves its OWN identity
+                        # normally, by role — it just needs a
+                        # --role-identity mapping to this SAME identity
+                        # string, no special-casing needed there.
+                        action_identity = resolved_action.establishes_session.identity
+                        session_spec = resolved_action.establishes_session
+                        observation = harness.login(
+                            action_identity,
+                            resolved_action,
+                            token_json_path=session_spec.token_json_path,
+                            token_header=session_spec.token_header,
+                            token_prefix=session_spec.token_prefix,
+                            sensitive_request_keys=sensitive_body_keys,
+                        )
+                    else:
+                        action_identity = role_identity.get(resolved_action.role, args.identity)
+                        observation = harness.capture(
+                            resolved_action,
+                            role=resolved_action.role,
+                            marker=marker_value,
+                            identity=action_identity,
+                            sensitive_body_keys=sensitive_body_keys,
+                        )
                 except RuntimeError as exc:
                     # Catches the base class, not just (ExecutionStoppedError,
                     # CostCapExceededError) — CostService's/KillSwitch's own
@@ -773,6 +838,18 @@ def _run_execute(args: argparse.Namespace) -> int:
                     stopped_reason = str(exc)
                     print(f"   DỪNG GIỮA CHỪNG: {exc}", file=sys.stderr)
                     break
+                except LoginTokenExtractionError as exc:
+                    # Same reasoning as the pre-plan --identity-logins
+                    # loop's identical handler: the login request itself
+                    # already went through capture() (real cost consumed,
+                    # real evidence written) before extraction failed —
+                    # persist exc.observation first, or that cost/evidence
+                    # would be silently orphaned with no observations.jsonl
+                    # entry ever pointing at it.
+                    _persist_observation(exc.observation)
+                    raise CliError(
+                        f"establishes_session login cho action_id='{resolved_action.action_id}' thất bại: {exc}"
+                    ) from exc
                 _persist_observation(observation)
                 # Persisted again here (action_id unchanged, only target/
                 # description/parameters may differ) so actions.json ends
