@@ -2990,6 +2990,96 @@ def test_cli_execute_login_token_extraction_failure_is_a_clean_error_not_a_crash
     assert "Traceback" not in captured.err
 
 
+def test_cli_execute_login_token_extraction_failure_still_persists_the_observation(
+    capsys, monkeypatch, tmp_path
+):
+    # The login request itself already went through capture() before
+    # token extraction failed — a real cost slot was consumed and a real
+    # evidence artifact was written to disk. Losing that observation (no
+    # observations.jsonl entry ever pointing at it) would silently orphan
+    # already-consumed cost/evidence with zero trace in the one file every
+    # downstream command (assemble-package/retest/measure) actually reads.
+    import httpx
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_login_orphan_test"
+    storage_dir = tmp_path / "evidence"
+    plan_file = _multi_identity_plan_file(tmp_path, hypothesis_id)
+
+    logins_file = tmp_path / "logins.json"
+    logins_file.write_text(
+        json.dumps(
+            {
+                "owner": {
+                    "method": "POST",
+                    "target": "http://host.docker.internal:3000/login",
+                    "parameters": {"email": "owner@test", "password": "pw1"},
+                    # Deliberately wrong path — the real response only has "token", not "authentication.token".
+                    "token_json_path": "authentication.token",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"token": "owner-token"})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--role-identity",
+            "positive_control=owner",
+            "--identity-logins",
+            str(logins_file),
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/resource",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    assert exit_code == 1
+
+    log_path = storage_dir / execution_id / "observations.jsonl"
+    from shared.models.observation import NormalizedObservation
+
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    observation = NormalizedObservation(**json.loads(lines[0]))
+    assert observation.role.value == "setup"
+    assert observation.identity == "owner"
+    # The real HTTP response (200) was already received before extraction
+    # failed — access_result reflects that real outcome, not the later
+    # extraction failure.
+    assert observation.access_result.value == "granted"
+
+    # The stored artifact's hash/size must match the REDACTED body actually
+    # on disk (post-failure, the whole body gets wiped — see login()'s own
+    # docstring), not a stale pre-redaction hash from before the rewrite.
+    artifact = json.loads(Path(observation.raw_evidence_ref).read_text(encoding="utf-8"))
+    assert "redact" in artifact["response"]["body"]
+    actual_bytes = Path(observation.raw_evidence_ref).read_bytes()
+    import hashlib
+
+    assert observation.raw_evidence_hash == "sha256:" + hashlib.sha256(actual_bytes).hexdigest()
+    assert observation.raw_evidence_size_bytes == len(actual_bytes)
+
+
 def test_cli_execute_skips_login_for_a_role_identity_not_used_by_this_plan(capsys, monkeypatch, tmp_path):
     # Real gap found via independent review: an earlier version filtered
     # identities_needing_login only by "referenced by --role-identity at

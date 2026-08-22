@@ -367,6 +367,22 @@ def _contains_marker(text: Optional[str], marker: Optional[str]) -> Optional[boo
     return marker.lower() in text.lower()
 
 
+class LoginTokenExtractionError(ValueError):
+    """Raised by login() when login_action's request itself already went
+    through capture() successfully — a real cost slot was consumed and a
+    real evidence artifact was durably written to disk — but extracting a
+    usable token from the response afterward failed. Carries the resulting
+    `observation` so a caller (cli/commands/execute.py) can still persist
+    it into observations.jsonl before surfacing the error; letting this
+    propagate as a bare ValueError would silently orphan already-consumed
+    cost/evidence with no observations.jsonl entry ever pointing at it.
+    """
+
+    def __init__(self, message: str, observation: "NormalizedObservation"):
+        super().__init__(message)
+        self.observation = observation
+
+
 class EvidenceHarness:
     """One instance = one execution context. execution_id/target/revision are
     fixed for the whole run (SPEC §4.3.2 ties them to the execution, not to a
@@ -1305,10 +1321,11 @@ class EvidenceHarness:
         raw = json.loads(Path(observation.raw_evidence_ref).read_text(encoding="utf-8"))
         response_body = raw.get("response", {}).get("body")
         if response_body is None:
-            raise ValueError(
+            raise LoginTokenExtractionError(
                 f"login() cho identity '{identity}': không có response body để trích token theo "
                 f"đường dẫn '{token_json_path}' — login_action có thể đã thất bại, xem lỗi ở "
-                f"{observation.raw_evidence_ref}."
+                f"{observation.raw_evidence_ref}.",
+                observation=observation,
             )
 
         path_parts = token_json_path.split(".")
@@ -1322,15 +1339,16 @@ class EvidenceHarness:
             # secret sits in this body, so wipe ALL of it rather than leave
             # a possibly-real secret in the clear forever — see this
             # method's own docstring for the full reasoning.
-            self._rewrite_artifact_response_body(
+            observation = self._rewrite_artifact_response_body(
                 observation, raw, f"{_REDACTED_PLACEHOLDER} (token_json_path extraction thất bại)"
             )
-            raise ValueError(
+            raise LoginTokenExtractionError(
                 f"login() cho identity '{identity}': không trích được token theo đường dẫn "
                 f"'{token_json_path}' — {type(exc).__name__}: {exc}. Response body đã bị redact "
                 f"TOÀN BỘ trên đĩa (không rõ secret nằm ở đâu nên xoá phòng ngừa) — chỉ còn status "
                 f"code/headers tại {observation.raw_evidence_ref} để chẩn đoán (có thể login đã "
-                "thất bại, hoặc path sai)."
+                "thất bại, hoặc path sai).",
+                observation=observation,
             ) from exc
 
         if not isinstance(token, str) or not token:
@@ -1343,14 +1361,15 @@ class EvidenceHarness:
             # auth" instead of "our own login was broken." The path DID
             # resolve here (unlike the exception case above), so redact
             # just that, not the whole body.
-            self._rewrite_artifact_response_body(
+            observation = self._rewrite_artifact_response_body(
                 observation, raw, json.dumps(_redact_json_path(parsed, path_parts))
             )
-            raise ValueError(
+            raise LoginTokenExtractionError(
                 f"login() cho identity '{identity}': giá trị tại đường dẫn '{token_json_path}' "
                 f"rỗng hoặc không phải string (kiểu thực tế: {type(token).__name__}) — từ chối dùng "
                 "làm token thật, tránh gửi credential hỏng (vd 'Bearer None') trên mọi request sau "
-                f"đó mà không có lỗi nào báo. Xem {observation.raw_evidence_ref}."
+                f"đó mà không có lỗi nào báo. Xem {observation.raw_evidence_ref}.",
+                observation=observation,
             )
 
         previous_header = self._token_header_by_identity.get(identity)

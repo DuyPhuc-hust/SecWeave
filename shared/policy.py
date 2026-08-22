@@ -128,8 +128,14 @@ def _parse_allowed_params(extra_tokens: List[str]) -> Optional[Dict[str, Optiona
     docstring for why this default matters.
     Returns None for anything malformed (extra tokens beyond one, a token
     not starting with "params:", an empty key/pattern either side of `=`,
-    or a pattern that isn't a valid regex), signalling the caller to deny
-    outright rather than guess an interpretation.
+    a pattern that isn't a valid regex, or the SAME key named more than
+    once — e.g. "id=^\\d+$,id" naming `id` both constrained and name-only)
+    signalling the caller to deny outright rather than guess an
+    interpretation. A duplicate key is never resolved by "last one wins":
+    that would let a later, unconstrained (or more permissive) occurrence
+    silently erase an earlier, deliberately narrow value pattern — exactly
+    the kind of ambiguous allowlist text this function's whole design
+    refuses to guess through everywhere else.
     """
     if not extra_tokens:
         return {}
@@ -144,12 +150,17 @@ def _parse_allowed_params(extra_tokens: List[str]) -> Optional[Dict[str, Optiona
             key, pattern_text = raw.split("=", 1)
             if not key or not pattern_text:
                 return None
+        else:
+            key, pattern_text = raw, None
+        if key in allowed:
+            return None
+        if pattern_text is None:
+            allowed[key] = None
+        else:
             try:
                 allowed[key] = re.compile(pattern_text)
             except re.error:
                 return None
-        else:
-            allowed[raw] = None
     return allowed
 
 

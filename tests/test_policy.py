@@ -395,6 +395,21 @@ def test_malformed_params_clause_denies_outright():
     assert decision.allowed is False
 
 
+def test_params_clause_with_duplicate_key_denies_outright():
+    # "id=^[0-9]+$,id" names `id` twice — once value-constrained, once
+    # bare (any value). Resolving this via "last one wins" would let the
+    # later, unconstrained occurrence silently erase the earlier,
+    # deliberately narrow pattern — an action carrying a path-traversal
+    # payload in `id` would then wrongly be allowed. Must deny outright
+    # instead, same as any other malformed clause.
+    authorization = sample_authorization(
+        allowed_actions=["GET https://staging.example.com/api/objects/{id} params:id=^[0-9]+$,id"]
+    )
+    action = _action(parameters={"id": "../../../etc/passwd"})
+    decision = is_allowed(action, authorization, now=NOW)
+    assert decision.allowed is False
+
+
 @pytest.mark.parametrize("method", ["DELETE", "PUT", "PATCH", "delete", "put"])
 def test_destructive_methods_are_always_denied_regardless_of_allowlist(method):
     # The allowlist "allows" this endpoint for any method — but a

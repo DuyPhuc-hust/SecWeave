@@ -17,7 +17,11 @@ from cli.common import (
     _parse_enum_arg,
     _warn_if_hypothesis_stale,
 )
-from evidence_harness.harness import EvidenceHarness, verify_ui_capture_available
+from evidence_harness.harness import (
+    EvidenceHarness,
+    LoginTokenExtractionError,
+    verify_ui_capture_available,
+)
 from exploit_agent.agent import ExploitAgent
 from shared.cost import CostService
 from shared.id_generator import generate_id
@@ -702,10 +706,16 @@ def _run_execute(args: argparse.Namespace) -> int:
                 stopped_reason = str(exc)
                 print(f"   DỪNG GIỮA CHỪNG (login '{label}'): {exc}", file=sys.stderr)
                 break
-            except ValueError as exc:
+            except LoginTokenExtractionError as exc:
                 # A broken token_json_path or unusable token is a config
                 # mistake, not an operational stop a resume would fix —
                 # raises immediately instead of folding into stopped_reason.
+                # The login request itself already went through capture()
+                # (real cost consumed, real evidence written) before this
+                # failed — persist exc.observation first, or that cost/
+                # evidence would be silently orphaned with no
+                # observations.jsonl entry ever pointing at it.
+                _persist_observation(exc.observation)
                 raise CliError(f"login() cho identity '{label}' thất bại: {exc}") from exc
             _persist_observation(login_observation)
             print(f"   [login] identity '{label}' — HTTP {login_observation.status_code}")
