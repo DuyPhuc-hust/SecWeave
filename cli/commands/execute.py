@@ -797,22 +797,26 @@ def _run_execute(args: argparse.Namespace) -> int:
                         # SessionEstablishingLogin's own docstring) — the
                         # ActionSpec's own model_validator already
                         # guarantees role=setup here, matching the role
-                        # login() itself always persists. Uses
-                        # session_spec.identity DIRECTLY, deliberately NOT
-                        # the role->identity map every other action uses
-                        # (role_identity.get(role, args.identity)) — real
-                        # gap found by independent review: since at most
-                        # one identity maps to role=setup, ANY other
-                        # unrelated role=setup action (e.g. a blind-marker
-                        # bait-seed, nothing to do with this login) would
-                        # otherwise silently collide onto this same forged
-                        # session by default. A LATER action inheriting
-                        # this session still resolves its OWN identity
-                        # normally, by role — it just needs a
-                        # --role-identity mapping to this SAME identity
-                        # string, no special-casing needed there.
-                        action_identity = resolved_action.establishes_session.identity
+                        # login() itself always persists. Resolves the
+                        # session's identity through `for_role`, the SAME
+                        # role_identity map every other action uses —
+                        # deliberately NOT this action's OWN role (always
+                        # setup), which is exactly the real gap found by
+                        # independent review: since at most one identity
+                        # maps to role=setup, resolving by the action's own
+                        # role would let ANY other unrelated role=setup
+                        # action (e.g. a blind-marker bait-seed, nothing to
+                        # do with this login) silently collide onto this
+                        # same forged session by default.
+                        # SessionEstablishingLogin's own validator already
+                        # rejects for_role=setup, so this can never
+                        # self-reference. A LATER action inheriting this
+                        # session still resolves its OWN identity normally
+                        # (role_identity.get(its own role, ...)) — it just
+                        # needs a --role-identity mapping under the SAME
+                        # for_role, no special-casing needed there.
                         session_spec = resolved_action.establishes_session
+                        action_identity = role_identity.get(session_spec.for_role, args.identity)
                         observation = harness.login(
                             action_identity,
                             resolved_action,

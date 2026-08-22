@@ -38,48 +38,77 @@ class SessionEstablishingLogin(BaseModel):
     generic mechanism, reusable for any target with a login/register
     pattern shaped this way, not specific to any one target's routes.
 
-    `identity` is REQUIRED, not derived from the action's own `role` —
-    real gap found by independent review: cli/commands/execute.py resolves
-    every OTHER action's identity purely from its role (`role_identity.get
-    (action.role, args.identity)`), and this field's own validator forces
-    every `establishes_session` action to `role=setup`. Since a single
-    execute run maps at most ONE identity per role, that would silently
-    collide any OTHER unrelated role=setup action (e.g. a blind-marker
-    bait-seeding action, an entirely different purpose already using that
-    same role) onto the EXACT SAME identity/session by default — an
-    attacker's forged session leaking onto a completely unrelated setup
-    action with no warning anywhere, order-dependent on action list
-    position. Requiring an explicit `identity` here takes this field OUT
-    of the shared role->identity slot entirely: a LATER action that should
-    inherit this session still resolves its own identity normally (via its
-    OWN role + `--role-identity`), and simply needs to be mapped to the
-    SAME identity string declared here — no collision, no reliance on
-    which role happens to default where.
+    `for_role` (an ObservationRole, NOT a free-form identity string) says
+    WHICH role's identity this login establishes a session for — resolved
+    through the SAME `role_identity.get(role, args.identity)` map every
+    OTHER action already uses (cli/commands/execute.py). This is a
+    deliberate design choice, not just a naming detail: this field is the
+    one place `establishes_session` is reachable from Exploit Agent's own
+    LLM-authored plans (see exploit_agent/agent.py's prompt), and the
+    LLM is NEVER allowed to invent or see real identity labels/credentials
+    — "Exploit Agent không hề chạm vào credential thật — plan chỉ mang
+    role, LABEL/credential hoàn toàn do operator cấp qua CLI" (see
+    cmd_execute's own docstring). Letting this field take an arbitrary
+    string would have broken that boundary the moment the LLM could set
+    it; `for_role` keeps the LLM working with the exact same 4-value
+    vocabulary (main/positive_control/denied_control/setup) it already
+    uses for the `role` field.
+
+    An earlier version of this field WAS a free-form `identity: str` —
+    reverted after realizing it couldn't be taught to the LLM without
+    breaking the role-only boundary above. `for_role` also closes the
+    original real gap that version was built for (identity used to be
+    resolved purely by the ACTION'S OWN role, and `establishes_session`
+    forces that to `setup`, so any OTHER unrelated role=setup action —
+    e.g. a blind-marker bait-seed — would collide onto the same session
+    by default): `for_role` deliberately targets a DIFFERENT role bucket
+    than the login action's own (always `setup`, see the validator
+    below), so it cannot collide with a sibling `role=setup` action's own
+    default identity resolution — only with another action that
+    genuinely, intentionally shares the same `for_role` bucket, which is
+    the correct, INTENDED way a later action inherits this session.
     """
 
-    identity: str
+    for_role: ObservationRole
     token_json_path: str
     token_header: str = "Authorization"
     token_prefix: str = "Bearer "
 
     @model_validator(mode="after")
-    def _identity_and_token_path_must_be_non_empty(self) -> "SessionEstablishingLogin":
-        # Both are required fields, but pydantic's `str` accepts "" —
-        # an empty identity would fall back to whatever capture()/login()
-        # itself does with an empty string (an easy, silent authoring
-        # typo), and an empty token_json_path hits login()'s OWN
-        # `if not token_json_path: return observation` early-return — the
-        # exact same shape as _IdentityLoginSpec's legitimate "cookie-only,
-        # no token to extract" case, but here it would silently make
-        # establishes_session a complete no-op (capture succeeds, no
-        # error, no header ever attaches) despite the field being declared
-        # required. Reject outright rather than let a typo look like a
-        # correctly-configured session.
-        if not self.identity or not self.token_json_path:
+    def _for_role_must_not_be_setup(self) -> "SessionEstablishingLogin":
+        # for_role=setup would resolve through the EXACT SAME role bucket
+        # this action's own (validator-enforced) role already occupies —
+        # reintroducing the original collision this field exists to
+        # avoid, the moment a plan has more than one role=setup action.
+        # There is no legitimate scenario for it: "establish a session for
+        # whichever identity plays the setup role" is inherently ambiguous
+        # once 2+ setup actions exist, and meaningless with only 1 (that
+        # would just be this action referring to itself).
+        if self.for_role == ObservationRole.SETUP:
             raise ValueError(
-                "SessionEstablishingLogin.identity và token_json_path đều không được để trống — "
-                "để trống token_json_path khiến establishes_session âm thầm không làm gì cả (không "
-                "lỗi, không session nào được thiết lập)."
+                "SessionEstablishingLogin.for_role không được là 'setup' — action establishes_session "
+                "LUÔN tự mang role=setup rồi (do EvidenceHarness.login() ép), for_role=setup sẽ khiến "
+                "nó tự tham chiếu chính role của mình, va chạm với BẤT KỲ action role=setup nào khác "
+                "trong cùng plan (đúng lỗi mà field này sinh ra để tránh)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _token_json_path_must_be_non_empty(self) -> "SessionEstablishingLogin":
+        # token_json_path is required, but pydantic's `str` accepts "" —
+        # an empty value hits login()'s OWN `if not token_json_path:
+        # return observation` early-return (the exact same shape as
+        # _IdentityLoginSpec's legitimate "cookie-only, no token to
+        # extract" case), silently making establishes_session a complete
+        # no-op (capture succeeds, no error, no session header ever
+        # attaches) despite the field being declared required. Reject
+        # outright rather than let a typo look like a correctly-
+        # configured session.
+        if not self.token_json_path:
+            raise ValueError(
+                "SessionEstablishingLogin.token_json_path không được để trống — để trống khiến "
+                "establishes_session âm thầm không làm gì cả (không lỗi, không session nào được "
+                "thiết lập)."
             )
         return self
 

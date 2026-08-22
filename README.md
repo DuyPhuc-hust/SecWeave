@@ -65,7 +65,7 @@ In ra verdict cuối (thường `inconclusive` cho finding 1-role như trên —
 
 Kịch bản đủ 3-role (main/positive_control/denied_control, nhiều identity thật qua `--role-identity`/`--identity-logins`, blind marker qua `{{SECWEAVE_BLIND_MARKER}}`, ID tài nguyên động qua `{{FROM_STEP:step_id:json_path}}`) — xem `execute --help` và ví dụ đầy đủ tại `.secweave/manual_test/identity_scenario_example.py`.
 
-`--identity-logins` chỉ khai được credential TĨNH, biết trước khi plan chạy. Khi 1 action cần đăng nhập bằng giá trị chỉ biết được TRONG plan (vd email của 1 tài khoản vừa đăng ký ở action trước, qua `{{FROM_STEP:...}}`), gắn `establishes_session: {identity, token_json_path}` (role phải là `setup`) trực tiếp lên action đó trong plan file — session tạo ra tự động gắn theo `identity` khai rõ (không suy ra từ role), action SAU cùng identity đó (qua `--role-identity`) tự thừa hưởng, không cần khai `--identity-logins` nào cả.
+`--identity-logins` chỉ khai được credential TĨNH, biết trước khi plan chạy. Khi 1 action cần đăng nhập bằng giá trị chỉ biết được TRONG plan (vd email của 1 tài khoản vừa đăng ký ở action trước, qua `{{FROM_STEP:...}}`), gắn `establishes_session: {for_role, token_json_path}` (role của chính action đó phải là `setup`; `for_role` là 1 trong `main`/`positive_control`/`denied_control` — vai trò của action SAU sẽ dùng session này) trực tiếp lên action đó trong plan file — session tạo ra tự động gắn theo identity mà `for_role` đó ánh xạ tới (qua `--role-identity`), action SAU cùng vai trò tự thừa hưởng, không cần khai `--identity-logins` nào cả. Exploit Agent (LLM) đã biết dùng field này — không bắt buộc phải viết plan tay, chỉ cần hypothesis mô tả rõ hành vi chiếm/giả mạo phiên đăng nhập.
 
 **6. Đo tính lặp lại — chạy lại ĐÚNG 1 plan nhiều lần độc lập (`retest`)** — tuỳ chọn, cần đóng băng plan trước:
 ```bash
@@ -144,6 +144,6 @@ Mỗi lệnh có `--help` riêng để xem đầy đủ tuỳ chọn.
 
 ---
 
-**Ghi chú:** dự án đang ở giai đoạn Chặng 1 (discovery/preparation), chưa có active run trên target thật ngoài môi trường demo cục bộ; 691/691 test pass. Đặc tả kỹ thuật đầy đủ nằm ở `SECWEAVE_SPEC.md`, kế hoạch triển khai theo tuần ở `SECWEAVE_WEEKLY_PLAN.md`, biểu mẫu Gate 2 ở `TARGET_SANDBOX_AUTHORIZATION_TEMPLATE.md`.
+**Ghi chú:** dự án đang ở giai đoạn Chặng 1 (discovery/preparation), chưa có active run trên target thật ngoài môi trường demo cục bộ; 704/704 test pass. Đặc tả kỹ thuật đầy đủ nằm ở `SECWEAVE_SPEC.md`, kế hoạch triển khai theo tuần ở `SECWEAVE_WEEKLY_PLAN.md`, biểu mẫu Gate 2 ở `TARGET_SANDBOX_AUTHORIZATION_TEMPLATE.md`.
 
 **Phân loại:** NTQ INTERNAL.

@@ -3116,7 +3116,7 @@ def test_cli_execute_establishes_session_from_a_dynamically_resolved_in_plan_log
                                 "description": "Attacker logs in using the dynamically-registered victim's email.",
                                 "role": "setup",
                                 "parameters": {"email": "{{FROM_STEP:register_victim:email}}", "password": "whatever"},
-                                "establishes_session": {"identity": "attacker", "token_json_path": "token"},
+                                "establishes_session": {"for_role": "main", "token_json_path": "token"},
                             },
                             {
                                 "type": "test_data_creation",
@@ -3206,7 +3206,7 @@ def test_cli_execute_establishes_session_from_a_dynamically_resolved_in_plan_log
     by_role = [(o.role.value, o.identity, o.access_result.value, o.status_code) for o in observations]
     assert by_role == [
         ("setup", "anonymous", "granted", 200),  # register_victim (default identity, no --role-identity setup=... override)
-        ("setup", "attacker", "granted", 200),  # establishes_session login, pinned identity="attacker"
+        ("setup", "attacker", "granted", 200),  # establishes_session login, for_role=main resolves via --role-identity main=attacker
         ("setup", "anonymous", "granted", 200),  # unrelated setup action — did NOT inherit the attacker's session (200, not 500)
         ("main", "attacker", "granted", 200),  # profile read, using the inherited session
     ]
@@ -3247,7 +3247,7 @@ def test_cli_execute_from_step_referencing_the_establishes_session_token_path_fa
                                 "role": "setup",
                                 "step_id": "do_login",
                                 "parameters": {"email": "attacker@mock.test", "password": "whatever"},
-                                "establishes_session": {"identity": "attacker", "token_json_path": "token"},
+                                "establishes_session": {"for_role": "main", "token_json_path": "token"},
                             },
                             {
                                 "type": "read_only",

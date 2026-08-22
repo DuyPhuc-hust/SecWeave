@@ -90,7 +90,9 @@ def test_action_spec_accepts_establishes_session_with_role_setup():
         target="https://x.example.com/login",
         description="d",
         role=ObservationRole.SETUP,
-        establishes_session=SessionEstablishingLogin(identity="victim", token_json_path="authentication.token"),
+        establishes_session=SessionEstablishingLogin(
+            for_role=ObservationRole.MAIN, token_json_path="authentication.token"
+        ),
     )
     assert action.establishes_session.token_json_path == "authentication.token"
     assert action.establishes_session.token_header == "Authorization"
@@ -108,7 +110,9 @@ def test_action_spec_rejects_establishes_session_with_role_main():
             target="https://x.example.com/login",
             description="d",
             role=ObservationRole.MAIN,
-            establishes_session=SessionEstablishingLogin(identity="victim", token_json_path="authentication.token"),
+            establishes_session=SessionEstablishingLogin(
+                for_role=ObservationRole.MAIN, token_json_path="authentication.token"
+            ),
         )
 
 
@@ -123,13 +127,19 @@ def test_action_spec_rejects_establishes_session_with_any_non_setup_role(role):
             target="https://x.example.com/login",
             description="d",
             role=role,
-            establishes_session=SessionEstablishingLogin(identity="victim", token_json_path="authentication.token"),
+            establishes_session=SessionEstablishingLogin(
+                for_role=ObservationRole.MAIN, token_json_path="authentication.token"
+            ),
         )
 
 
-def test_session_establishing_login_rejects_empty_identity():
+def test_session_establishing_login_rejects_for_role_setup():
+    # for_role=setup would resolve through the exact same role bucket this
+    # action's own (validator-enforced) role already occupies — the exact
+    # collision this field exists to avoid, the moment 2+ setup actions
+    # exist in the same plan.
     with pytest.raises(ValidationError):
-        SessionEstablishingLogin(identity="", token_json_path="token")
+        SessionEstablishingLogin(for_role=ObservationRole.SETUP, token_json_path="token")
 
 
 def test_session_establishing_login_rejects_empty_token_json_path():
@@ -139,7 +149,7 @@ def test_session_establishing_login_rejects_empty_token_json_path():
     # succeeds, no error, no session header ever attaches) despite the
     # field being declared required.
     with pytest.raises(ValidationError):
-        SessionEstablishingLogin(identity="attacker", token_json_path="")
+        SessionEstablishingLogin(for_role=ObservationRole.MAIN, token_json_path="")
 
 
 def test_action_spec_allows_role_setup_without_establishes_session():
