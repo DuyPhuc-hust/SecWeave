@@ -26,6 +26,12 @@ def _run_resume(args: argparse.Namespace) -> int:
         kill_switch.resume(actor=args.actor, authorization_reference=args.authorization_reference)
     except ValueError as exc:
         raise CliError(str(exc)) from exc
+    except RuntimeError as exc:
+        # resume()'s own audit-log write can fail (disk full, permission
+        # loss) AFTER this instance's in-memory status already flipped to
+        # RUNNING — same reasoning as _run_kill's identical RuntimeError
+        # handling: must not crash uncaught for this safety-critical path.
+        raise CliError(str(exc)) from exc
 
     print(f"-> execution '{args.execution_id}': resume")
     print(f"   status hiện tại: {kill_switch.status.value}")

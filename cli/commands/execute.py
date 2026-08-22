@@ -272,11 +272,21 @@ def _resolve_json_path(data: Any, path: str) -> Any:
 def _load_step_response_body(observation: NormalizedObservation) -> Any:
     """Reads back the REAL captured response body for an action tagged
     with step_id, so a later action can reference it. Raises ValueError
-    if the raw evidence has no response body at all, or the body isn't
-    JSON — a step_id was declared for a reason, so failing loudly now
-    (rather than deferring to whatever later action tries to reference
-    it) surfaces the real problem at the point it actually happened."""
-    raw = json.loads(Path(observation.raw_evidence_ref).read_text(encoding="utf-8"))
+    if the raw evidence has no response body at all, the body isn't JSON,
+    or the artifact can't be read back at all (file removed by a
+    concurrent process, a transient disk error) — a step_id was declared
+    for a reason, so failing loudly now (rather than deferring to whatever
+    later action tries to reference it) surfaces the real problem at the
+    point it actually happened. The caller (_run_execute) only catches
+    ValueError here, so an unreadable-artifact OSError must be re-raised
+    as one too, not allowed to escape as a raw, uncaught crash."""
+    try:
+        raw = json.loads(Path(observation.raw_evidence_ref).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(
+            f"observation '{observation.observation_id}' (step_id): không đọc lại được artifact tại "
+            f"'{observation.raw_evidence_ref}' — {type(exc).__name__}: {exc}."
+        ) from exc
     body = raw.get("response", {}).get("body")
     if body is None:
         raise ValueError(f"observation '{observation.observation_id}' (step_id) không có response body.")

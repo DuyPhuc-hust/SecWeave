@@ -230,7 +230,11 @@ def _run_measure(args: argparse.Namespace) -> int:
         kill_switch_log_path = execution_dir / "kill_switch_audit_log.jsonl"
         kill_switch_events: List[dict] = []
         if kill_switch_log_path.exists():
-            for line in kill_switch_log_path.read_text(encoding="utf-8").splitlines():
+            try:
+                kill_switch_lines = kill_switch_log_path.read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                raise CliError(f"không đọc được '{kill_switch_log_path}': {exc}") from exc
+            for line in kill_switch_lines:
                 if not line:
                     continue
                 try:
@@ -250,7 +254,10 @@ def _run_measure(args: argparse.Namespace) -> int:
 
         cost_log_path = execution_dir / "cost_audit_log.jsonl"
         if cost_log_path.exists():
-            cost_lines = [line for line in cost_log_path.read_text(encoding="utf-8").splitlines() if line]
+            try:
+                cost_lines = [line for line in cost_log_path.read_text(encoding="utf-8").splitlines() if line]
+            except OSError as exc:
+                raise CliError(f"không đọc được '{cost_log_path}': {exc}") from exc
             cap = None
             for line in reversed(cost_lines):
                 try:

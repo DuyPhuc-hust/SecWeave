@@ -1366,6 +1366,45 @@ def test_cli_resume_rejects_an_empty_execution_id(capsys, tmp_path):
     assert "--execution-id" in captured.err
 
 
+def test_cli_resume_fails_cleanly_when_the_audit_log_write_fails(capsys, tmp_path):
+    # Same shape as the analogous kill.py fix: resume()'s own audit-log
+    # write can fail (disk full, permission loss — forced here via a
+    # read-only file) AFTER this instance's in-memory status already
+    # flipped, surfacing as a RuntimeError that `_run_resume` used to only
+    # let escape uncaught (only ValueError was caught).
+    import os
+    import stat
+
+    from shared.kill_switch import KillSwitch, StopSource
+
+    storage_dir = str(tmp_path / "evidence")
+    execution_id = "exec_resume_write_fails"
+    kill_switch = KillSwitch(execution_id=execution_id, storage_dir=storage_dir)
+    kill_switch.start()
+    kill_switch.stop(source=StopSource.OPERATOR, reason="setup for test")
+
+    audit_log_path = kill_switch._audit_log_path
+    os.chmod(audit_log_path, stat.S_IREAD)
+    try:
+        exit_code = cli.main(
+            [
+                "resume",
+                "--execution-id",
+                execution_id,
+                "--storage-dir",
+                storage_dir,
+                "--authorization-reference",
+                "test",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "Traceback" not in captured.err
+        assert "error:" in captured.err
+    finally:
+        os.chmod(audit_log_path, stat.S_IREAD | stat.S_IWRITE)
+
+
 def test_cli_assemble_package_rejects_an_empty_execution_id(capsys, tmp_path):
     exit_code = cli.main(
         [
@@ -1876,6 +1915,40 @@ def test_cli_kill_stops_an_already_running_execution(capsys, tmp_path):
 
     kill_switch.refresh()
     assert kill_switch.status == ExecutionStatus.STOPPED  # now picks up the CLI's stop
+
+
+def test_cli_kill_fails_cleanly_when_the_audit_log_write_fails(capsys, tmp_path):
+    # stop()'s own audit-log write can fail (disk full, permission loss,
+    # or — as forced here — the log path unexpectedly being a directory)
+    # AFTER this instance's in-memory status already flipped — surfaces as
+    # a RuntimeError from KillSwitch.stop(), which `_run_kill` used to only
+    # catch ValueError around, letting it crash uncaught instead of the
+    # command's own error/exit-1 contract.
+    storage_dir = str(tmp_path / "evidence")
+    execution_id = "exec_kill_write_fails"
+    execution_dir = tmp_path / "evidence" / execution_id
+    execution_dir.mkdir(parents=True)
+    (execution_dir / "kill_switch_audit_log.jsonl").mkdir()
+
+    exit_code = cli.main(
+        [
+            "kill",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            storage_dir,
+            "--source",
+            "operator",
+            "--reason",
+            "manual test stop",
+            "--actor",
+            "test-operator",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "error:" in captured.err
 
 
 def test_cli_kill_rejects_automatic_threshold_without_a_reason(capsys, tmp_path):
@@ -3558,6 +3631,106 @@ def test_cli_execute_resolves_from_step_reference_into_a_later_actions_target(
     actions_on_disk = json.loads((storage_dir / execution_id / "actions.json").read_text())
     main_action = next(a for a in actions_on_disk if a["role"] == "main")
     assert main_action["target"] == "http://host.docker.internal:3000/notes/42"
+
+
+def test_cli_execute_from_step_fails_cleanly_when_the_source_artifact_cannot_be_reread(
+    capsys, monkeypatch, tmp_path
+):
+    # The step_id action's own response was already captured successfully
+    # (real cost/evidence recorded) before a LATER action's {{FROM_STEP:...}}
+    # reference tries to read that artifact back. If the artifact can't be
+    # re-read (removed by a concurrent process, a transient disk error) this
+    # used to escape as a raw, uncaught FileNotFoundError instead of the
+    # command's own error/exit-1 contract — the same "narrow except clause
+    # misses a real failure mode" class of bug this project has hit and
+    # fixed many times before.
+    import httpx
+
+    import evidence_harness.harness as harness_module
+
+    db_path = str(tmp_path / "test.db")
+    hypothesis_id = _create_stored_hypothesis(capsys, monkeypatch, db_path)
+    execution_id = "exec_from_step_unreadable_artifact"
+    storage_dir = tmp_path / "evidence"
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "hypothesis_id": hypothesis_id,
+                "plan_result": {
+                    "status": "planned",
+                    "plan": {
+                        "hypothesis_id": hypothesis_id,
+                        "actions": [
+                            {
+                                "type": "test_data_creation",
+                                "method": "POST",
+                                "target": "http://host.docker.internal:3000/notes",
+                                "description": "Seed a note; the server assigns its real id.",
+                                "role": "setup",
+                                "step_id": "seed_note",
+                                "parameters": {"content": "hello"},
+                            },
+                            {
+                                "type": "read_only",
+                                "method": "GET",
+                                "target": "http://host.docker.internal:3000/notes/{{FROM_STEP:seed_note:id}}",
+                                "description": "Read back exactly the note just created.",
+                                "role": "main",
+                            },
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/notes":
+            return httpx.Response(200, json={"id": 42})
+        return httpx.Response(200, json={"ok": True})
+
+    _patch_evidence_harness_transport(monkeypatch, handler)
+
+    real_capture = harness_module.EvidenceHarness.capture
+
+    def capture_then_delete_seed_note_artifact(self, action, *args, **kwargs):
+        observation = real_capture(self, action, *args, **kwargs)
+        if action.target == "http://host.docker.internal:3000/notes":
+            Path(observation.raw_evidence_ref).unlink()
+        return observation
+
+    monkeypatch.setattr(harness_module.EvidenceHarness, "capture", capture_then_delete_seed_note_artifact)
+
+    exit_code = cli.main(
+        [
+            "execute",
+            "--hypothesis-id",
+            hypothesis_id,
+            "--plan-file",
+            str(plan_file),
+            "--allowed-action",
+            "POST http://host.docker.internal:3000/notes params:content",
+            "--allowed-action",
+            "GET http://host.docker.internal:3000/notes/{id}",
+            "--target-id",
+            "tgt_test",
+            "--target-revision-id",
+            "rev_test",
+            "--execution-id",
+            execution_id,
+            "--storage-dir",
+            str(storage_dir),
+            "--context-db",
+            db_path,
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "seed_note" in captured.err or "step_id" in captured.err
 
 
 def test_cli_execute_from_step_preserves_the_referenced_values_own_type_in_parameters(
@@ -6072,6 +6245,41 @@ def test_cli_measure_fails_cleanly_when_actions_json_top_level_is_not_a_list(cap
     assert exit_code == 1
     assert "Traceback" not in captured.err
     assert "danh sách ActionSpec" in captured.err
+
+
+def test_cli_measure_fails_cleanly_when_kill_switch_log_cannot_be_read(capsys, tmp_path):
+    # kill_switch_audit_log.jsonl passing .exists() doesn't guarantee
+    # .read_text() succeeds (permission change, transient disk error, or —
+    # as forced here — the path unexpectedly being a directory). This used
+    # to escape as a raw, uncaught OSError instead of the command's own
+    # error/exit-1 contract, the same "narrow except clause misses a real
+    # failure mode" class of bug this project has hit and fixed many times
+    # (httpx.InvalidURL, a closed EvidenceHarness client's RuntimeError).
+    storage_dir = tmp_path / "evidence"
+    execution_dir = storage_dir / "exec_bad_kill_switch_log"
+    execution_dir.mkdir(parents=True)
+    (execution_dir / "actions.json").write_text("[]", encoding="utf-8")
+    (execution_dir / "kill_switch_audit_log.jsonl").mkdir()
+    exit_code = cli.main(
+        ["measure", "--execution-id", "exec_bad_kill_switch_log", "--storage-dir", str(storage_dir)]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "kill_switch_audit_log.jsonl" in captured.err
+
+
+def test_cli_measure_fails_cleanly_when_cost_audit_log_cannot_be_read(capsys, tmp_path):
+    storage_dir = tmp_path / "evidence"
+    execution_dir = storage_dir / "exec_bad_cost_log"
+    execution_dir.mkdir(parents=True)
+    (execution_dir / "actions.json").write_text("[]", encoding="utf-8")
+    (execution_dir / "cost_audit_log.jsonl").mkdir()
+    exit_code = cli.main(["measure", "--execution-id", "exec_bad_cost_log", "--storage-dir", str(storage_dir)])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.err
+    assert "cost_audit_log.jsonl" in captured.err
 
 
 def test_cli_measure_warns_explicitly_when_reproducibility_cross_check_finds_no_matching_execution_dir(

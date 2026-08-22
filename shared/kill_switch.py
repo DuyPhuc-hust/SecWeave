@@ -440,7 +440,21 @@ class KillSwitch:
     def _read_audit_log_raw(self) -> Tuple[List[dict], bool]:
         if not self._audit_log_path.exists():
             return [], False
-        lines = self._audit_log_path.read_text(encoding="utf-8").splitlines()
+        try:
+            lines = self._audit_log_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            # Passing .exists() doesn't guarantee a subsequent read
+            # succeeds (permission change, transient disk error) — this is
+            # called from EVERY entry point (__init__, refresh, start,
+            # stop, resume) via _recover_from_audit_log, so leaving it
+            # unprotected would let a single unreadable file crash the
+            # kill switch itself uncaught, exactly the "safety mechanism
+            # that can't be instantiated/operated" failure this function's
+            # own corrupted-line handling already exists to avoid. Treated
+            # the same way as a corrupted line: zero trustworthy entries,
+            # signalling the caller to fail safe to STOPPED rather than
+            # assume PREPARED/RUNNING from a log it couldn't actually read.
+            return [], True
         entries: List[dict] = []
         had_corrupt_line = False
         for line in lines:

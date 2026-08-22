@@ -51,6 +51,15 @@ def _run_kill(args: argparse.Namespace) -> int:
         )
     except ValueError as exc:
         raise CliError(str(exc)) from exc
+    except RuntimeError as exc:
+        # stop()'s own audit-log write can fail (disk full, permission
+        # loss) AFTER this instance's in-memory status already flipped to
+        # STOPPED — for an emergency-stop command specifically, silently
+        # crashing here would be worse than a normal command failing: the
+        # operator would have no way to tell "the stop never took effect"
+        # from "the stop worked but couldn't be durably recorded, so a
+        # separate running `execute` process won't see it via refresh()".
+        raise CliError(str(exc)) from exc
 
     print(f"-> execution '{args.execution_id}': {event.event.value}")
     print(f"   status hiện tại: {kill_switch.status.value}")

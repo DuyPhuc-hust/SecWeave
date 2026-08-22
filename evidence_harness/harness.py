@@ -1318,7 +1318,24 @@ class EvidenceHarness:
         if not token_json_path:
             return observation
 
-        raw = json.loads(Path(observation.raw_evidence_ref).read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(Path(observation.raw_evidence_ref).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            # capture() above already succeeded and durably wrote this
+            # artifact — this re-read is login()'s OWN internal step to
+            # look at the response body for token extraction. A failure
+            # here (file removed by a concurrent process, a transient disk
+            # error, an unexpectedly corrupted write) is an infrastructure
+            # problem, not a "bad response" one — the observation capture()
+            # returned is still valid and must still reach the caller via
+            # this exception (same reasoning as the 3 extraction-failure
+            # cases below), just without a redaction rewrite: with no
+            # readable `raw` dict, there is nothing here to safely rewrite.
+            raise LoginTokenExtractionError(
+                f"login() cho identity '{identity}': không đọc lại được artifact vừa ghi tại "
+                f"'{observation.raw_evidence_ref}' để trích token — {type(exc).__name__}: {exc}.",
+                observation=observation,
+            ) from exc
         response_body = raw.get("response", {}).get("body")
         if response_body is None:
             raise LoginTokenExtractionError(

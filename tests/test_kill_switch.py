@@ -366,6 +366,28 @@ def test_recovery_fails_safe_to_stopped_when_the_audit_log_has_a_corrupted_line(
     assert len(ks2.read_audit_log()) == 1
 
 
+def test_recovery_fails_safe_to_stopped_when_the_audit_log_cannot_be_read(tmp_path):
+    # The audit log passing .exists() doesn't guarantee a subsequent read
+    # succeeds (permission change, transient disk error, or — as forced
+    # here — the path unexpectedly being a directory). This is called from
+    # EVERY entry point (__init__, refresh, start, stop, resume) via
+    # _recover_from_audit_log, so it used to crash with a raw, uncaught
+    # OSError just from CONSTRUCTING a KillSwitch — the same "a safety
+    # mechanism that can't be instantiated is worse than one that recovers
+    # conservatively" concern the corrupted-line handling above already
+    # exists for, just for a different root cause (unreadable, not
+    # unparseable).
+    execution_id = "exec_unreadable_log"
+    execution_dir = tmp_path / execution_id
+    execution_dir.mkdir(parents=True)
+    (execution_dir / "kill_switch_audit_log.jsonl").mkdir()
+
+    kill_switch = KillSwitch(execution_id=execution_id, storage_dir=str(tmp_path))
+    assert kill_switch.status == ExecutionStatus.STOPPED
+    assert kill_switch.is_stopped is True
+    assert kill_switch.read_audit_log() == []
+
+
 def test_recovery_fails_safe_to_stopped_when_a_valid_json_line_is_missing_required_keys(tmp_path):
     # Real gap found via independent review: a line can be VALID JSON yet
     # still not a usable StopEvent — e.g. a log written by an older version

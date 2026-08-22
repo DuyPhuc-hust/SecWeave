@@ -622,6 +622,45 @@ def test_login_raises_clean_error_on_non_json_response_body(tmp_path):
         )
 
 
+def test_login_raises_clean_error_when_artifact_cannot_be_reread(tmp_path):
+    # capture() above already succeeded (real cost charged, real evidence
+    # written) before login() re-reads its own just-written artifact to
+    # extract the token. If that re-read fails (file removed by a
+    # concurrent process, a transient disk error) it used to escape as a
+    # raw, uncaught OSError/FileNotFoundError with no context — same
+    # "narrow except clause misses a real failure mode" class of bug this
+    # project has hit and fixed before (httpx.InvalidURL, a closed-client
+    # RuntimeError). Must degrade to the same clean LoginTokenExtractionError
+    # every other login() failure does, carrying the real observation.
+    import os
+
+    import pytest
+
+    from evidence_harness.harness import LoginTokenExtractionError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"token": "abc"})
+
+    harness = _harness_with_isolated_identities(tmp_path, handler)
+    original_capture = harness.capture
+
+    def capture_then_delete_artifact(*args, **kwargs):
+        observation = original_capture(*args, **kwargs)
+        os.remove(observation.raw_evidence_ref)
+        return observation
+
+    harness.capture = capture_then_delete_artifact
+
+    with pytest.raises(LoginTokenExtractionError) as exc_info:
+        harness.login(
+            "alice",
+            _action(method="POST", target="https://target.example.com/login"),
+            token_json_path="token",
+        )
+    assert exc_info.value.observation is not None
+    assert exc_info.value.observation.role.value == "setup"
+
+
 def test_login_extracts_token_from_a_list_index_path(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"tokens": [{"value": "jwt-from-list"}]})
